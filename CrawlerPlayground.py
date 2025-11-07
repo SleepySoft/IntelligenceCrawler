@@ -917,6 +917,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         """Centralize all signal/slot connections."""
         # Top Bar
         self.url_input.lineEdit().returnPressed.connect(self.start_channel_discovery)
+        self.url_input.lineEdit().textChanged.connect(self.on_url_input_changed)
         self.analyze_button.clicked.connect(self.start_channel_discovery)
 
         # Tree
@@ -993,22 +994,37 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.log_history_view.append(message)
 
     # --- Threaded Action Starters ---
-
     def start_channel_discovery(self):
         """Slot for 'Discover Channels' button."""
-        url = self.url_input.currentText().strip()
-        if not url:
-            self.status_bar.showMessage("Error: Please enter a URL.")
+
+        # 1. 获取完整的输入文本
+        url_input_text = self.url_input.currentText().strip()
+        if not url_input_text:
+            self.status_bar.showMessage("Error: Please enter a URL or list of URLs.")
             return
 
-        if not url.startswith("http"):
-            url = "https://" + url
-            self.url_input.setText(url)
+        # 2. 拆分文本以检查是否存在多个 URL
+        potential_urls = url_input_text.split()
+        http_urls = [u for u in potential_urls if u.startswith("http")]
 
+        # 3. 确定用于 Worker 的 "单个" URL
+        # (这只在Sitemap或RSS单URL模式下使用)
+        homepage_url_for_worker = url_input_text
+        if not http_urls:
+            # 可能是 'example.com'，为其添加 'https://'
+            homepage_url_for_worker = "https://" + url_input_text
+            self.url_input.setText(homepage_url_for_worker)
+        elif len(http_urls) == 1:
+            # 确保我们只使用干净的 URL，即使用户粘贴了带空格的单个 URL
+            homepage_url_for_worker = http_urls[0]
+            if homepage_url_for_worker != url_input_text:
+                self.url_input.setText(homepage_url_for_worker)
+
+        # 4. 清理 UI 并保存历史
         self.clear_all_controls()
-        self._save_url_history(url)
+        self._save_url_history(self.url_input.currentText())  # 保存（可能）修改后的文本
 
-        # --- Get values from new date controls ---
+        # --- 获取日期过滤器设置 ---
         start_date: Optional[datetime.datetime] = None
         end_date: Optional[datetime.datetime] = None
 
@@ -1016,17 +1032,41 @@ class CrawlerPlaygroundApp(QMainWindow):
             days_ago = self.date_filter_days_spin.value()
             end_date = datetime.datetime.now()
             start_date = end_date - datetime.timedelta(days=days_ago)
-            # Log the filter being used
             self.append_log_history(f"Applying date filter: Last {days_ago} days "
                                     f"(since {start_date.strftime('%Y-%m-%d')})")
+        # --- 结束日期设置 ---
 
-        # Store the selected strategy names and options
+        # 5. 存储策略
         self.discoverer_name = self.discoverer_combo.currentText()
         self.discovery_fetcher_name = self.discovery_fetcher_combo.currentText()
         self.pause_browser = self.pause_browser_check.isChecked()
         self.render_page = self.render_page_check.isChecked()
 
-        self.set_loading_state(True, f"Discovering {self.discoverer_name} channels for {url}...")
+        # --- 6. (核心) 逻辑分流 / Bypass ---
+        if self.discoverer_name == "RSS" and len(http_urls) > 1:
+            self.append_log_history(f"[Info] RSS mode: Detected {len(http_urls)} URLs in input.")
+            self.append_log_history("Bypassing discovery, treating input as a direct channel list.")
+
+            self.set_loading_state(True, f"Loading {len(http_urls)} RSS channels...")
+            self.update_generated_code()  # 更新代码片段
+
+            # 我们需要使用 QTimer 来延迟调用，
+            # 以便 UI 能够首先更新到 "Loading..." 状态。
+
+            # 直接调用 *结果* 处理函数，跳过 Worker
+            QTimer.singleShot(10, lambda: self.on_channel_discovery_result(http_urls))
+            # 别忘了调用 *完成* 处理函数
+            QTimer.singleShot(20, lambda: self.on_channel_discovery_finished())
+
+            return  # <-- 在此退出，不启动 Worker
+        # --- 结束逻辑分流 ---
+
+        # 7. (原始逻辑) 启动 Worker
+        # 如果代码执行到这里，说明是：
+        # - Sitemap 模式 (http_urls 长度不重要)
+        # - RSS 模式 且 只有 0 或 1 个 URL (交由 Worker 处理 Mode A 或 B)
+
+        self.set_loading_state(True, f"Discovering {self.discoverer_name} channels for {homepage_url_for_worker}...")
         self.update_generated_code()  # Update code snippet
 
         proxy_str = self.discovery_proxy_input.text().strip() or None
@@ -1035,7 +1075,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         worker = ChannelDiscoveryWorker(
             discoverer_name=self.discoverer_name,
             fetcher_name=self.discovery_fetcher_name,
-            homepage_url=url,
+            homepage_url=homepage_url_for_worker,  # <--- 使用我们处理过的 URL
             start_date=start_date,
             end_date=end_date,
             proxy=proxy_str,
@@ -1270,6 +1310,31 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.set_loading_state(False, f"Error occurred. {message}")
 
     # --- UI Event Handlers ---
+
+    def on_url_input_changed(self, text: str):
+        """
+        Slot to normalize multi-line pastes in the URL bar *only* for RSS mode.
+        (槽函数：仅在 RSS 模式下规范化 URL 栏中的多行粘贴。)
+        """
+
+        # 仅当 "RSS" 被选中时才启用此功能
+        if self.discoverer_combo.currentText() != "RSS":
+            return
+
+        # 检查是否存在换行符，这通常意味着多行粘贴
+        if '\n' in text or '\r' in text:
+            self.append_log_history("[Info] Multi-line paste detected. Normalizing to space-separated list.")
+
+            # 规范化：按任何空白（包括换行）拆分，然后用单个空格连接
+            normalized_text = " ".join(text.split())
+
+            # 阻止信号以防止无限递归
+            self.url_input.lineEdit().blockSignals(True)
+            self.url_input.lineEdit().setText(normalized_text)
+            self.url_input.lineEdit().blockSignals(False)
+
+            # 将光标移到末尾
+            self.url_input.lineEdit().end(False)
 
     def on_tree_item_clicked(self, item: QTreeWidgetItem, column: int):
         """Handles clicks on any tree item (channel or article)."""
