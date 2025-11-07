@@ -66,16 +66,18 @@ class IDiscoverer(ABC):
 
     @abstractmethod
     def discover_channels(self,
-                          entry_point_url: str,
+                          entry_point: Any,  # <-- [MODIFIED] 更改为 Any
                           start_date: Optional[datetime.datetime] = None,
                           end_date: Optional[datetime.datetime] = None
                           ) -> List[str]:
         """
         Stage 1: Discovers all "channels" (e.g., leaf sitemaps, RSS feeds)
-        from a main entry point (e.g., a homepage).
-        (阶段1：从主入口点（例如主页）发现所有“频道”（例如叶子sitemap、RSS feed）)
+        from a main entry point.
+        (阶段1：从主入口点发现所有“频道”（例如叶子sitemap、RSS feed）)
 
-        :param entry_point_url: The starting URL (e.g., https://example.com)
+        :param entry_point: The entry point for discovery. The type depends
+                            on the concrete implementation (e.g., a URL string
+                            for Sitemap, a URL string OR a List[str] for RSS).
         :param start_date: (Optional) Filter to include only channels
                            relevant *after* this date.
         :param end_date: (Optional) Filter to include only channels
@@ -331,16 +333,24 @@ class SitemapDiscoverer(IDiscoverer):
         return {'pages': pages, 'sub_sitemaps': sub_sitemaps}
 
     def discover_channels(self,
-                          homepage_url: str,
-                          start_date: Optional[datetime.datetime] = datetime.datetime.now() - datetime.timedelta(days=7),
+                          entry_point: Any,
+                          start_date: Optional[datetime.datetime] = datetime.datetime.now() - datetime.timedelta(
+                              days=7),
                           end_date: Optional[datetime.datetime] = datetime.datetime.now()) -> List[str]:
         """
         STAGE 1: Discover all "channels" (leaf sitemaps containing articles).
 
-        :param homepage_url: The root URL of the website.
+        :param entry_point: The root URL of the website (MUST be a string).
         :param start_date: (Optional) The earliest date to include sitemaps from.
         :param end_date: (Optional) The latest date to include sitemaps from.
         """
+        if not isinstance(entry_point, str):
+            self._log(f"[Error] SitemapDiscoverer requires a string URL as an entry_point. Got {type(entry_point)}.")
+            return []
+
+        homepage_url = entry_point
+        # --- [END NEW] ---
+
         self._log(f"--- STAGE 1: Discovering Channels for {homepage_url} ---")
         if start_date or end_date:
             self._log(
@@ -368,7 +378,6 @@ class SitemapDiscoverer(IDiscoverer):
             if sitemap_url in self.processed_sitemaps:
                 continue
             self.processed_sitemaps.add(sitemap_url)
-
 
             # 在抓取(fetch)之前，先检查 URL 字符串本身
             if not self._check_url_against_date_range(sitemap_url, start_date, end_date):
@@ -670,9 +679,11 @@ class RSSDiscoverer(IDiscoverer):
     Implements the IDiscoverer interface for finding articles via
     RSS and Atom feeds.
 
-    Stage 1 (discover_channels): Scrapes a homepage to find <link> tags
-    pointing to RSS/Atom feeds. **If given a feed URL directly, it
-    returns that URL.**
+    Stage 1 (discover_channels): Acts as a dispatcher based on the
+    type of 'entry_point'.
+      - If entry_point is List[str]: Uses them as a direct list of feeds.
+      - If entry_point is str: Scrapes a homepage to find <link> tags
+        OR treats the string as a direct feed URL.
 
     Stage 2 (get_articles_for_channel): Fetches a single RSS/Atom feed URL
     and parses it to extract all article links.
@@ -709,31 +720,40 @@ class RSSDiscoverer(IDiscoverer):
         if self.verbose:
             print(log_msg)
 
-    def discover_channels(self,
-                          entry_point_url: str,
-                          start_date: Optional[datetime.datetime] = None,
-                          end_date: Optional[datetime.datetime] = None
-                          ) -> List[str]:
+    def _handle_direct_list(self, feed_urls: List[str]) -> List[str]:
         """
-        STAGE 1: Discovers all RSS/Atom feed URLs ("channels") from a homepage.
-
-        It fetches the homepage, parses its HTML, and looks for
-        <link rel="alternate"> tags matching known feed types.
-
-        **MODIFICATION:** This function now also detects if the entry_point_url
-        is *already* an RSS/Atom feed. If so, it returns it directly.
-
-        :param entry_point_url: The homepage URL (e.g., https://example.com)
-                                 OR a direct feed URL (e.g., https://example.com/feed.xml)
-        :param start_date: (Optional) Ignored by this discoverer.
-        :param end_date: (Optional) Ignored by this discoverer.
-        :return: A list of discovered RSS/Atom feed URLs.
+        Handles the "direct use" case where a list of feeds is provided.
+        (处理“直接使用”模式，即提供了一个 feed 列表)
         """
-        self._log(f"--- STAGE 1: Discovering RSS Channels for {entry_point_url} ---")
+        self._log(f"--- STAGE 1: Using direct list of {len(feed_urls)} RSS feeds ---")
+        self.log_messages.clear()
+        found_feeds_set: Set[str] = set()
+
+        for url in feed_urls:
+            if isinstance(url, str) and url.strip():
+                abs_url = url.strip()
+                found_feeds_set.add(abs_url)
+                self._log(f"  > Added direct feed: {abs_url}", 1)
+            else:
+                self._log(f"  > [Warning] Skipping non-string item in feed list: {url}", 1)
+
+        self._log(f"\nStage 1 Complete: Confirmed {len(found_feeds_set)} direct RSS channels.")
+        return list(found_feeds_set)
+
+    # --- [NEW] (Logic moved from old discover_channels) ---
+    def _handle_single_url(self,
+                           entry_point_url: str,
+                           start_date: Optional[datetime.datetime] = None,
+                           end_date: Optional[datetime.datetime] = None
+                           ) -> List[str]:
+        """
+        Handles the "discovery" case from a single URL (homepage or feed).
+        (处理“发现”模式，即从单个URL（主页或feed）开始)
+        """
+        self._log(f"--- STAGE 1: Discovering RSS Channels from {entry_point_url} ---")
         if start_date or end_date:
             self._log("[Info] 'start_date' and 'end_date' are ignored by RSSDiscoverer.", 1)
 
-        self.log_messages.clear()
         found_feeds_set: Set[str] = set()
 
         # 1. Fetch the content
@@ -749,7 +769,6 @@ class RSSDiscoverer(IDiscoverer):
             return []
 
         # 2. Check if the content is XML *before* trying to parse as HTML
-        # We strip leading whitespace to check the start of the document
         content_start_check = content_str.lstrip()
         if content_start_check.startswith(('<?xml', '<rss', '<feed')):
             self._log(f"Input URL appears to be an XML feed directly.", 1)
@@ -794,6 +813,44 @@ class RSSDiscoverer(IDiscoverer):
 
         self._log(f"\nStage 1 Complete: Discovered {len(found_feeds_set)} total RSS channels.")
         return list(found_feeds_set)
+
+    # --- (This is now a dispatcher) ---
+    def discover_channels(self,
+                          entry_point: Any,  # <-- 适配新接口
+                          start_date: Optional[datetime.datetime] = None,
+                          end_date: Optional[datetime.datetime] = None
+                          ) -> List[str]:
+        """
+        STAGE 1: Discovers all RSS/Atom feed URLs ("channels").
+        This method is a dispatcher.
+
+        - If 'entry_point' is a list:
+          It treats it as a direct list of feed URLs.
+          (Mode: "Directly use existing RSS Feeds")
+
+        - If 'entry_point' is a string:
+          It scrapes the URL as a homepage or treats it as a single feed.
+          (Mode: "Discover RSS")
+
+        :param entry_point: A homepage URL (str) OR a direct list of
+                            feed URLs (List[str]).
+        :param start_date: (Optional) Ignored by this discoverer.
+        :param end_date: (Optional) Ignored by this discoverer.
+        :return: A list of discovered RSS/Atom feed URLs.
+        """
+        self.log_messages.clear()
+
+        if isinstance(entry_point, list):
+            # --- "直接使用现成的RSS Feeds" 模式 ---
+            return self._handle_direct_list(entry_point)
+
+        elif isinstance(entry_point, str):
+            # --- "发现RSS" 模式 ---
+            return self._handle_single_url(entry_point, start_date, end_date)
+
+        else:
+            self._log(f"[Error] Invalid entry_point type: {type(entry_point)}. Must be str or List[str].")
+            return []
 
     def get_articles_for_channel(self, channel_url: str) -> List[str]:
         """
