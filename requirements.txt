@@ -32,3 +32,6 @@ html2text               # For converting the final extracted HTML into clean Mar
 pydantic                # For data validation and settings management (used for ExtractionResult).
 python-dateutil         # For robustly parsing dates from metadata and feeds (date_parse).
 typing-extensions       # Backports for newer Python typing features (like TypeAlias).
+
+pyqt5
+PyQtWebEngine

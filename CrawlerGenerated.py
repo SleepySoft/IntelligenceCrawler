@@ -4,25 +4,20 @@ from IntelligenceCrawler.CrawlPipeline import *
 
 def run_pipeline():
     # === 1. Initialize Components ===
-    d_fetcher = RequestsFetcher(log_callback=log_cb, proxy=None, timeout_s=10)
-    e_fetcher = RequestsFetcher(log_callback=log_cb, proxy=None, timeout_s=20)
+    d_fetcher = RequestsFetcher(log_callback=log_cb, proxy='http://127.0.0.1:10809', timeout_s=10)
+    e_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy='http://127.0.0.1:10809', timeout_s=20, stealth=True, pause_browser=False, render_page=True)
     discoverer = SitemapDiscoverer(fetcher=d_fetcher, verbose=True)
-    extractor = Crawl4AIExtractor(verbose=True)
+    extractor = TrafilaturaExtractor(verbose=True)
     
     # === 2. Define Parameters ===
-    entry_point = 'http://www.people.com.cn/'
-    start_date = None
-    end_date = None
+    entry_point = 'https://tass.com/'
+    days_ago = 7
+    end_date = datetime.datetime.now()
+    start_date = end_date - datetime.timedelta(days=days_ago)
     extractor_kwargs = {}
     channel_filter_list = [
-        'ah/news_sitemap.xml',
-        'ent/news_sitemap.xml',
-        'gz/news_sitemap.xml',
-        'nx/news_sitemap.xml',
-        'sn/news_sitemap.xml',
-        'society/news_sitemap.xml',
-        'theory/news_sitemap.xml',
-        'xj/news_sitemap.xml',
+        'sitemap/sitemap_hot.xml',
+        'sitemap/sitemap_section.xml',
     ]
 
     # === 3. Build pipeline ===

@@ -15,11 +15,6 @@ from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional
 
 # --- Core Component Imports ---
-# Assuming a file structure like:
-# IntelligenceCrawler/
-#   Discoverer.py (contains IDiscoverer, SitemapDiscoverer, RSSDiscoverer)
-#   Fetcher.py (contains Fetcher, RequestsFetcher, PlaywrightFetcher)
-#   Extractor.py (contains IExtractor, TrafilaturaExtractor, etc.)
 
 try:
     from IntelligenceCrawler.Fetcher import Fetcher, PlaywrightFetcher, RequestsFetcher
@@ -135,6 +130,10 @@ except ImportError:
     print("Error: PyQtWebEngine not found. Web preview will be disabled.")
     QWebEngineView = None
     QUrl = None
+
+
+SETTING_ORG = 'SleepySoft'
+SETTING_APP = 'CrawlerPlayground'
 
 
 # =============================================================================
@@ -548,6 +547,9 @@ class CrawlerPlaygroundApp(QMainWindow):
         # --- NEW: Settings for URL History ---
         self.URL_HISTORY_KEY = "discovery_url_history"
         self.MAX_URL_HISTORY = 25
+        # --- NEW: Settings for Proxy History (REQ 1) ---
+        self.DISCOVERY_PROXY_KEY = "discovery_proxy_history"
+        self.ARTICLE_PROXY_KEY = "article_proxy_history"
 
         # --- Initialize UI ---
         self.init_ui()
@@ -555,7 +557,24 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.connect_signals()  # Centralize signal connections
         self.setWindowTitle("Crawler Playground (v4.0)")
         self.setWindowIcon(QIcon.fromTheme("internet-web-browser"))
-        self.setGeometry(100, 100, 1400, 900)
+
+        # --- MODIFICATION (REQ 3): HiDPI-aware window sizing ---
+        # Replace fixed self.setGeometry(100, 100, 1400, 900)
+        try:
+            # Get 80% of the *available* screen geometry (respects taskbars)
+            screen_geometry = QApplication.primaryScreen().availableGeometry()
+            self.setGeometry(
+                screen_geometry.x() + screen_geometry.width() * 0.1,
+                screen_geometry.y() + screen_geometry.height() * 0.1,
+                screen_geometry.width() * 0.8,
+                screen_geometry.height() * 0.8
+            )
+        except Exception as e:
+            # Fallback for any error (e.g., no screen found)
+            print(f"Could not get screen geometry, falling back to fixed size. Error: {e}")
+            self.setGeometry(100, 100, 1400, 900)
+        # --- END MODIFICATION ---
+
         self.update_generated_code()  # Show initial code
 
     def init_ui(self):
@@ -567,59 +586,62 @@ class CrawlerPlaygroundApp(QMainWindow):
         main_layout.setContentsMargins(10, 10, 10, 10)
 
         # --- 1. Top URL Input Bar (Refactored) ---
-        top_bar_layout = QHBoxLayout()
-        top_bar_layout.setSpacing(10)
+        # --- MODIFICATION (REQ 2): Split into two rows ---
 
-        # --- MODIFICATION: Replace QLineEdit with QComboBox ---
+        # --- Row 1: URL, Discoverer, Date, and Action Button ---
+        top_bar_row1_layout = QHBoxLayout()
+        top_bar_row1_layout.setSpacing(10)
+
         self.url_input = QComboBox()
         self.url_input.setEditable(True)
         self.url_input.setPlaceholderText("Enter website homepage URL (e.g., https://www.example.com)")
         self.url_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
-        # Connect 'Enter' key press in the editable line edit
         self.url_input.lineEdit().returnPressed.connect(self.start_channel_discovery)
-
-        # --- NEW: Add Context Menu for clearing history ---
         self.url_input.setContextMenuPolicy(Qt.CustomContextMenu)
         self.url_input.customContextMenuRequested.connect(self._show_url_history_context_menu)
+        top_bar_row1_layout.addWidget(self.url_input, 1)  # Give it stretch factor 1
 
-        top_bar_layout.addWidget(self.url_input, 1)  # Give it stretch
-
-        # --- REQ 1: Discoverer Dropdown ---
-        top_bar_layout.addWidget(QLabel("Discoverer:"))
+        top_bar_row1_layout.addWidget(QLabel("Discoverer:"))
         self.discoverer_combo = QComboBox()
         self.discoverer_combo.addItems(["Sitemap", "RSS", "Smart Analysis (WIP)"])
         if "RSSDiscoverer" not in globals():
             self.discoverer_combo.model().item(1).setEnabled(False)
         self.discoverer_combo.model().item(2).setEnabled(False)  # WIP
-        # --- MODIFICATION: Add ToolTip to explain behavior ---
         self.discoverer_combo.setToolTip(
             "Select the discovery method:\n"
             "- Sitemap: Finds sitemap.xml from the homepage.\n"
             "- RSS: Finds <link rel='alternate'> RSS feeds from the homepage.\n\n"
             "In both cases, enter the homepage URL."
         )
-        top_bar_layout.addWidget(self.discoverer_combo)
+        top_bar_row1_layout.addWidget(self.discoverer_combo)
 
-        # --- NEW: Date Period Refactor (Request 1) ---
         self.date_filter_check = QCheckBox("Filter last:")
         self.date_filter_check.setToolTip("If checked, only discover channels/articles updated within the last X days.")
-        top_bar_layout.addWidget(self.date_filter_check)
+        top_bar_row1_layout.addWidget(self.date_filter_check)
 
         self.date_filter_days_spin = QSpinBox()
         self.date_filter_days_spin.setRange(1, 9999)
         self.date_filter_days_spin.setValue(7)
         self.date_filter_days_spin.setSuffix(" days")
         self.date_filter_days_spin.setEnabled(False)  # Disabled by default
-        top_bar_layout.addWidget(self.date_filter_days_spin)
-
-        # Connect checkbox to enable/disable the spinbox
+        top_bar_row1_layout.addWidget(self.date_filter_days_spin)
         self.date_filter_check.stateChanged.connect(
             lambda state: self.date_filter_days_spin.setEnabled(state == Qt.Checked)
         )
 
-        # --- Discovery Fetcher Strategy (Original) ---
-        top_bar_layout.addWidget(QLabel("Fetcher:"))
+        top_bar_row1_layout.addSpacing(15)
+
+        self.analyze_button = QPushButton("Discover Channels")  # Renamed
+        self.analyze_button.setStyleSheet("padding: 5px 10px;")  # Add padding
+        top_bar_row1_layout.addWidget(self.analyze_button)
+
+        main_layout.addLayout(top_bar_row1_layout)  # Add Row 1
+
+        # --- Row 2: Fetcher Options and Proxy ---
+        top_bar_row2_layout = QHBoxLayout()
+        top_bar_row2_layout.setSpacing(10)
+
+        top_bar_row2_layout.addWidget(QLabel("Discovery Fetcher:"))
         self.discovery_fetcher_combo = QComboBox()
         self.discovery_fetcher_combo.addItems([
             "Simple (Requests)",
@@ -631,47 +653,45 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.discovery_fetcher_combo.model().item(2).setEnabled(False)
         if not sync_stealth and not Stealth:
             self.discovery_fetcher_combo.model().item(2).setEnabled(False)
-        top_bar_layout.addWidget(self.discovery_fetcher_combo)
+        top_bar_row2_layout.addWidget(self.discovery_fetcher_combo)
 
-        # --- Fetcher Option Checkboxes (Original) ---
         self.pause_browser_check = QCheckBox("Pause Browser")
         self.pause_browser_check.setToolTip("Pauses Playwright (in headful mode) for debugging.")
-        top_bar_layout.addWidget(self.pause_browser_check)
+        top_bar_row2_layout.addWidget(self.pause_browser_check)
 
         self.render_page_check = QCheckBox("Render Page")
         self.render_page_check.setToolTip(
             "Fetches final rendered HTML (slower).\n"
             "[Discovery] Will be forced OFF to ensure XML/RSS parsing.\n"
             "[Extraction] Will be used as set.")
-        top_bar_layout.addWidget(self.render_page_check)
+        top_bar_row2_layout.addWidget(self.render_page_check)
 
-        top_bar_layout.addSpacing(5)  # Add small space
-        top_bar_layout.addWidget(QLabel("Timeout(s):"))
+        top_bar_row2_layout.addSpacing(5)
+        top_bar_row2_layout.addWidget(QLabel("Timeout(s):"))
         self.discovery_timeout_spin = QSpinBox()
         self.discovery_timeout_spin.setRange(1, 300)  # 1s to 5min
         self.discovery_timeout_spin.setValue(10)  # Default 10
         self.discovery_timeout_spin.setToolTip("Fetcher timeout in seconds for discovery.")
-        top_bar_layout.addWidget(self.discovery_timeout_spin)
+        top_bar_row2_layout.addWidget(self.discovery_timeout_spin)
 
-        top_bar_layout.addSpacing(15)  # Add larger space
+        top_bar_row2_layout.addSpacing(15)
 
-        # --- NEW: Discovery Proxy Input ---
-
-        top_bar_layout.addWidget(QLabel("Proxy:"))
+        top_bar_row2_layout.addWidget(QLabel("Proxy:"))
         self.discovery_proxy_input = QLineEdit()
         self.discovery_proxy_input.setPlaceholderText("e.g., http://user:pass@host:port")
         self.discovery_proxy_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-        top_bar_layout.addWidget(self.discovery_proxy_input)
 
-        # --- MODIFICATION: Use addStretch with a factor ---
-        # The url_input has stretch 1, this will take up remaining space
-        top_bar_layout.addStretch(1)
+        # --- NEW (REQ 1): Load Discovery Proxy ---
+        settings = QSettings("MyOrg", "CrawlerPlayground")
+        saved_d_proxy = settings.value(self.DISCOVERY_PROXY_KEY, "", type=str)
+        self.discovery_proxy_input.setText(saved_d_proxy)
+        # --- END NEW ---
 
-        self.analyze_button = QPushButton("Discover Channels")  # Renamed
-        self.analyze_button.setStyleSheet("padding: 5px 10px;")  # Add padding
-        top_bar_layout.addWidget(self.analyze_button)
+        top_bar_row2_layout.addWidget(self.discovery_proxy_input, 1)  # Give it stretch factor 1
 
-        main_layout.addLayout(top_bar_layout)
+        main_layout.addLayout(top_bar_row2_layout)  # Add Row 2
+
+        # --- END MODIFICATION (REQ 2) ---
 
         # --- Top-to-Bottom splitter ---
         vertical_splitter = QSplitter(Qt.Vertical)
@@ -809,12 +829,20 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.article_fetcher_combo.model().item(2).setEnabled(False)
         if not sync_stealth and not Stealth:
             self.article_fetcher_combo.model().item(2).setEnabled(False)
+        self.article_fetcher_combo.setCurrentText("Stealth (Playwright)")
         fetcher_toolbar.addWidget(self.article_fetcher_combo)
 
         fetcher_toolbar.addWidget(QLabel("Proxy:"))
         self.article_proxy_input = QLineEdit()
         self.article_proxy_input.setPlaceholderText("e.g., socks5://user:pass@host:port")
         self.article_proxy_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+
+        # --- NEW (REQ 1): Load Article Proxy ---
+        settings = QSettings("MyOrg", "CrawlerPlayground")
+        saved_a_proxy = settings.value(self.ARTICLE_PROXY_KEY, "", type=str)
+        self.article_proxy_input.setText(saved_a_proxy)
+        # --- END NEW ---
+
         fetcher_toolbar.addWidget(self.article_proxy_input)
 
         self.article_pause_check = QCheckBox("Pause")
@@ -840,14 +868,15 @@ class CrawlerPlaygroundApp(QMainWindow):
         fetcher_toolbar.addWidget(fetcher_spacer)
 
         # --- Toolbar 2: Extractor Settings ---
-        # --- Toolbar 2: Extractor Settings ---
         extractor_toolbar = QToolBar("Extractor Tools")
-        extractor_toolbar.layout().setSpacing(5)  # <-- MODIFICATION: Add spacing
+        extractor_toolbar.layout().setSpacing(5)
         extractor_toolbar.addWidget(QLabel("Extractor:"))
         self.extractor_combo = QComboBox()
         available_extractors = sorted(EXTRACTOR_MAP.keys())
         if available_extractors:
             self.extractor_combo.addItems(available_extractors)
+            if "Trafilatura" in available_extractors:
+                self.extractor_combo.setCurrentText("Trafilatura")
         else:
             self.extractor_combo.addItem("No Extractors Found")
             self.extractor_combo.setEnabled(False)
@@ -864,18 +893,6 @@ class CrawlerPlaygroundApp(QMainWindow):
         extractor_spacer = QWidget()
         extractor_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         extractor_toolbar.addWidget(extractor_spacer)
-
-        # # --- Add both toolbars to the right layout ---
-        # right_layout.addWidget(fetcher_toolbar)
-        # right_layout.addWidget(extractor_toolbar)
-        #
-        # # --- Add Markdown view ---
-        # self.markdown_output_view = QTextEdit()
-        # self.markdown_output_view.setReadOnly(True)
-        # self.markdown_output_view.setFont(QFont("Courier", 10))
-        # self.markdown_output_view.setLineWrapMode(QTextEdit.NoWrap)
-        #
-        # right_layout.addWidget(self.markdown_output_view, 1)  # Add markdown view (stretches)
 
         # --- Add both toolbars to the right layout ---
         right_layout.addWidget(fetcher_toolbar)
@@ -1785,6 +1802,13 @@ class CrawlerPlaygroundApp(QMainWindow):
     def closeEvent(self, event):
         """Ensure threads are cleaned up on exit."""
         self.status_bar.showMessage("Shutting down... waiting for tasks...")
+
+        # --- NEW (REQ 1): Save proxy settings ---
+        settings = QSettings("MyOrg", "CrawlerPlayground")
+        settings.setValue(self.DISCOVERY_PROXY_KEY, self.discovery_proxy_input.text())
+        settings.setValue(self.ARTICLE_PROXY_KEY, self.article_proxy_input.text())
+        # --- END NEW ---
+
         self.thread_pool.waitForDone(3000)
         self.thread_pool.clear()
         event.accept()
@@ -1819,7 +1843,7 @@ class CrawlerPlaygroundApp(QMainWindow):
 
     def _load_url_history(self):
         """Loads URL history from QSettings into the ComboBox."""
-        settings = QSettings("MyOrg", "CrawlerPlayground")
+        settings = QSettings(SETTING_ORG, SETTING_APP)
         history = settings.value(self.URL_HISTORY_KEY, [], type=list)
         if history:
             self.url_input.addItems(history)
@@ -1847,7 +1871,7 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         # 5. Persist to QSettings
         new_history = [self.url_input.itemText(i) for i in range(self.url_input.count())]
-        settings = QSettings("MyOrg", "CrawlerPlayground")
+        settings = QSettings(SETTING_ORG, SETTING_APP)
         settings.setValue(self.URL_HISTORY_KEY, new_history)
 
     def _show_url_history_context_menu(self, pos):
@@ -1865,7 +1889,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.url_input.clear()  # Clears the list
         self.url_input.clearEditText()  # Clears the typed text
 
-        settings = QSettings("MyOrg", "CrawlerPlayground")
+        settings = QSettings(SETTING_ORG, SETTING_APP)
         settings.setValue(self.URL_HISTORY_KEY, [])
         self.status_bar.showMessage("URL history cleared.")
 
@@ -1889,15 +1913,15 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
 
-    app.setOrganizationName("SleepySoft")
-    app.setApplicationName("CrawlerPlayground")
+    app.setOrganizationName(SETTING_ORG)
+    app.setApplicationName(SETTING_APP)
 
     if hasattr(Qt, 'AA_EnableHighDpiScaling'):
         app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
         app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
-    main_window = CrawlerPlaygroundApp()  # Renamed
+    main_window = CrawlerPlaygroundApp()
     main_window.show()
 
     sys.exit(app.exec_())
