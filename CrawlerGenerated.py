@@ -2,7 +2,6 @@
 
 from IntelligenceCrawler.CrawlPipeline import *
 
-
 def run_pipeline():
     # === 1. Initialize Components ===
     d_fetcher = RequestsFetcher(log_callback=log_cb, proxy=None, timeout_s=10)
@@ -11,12 +10,19 @@ def run_pipeline():
     extractor = Crawl4AIExtractor(verbose=True)
     
     # === 2. Define Parameters ===
-    entry_point = 'http://www.people.com.cn'
+    entry_point = 'http://www.people.com.cn/'
     start_date = None
     end_date = None
     extractor_kwargs = {}
     channel_filter_list = [
-        'news_sitemap.xml',
+        'ah/news_sitemap.xml',
+        'ent/news_sitemap.xml',
+        'gz/news_sitemap.xml',
+        'nx/news_sitemap.xml',
+        'sn/news_sitemap.xml',
+        'society/news_sitemap.xml',
+        'theory/news_sitemap.xml',
+        'xj/news_sitemap.xml',
     ]
 
     # === 3. Build pipeline ===
@@ -38,7 +44,7 @@ def run_pipeline():
     # Step 3: Extract content and run handlers
     pipeline.extract_articles(
         article_filter=lambda url: True,
-        content_handler=lambda url, result: print(f"URL: {url}\nText:\n {result}"),
+        content_handler=save_article_to_disk,
         exception_handler=lambda url, exception: None,
         **extractor_kwargs
     )

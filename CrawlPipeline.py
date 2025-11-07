@@ -17,9 +17,7 @@ from IntelligenceCrawler.Extractor import (
     Newspaper3kExtractor, GenericCSSExtractor, Crawl4AIExtractor)
 from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer
 
-
 log_cb = print
-
 
 # --- Configuration ---
 # Define the root directory where all articles will be saved
@@ -129,7 +127,9 @@ class CrawlPipeline:
                 self.log(f"[Error] Failed to process channel {channel_url}: {e}\n{traceback.format_exc()}")
 
         self.articles = list(dict.fromkeys(articles))
-        self.log(f"Fetched {len(self.articles)} article contents.")
+        # [FIX] This log message was incorrect, moved log to extract_articles
+        # self.log(f"Fetched {len(self.articles)} article contents.")
+        self.log(f"Discovered {len(self.articles)} unique articles.")
         return self.articles
 
     def extract_articles(self,
@@ -141,7 +141,7 @@ class CrawlPipeline:
         Step 3: Extracts content from all fetched articles.
         Populates self.articles and calls optional handlers.
         """
-        self.log(f"--- 3. Extracting {len(self.contents)} Articles ---")
+        self.log(f"--- 3. Fetching & Extracting {len(self.articles)} Articles ---")
 
         contents = []
         for article_url in self.articles:
@@ -149,7 +149,7 @@ class CrawlPipeline:
                 self.log(f"Skipping article (filtered): {article_url}")
                 continue
 
-            self.log(f"Fetching: {article_url}")
+            self.log(f"Processing: {article_url}")
 
             try:
                 content = self.e_fetcher.get_content(article_url)
@@ -157,15 +157,16 @@ class CrawlPipeline:
                     self.log(f"Skipped (no content): {article_url}")
                     continue
 
+                self.log(f"  -> Fetched {len(content)} bytes. Extracting...")
                 result = self.extractor.extract(content, article_url, **extractor_kwargs)
-                contents.append((article_url, result))      # Store the final result
+                contents.append((article_url, result))  # Store the final result
 
                 if content_handler:
-                    content_handler(article_url, result)    # Pass full result to handler
+                    content_handler(article_url, result)  # Pass full result to handler
             except Exception as e:
                 self.log(f"[Error] Failed to extract {article_url}: {e}")
                 if exception_handler:
-                    exception_handler(article_url, e)       # Pass URL and exception
+                    exception_handler(article_url, e)  # Pass URL and exception
 
         self.contents = contents
         self.log(f"Extracted {len(self.contents)} articles successfully.")
@@ -176,12 +177,13 @@ class CrawlPipeline:
 
 def common_channel_filter(channel_url: str, channel_filter_list: List[str]) -> bool:
     """
-    Checks if a given channel URL matches the filter list based on its "name".
-    (根据“名称”检查给定的频道 URL 是否与过滤器列表匹配。)
+    Checks if a given channel URL matches the filter list based on its "key".
+    (根据“key”检查给定的频道 URL 是否与过滤器列表匹配。)
 
-    :param channel_url: The channel URL to check.
-    :param channel_filter_list: The list of allowed "names" (e.g., "feed.xml").
-    :return: True if the filter passes, False otherwise.
+    This logic MUST mirror the 'get_filter_key' logic from the GUI's
+    _generate_channel_filter_list_code method.
+    (此逻辑必须与 GUI 的 _generate_channel_filter_list_code
+     方法中的 'get_filter_key' 逻辑相匹配。)
     """
 
     # If the list is empty, the filter is disabled (pass all)
@@ -189,31 +191,45 @@ def common_channel_filter(channel_url: str, channel_filter_list: List[str]) -> b
     if not channel_filter_list:
         return True
 
+    # --- New Key Generation Logic ---
+    key_to_check = ""
     try:
-        # --- This logic MUST mirror the logic in _get_checked_channel_filter_list ---
-        # (此逻辑必须与 _get_checked_channel_filter_list 中的逻辑相匹配)
-
         parsed_url = urlparse(channel_url)
         path = parsed_url.path
-        hostname = parsed_url.netloc
 
-        # Get the last part of the path, e.g., "feed.xml" or "blog"
-        # (获取路径的最后一部分，例如 "feed.xml" 或 "blog")
-        cleaned_path = path.rstrip('/')
-        name = cleaned_path.split('/')[-1]
+        # [FIX] If path is just '/' or empty, this is a root URL.
+        # Use the netloc (domain) as the key.
+        if not path or path == '/':
+            key_to_check = parsed_url.netloc or channel_url  # Fallback
+        else:
+            # Strip a trailing slash if it exists (e.g., /feeds/ -> /feeds)
+            if path.endswith('/'):
+                path = path[:-1]
 
-        # If path was just "/" or empty, use the hostname as the name
-        # (如果路径只是 "/" 或为空，则使用主机名作为名称)
-        filter_name = name or hostname
+            # Get the filename (e.g., 'news_sitemap.xml' or 'feeds')
+            filename = os.path.basename(path)
 
-        # Return True if the extracted name is in the allowed list
-        # (如果提取的名称在允许列表中，则返回 True)
-        return filter_name in channel_filter_list
+            # Get the parent directory (e.g., '/sitemap/it' or '/')
+            parent_dir_path = os.path.dirname(path)
+
+            # If the parent is not the root, get its name (e.g., 'it')
+            if parent_dir_path and parent_dir_path != '/':
+                parent_folder = os.path.basename(parent_dir_path)
+                # Combine them: 'it/news_sitemap.xml'
+                key_to_check = f"{parent_folder}/{filename}"
+            else:
+                # Parent is root, just use the filename (e.g., 'sitemap.xml')
+                key_to_check = filename
 
     except Exception:
-        # On error, safely filter out (return False)
-        # (出错时，安全过滤掉（返回 False）)
-        return False
+        key_to_check = channel_url  # Fallback
+    # --- End of New Logic ---
+
+    # Return True if the extracted key is in the allowed list
+    # (如果提取的名称在允许列表中，则返回 True)
+    is_allowed = key_to_check in channel_filter_list
+    # log_cb(f"Checking filter for {channel_url}... Key: {key_to_check}... Allowed: {is_allowed}")
+    return is_allowed
 
 
 # ----------------------------------------------------------------------------------------------------------------------

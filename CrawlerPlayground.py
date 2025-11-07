@@ -125,7 +125,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import (
     Qt, QRunnable, QThreadPool, QObject, pyqtSignal, QTimer, QSettings
 )
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtGui import QFont, QIcon, QCursor
 
 # --- PyQtWebEngine Imports ---
 try:
@@ -922,6 +922,7 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         # Tree
         self.tree_widget.itemClicked.connect(self.on_tree_item_clicked)
+        self.tree_widget.itemExpanded.connect(self.on_tree_item_expanded)
 
         # Article Preview Tab
         self.article_go_button.clicked.connect(self.on_article_go_clicked)
@@ -1365,8 +1366,87 @@ class CrawlerPlaygroundApp(QMainWindow):
             # 将光标移到末尾
             self.url_input.lineEdit().end(False)
 
+    def on_tree_item_expanded(self, item: QTreeWidgetItem):
+        """
+        Handles the 'itemExpanded' signal.
+        This is now the *only* trigger for lazy-loading articles.
+        (处理 'itemExpanded' 信号。)
+        (这是现在懒加载文章的 *唯一* 触发器。)
+        """
+        if not self.tree_widget.isEnabled(): return
+        data = item.data(0, Qt.UserRole)
+        if not data: return
+
+        item_type = data.get('type')
+        url = data.get('url')
+
+        # We only care about expanding "channel" items
+        # (我们只关心 "channel" 项的展开)
+        if item_type == 'channel':
+            # Check if it has the dummy child or is already loading
+            # (检查它是否有虚拟子项或已在加载)
+            if item.childCount() == 1 and "Loading" in item.child(0).text(0):
+                return  # Already loading (已在加载)
+
+            # Check the 'loaded' flag we set
+            # (检查我们设置的 'loaded' 标志)
+            if data.get('loaded') == False:
+                # This is the first time it's being expanded, load data
+                # (这是它第一次被展开，加载数据)
+                self.start_article_loading(item, channel_url=url)
+
     def on_tree_item_clicked(self, item: QTreeWidgetItem, column: int):
-        """Handles clicks on any tree item (channel or article)."""
+        """
+        Handles clicks on any tree item (channel or article).
+
+        [MODIFIED] Now performs a "hit test". It ignores clicks
+        on the checkbox or expand-arrow, only responding to
+        clicks on the main item text.
+        (处理对任何树项目（频道或文章）的点击。)
+        ([已修改] 现在执行“点击测试”。它忽略对复选框或)
+        (展开箭头的点击，只响应对主项目文本的点击。)
+        """
+
+        # --- [NEW] Hit Test Logic ---
+        # (新增 点击测试逻辑)
+
+        # Get the click position relative to the tree widget's viewport
+        # (获取相对于树控件视口的点击位置)
+        pos = self.tree_widget.viewport().mapFromGlobal(QCursor.pos())
+
+        # Get the item's full visual rectangle
+        # (获取项目的完整可视化矩形)
+        visual_rect = self.tree_widget.visualItemRect(item)
+
+        # This is the X-coordinate where the "main" part (text/label)
+        # of the item begins.
+        # It accounts for the expand-arrow's indentation.
+        # (这是项目“主要”部分（文本/标签）开始的 X 坐标。)
+        # (它考虑了展开箭头的缩进。)
+        text_start_x = visual_rect.x() + self.tree_widget.indentation()
+
+        # [HEURISTIC] Add a buffer for the checkbox itself (approx 20px)
+        # (启发式) 为复选框本身添加一个缓冲区（约 20px）
+        # This is not perfect, but robust enough.
+        # (这不完美，但足够稳健。)
+        if item.flags() & Qt.ItemIsUserCheckable:
+            text_start_x += 20
+
+        if pos.x() < text_start_x:
+            # Click was on the checkbox or expander
+            # (点击发生在复选框或展开器上)
+            # We *only* want the checkbox to trigger itemChanged
+            # (我们 *只* 希望复选框触发 itemChanged)
+            # and the expander to trigger itemExpanded.
+            # (而展开器触发 itemExpanded。)
+            # So, we do *nothing* in itemClicked.
+            # (因此，我们在 itemClicked 中 *不执行任何操作*。)
+            return
+
+            # --- [END NEW] ---
+
+        # If we are here, the click was on the *text* part
+        # (如果我们在这里，说明点击的是 *文本* 部分)
         if not self.tree_widget.isEnabled(): return
         data = item.data(0, Qt.UserRole)
         if not data: return
@@ -1375,16 +1455,22 @@ class CrawlerPlaygroundApp(QMainWindow):
         url = data.get('url')
 
         if item_type == 'channel':
-            if item.childCount() == 1 and "Loading" in item.child(0).text(0):
-                return
-            if data.get('loaded') == False:
-                self.start_article_loading(item, channel_url=url)
+            # --- [MODIFIED] ---
+            # The article loading logic has been MOVED
+            # to on_tree_item_expanded.
+            # (文章加载逻辑已移至 on_tree_item_expanded。)
+            # --- [END MODIFIED] ---
+
+            # We still want to load the source XML on a text click
+            # (我们仍然希望在文本点击时加载源码 XML)
             self.start_channel_source_loading(url=url)
 
         elif item_type == 'article':
-            # --- REQ 2a: Update URL bar ---
+            # --- (This logic is unchanged and correct) ---
+            # (此逻辑未更改且正确)
             self.article_url_input.setText(url)
             self.markdown_output_view.clear()
+            self.metadata_output_view.clear()
             self.update_generated_code()
 
             if self.web_view and QUrl:
