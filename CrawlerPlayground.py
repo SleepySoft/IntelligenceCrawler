@@ -35,7 +35,7 @@ except ImportError:
         pass
 
 try:
-    from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer
+    from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer, ListPageDiscoverer
 except ImportError:
     print("!!! CRITICAL: Could not import Discoverer classes.")
 
@@ -49,6 +49,9 @@ except ImportError:
 
 
     class RSSDiscoverer:
+        pass
+
+    class ListPageDiscoverer:
         pass
 
 try:
@@ -180,7 +183,7 @@ def create_fetcher_instance(fetcher_name: str,
         )
 
 
-def create_discoverer_instance(discoverer_name: str, fetcher: Fetcher, log_callback) -> IDiscoverer:
+def create_discoverer_instance(discoverer_name: str, fetcher: Fetcher, log_callback, **kwargs) -> IDiscoverer:
     """Factory to create a discoverer instance based on its name."""
     if discoverer_name == "Sitemap":
         if 'SitemapDiscoverer' not in globals(): raise ImportError("SitemapDiscoverer not found.")
@@ -188,8 +191,11 @@ def create_discoverer_instance(discoverer_name: str, fetcher: Fetcher, log_callb
     elif discoverer_name == "RSS":
         if 'RSSDiscoverer' not in globals(): raise ImportError("RSSDiscoverer not found.")
         return RSSDiscoverer(fetcher, verbose=True)
-    # elif discoverer_name == "Smart Analysis":
-    #     return SmartDiscoverer(fetcher, verbose=True) # Future
+    elif discoverer_name == "Smart Analysis":
+        if 'ListPageDiscoverer' not in globals(): raise ImportError("ListPageDiscoverer not found.")
+        # 从 kwargs 获取 ai_signature
+        ai_sig = kwargs.get('ai_signature', None)
+        return ListPageDiscoverer(fetcher, verbose=True, ai_signature=ai_sig)
     else:
         raise ValueError(f"Unknown discoverer_name: {discoverer_name}")
 
@@ -230,7 +236,8 @@ class ChannelDiscoveryWorker(QRunnable):
                  proxy: Optional[str],
                  timeout: int,
                  pause_browser: bool,
-                 render_page: bool):
+                 render_page: bool,
+                 ai_signature: Optional[str] = None):
         super(ChannelDiscoveryWorker, self).__init__()
         self.discoverer_name = discoverer_name
         self.fetcher_name = fetcher_name
@@ -240,6 +247,7 @@ class ChannelDiscoveryWorker(QRunnable):
         self.proxy = proxy
         self.timeout = timeout
         self.pause_browser = pause_browser
+        self.ai_signature = ai_signature
         self.render_page = render_page  # Note: This is for XML, may break parsing
         self.signals = WorkerSignals()
 
@@ -265,7 +273,12 @@ class ChannelDiscoveryWorker(QRunnable):
             )
 
             # 2. Create Discoverer
-            discoverer = create_discoverer_instance(self.discoverer_name, fetcher, log_callback)
+            discoverer = create_discoverer_instance(
+                self.discoverer_name,
+                fetcher,
+                log_callback,
+                ai_signature=self.ai_signature
+            )
 
             # 3. Do the work
             channel_list = discoverer.discover_channels(
@@ -534,6 +547,13 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.pause_browser: bool = False
         self.render_page: bool = False
 
+        # --- [NEW] UI attribute placeholders ---
+        self.ai_signature_label: Optional[QLabel] = None
+        self.ai_signature_input: Optional[QLineEdit] = None
+        self.css_selector_label: Optional[QLabel] = None
+        self.css_selector_input: Optional[QLineEdit] = None
+        # --- [END NEW] ---
+
         # Cache for the *actual* entry_point (str or List[str])
         # used in the last discovery run.
         self.last_used_entry_point: Any = None
@@ -555,6 +575,13 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.init_ui()
         self._load_url_history()
         self.connect_signals()  # Centralize signal connections
+
+        # --- [NEW] Set initial visibility for dynamic UI ---
+        self.update_generated_code()  # Show initial code
+        self._update_discoverer_options_ui(self.discoverer_combo.currentText())
+        self._update_extractor_options_ui(self.extractor_combo.currentText())
+        # --- [END NEW] ---
+
         self.setWindowTitle("Crawler Playground (v4.0)")
         self.setWindowIcon(QIcon.fromTheme("internet-web-browser"))
 
@@ -603,10 +630,10 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         top_bar_row1_layout.addWidget(QLabel("Discoverer:"))
         self.discoverer_combo = QComboBox()
-        self.discoverer_combo.addItems(["Sitemap", "RSS", "Smart Analysis (WIP)"])
+        self.discoverer_combo.addItems(["Sitemap", "RSS", "Smart Analysis"])
         if "RSSDiscoverer" not in globals():
             self.discoverer_combo.model().item(1).setEnabled(False)
-        self.discoverer_combo.model().item(2).setEnabled(False)  # WIP
+        # self.discoverer_combo.model().item(2).setEnabled(False)  # WIP
         self.discoverer_combo.setToolTip(
             "Select the discovery method:\n"
             "- Sitemap: Finds sitemap.xml from the homepage.\n"
@@ -614,6 +641,16 @@ class CrawlerPlaygroundApp(QMainWindow):
             "In both cases, enter the homepage URL."
         )
         top_bar_row1_layout.addWidget(self.discoverer_combo)
+
+        # --- [NEW] AI Signature (for Smart Analysis) ---
+        self.ai_signature_label = QLabel("AI Signature:")
+        self.ai_signature_input = QLineEdit()
+        self.ai_signature_input.setPlaceholderText("Optional: e.g., 'a[class*=\"title\"]'")
+        self.ai_signature_input.setToolTip("Manually specify the 'link fingerprint' signature.")
+        self.ai_signature_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+        top_bar_row1_layout.addWidget(self.ai_signature_label)
+        top_bar_row1_layout.addWidget(self.ai_signature_input, 1)  # Give it stretch
+        # --- [END NEW] ---
 
         self.date_filter_check = QCheckBox("Filter last:")
         self.date_filter_check.setToolTip("If checked, only discover channels/articles updated within the last X days.")
@@ -631,9 +668,9 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         top_bar_row1_layout.addSpacing(15)
 
-        self.analyze_button = QPushButton("Discover Channels")  # Renamed
-        self.analyze_button.setStyleSheet("padding: 5px 10px;")  # Add padding
-        top_bar_row1_layout.addWidget(self.analyze_button)
+        # self.analyze_button = QPushButton("Discover Channels")  # Renamed
+        # self.analyze_button.setStyleSheet("padding: 5px 10px;")  # Add padding
+        # top_bar_row1_layout.addWidget(self.analyze_button)
 
         main_layout.addLayout(top_bar_row1_layout)  # Add Row 1
 
@@ -688,6 +725,13 @@ class CrawlerPlaygroundApp(QMainWindow):
         # --- END NEW ---
 
         top_bar_row2_layout.addWidget(self.discovery_proxy_input, 1)  # Give it stretch factor 1
+
+        # --- [NEW] Analyze button moved to Row 2 ---
+        top_bar_row2_layout.addSpacing(15)
+        self.analyze_button = QPushButton("Discover Channels")
+        self.analyze_button.setStyleSheet("padding: 5px 10px;")
+        top_bar_row2_layout.addWidget(self.analyze_button)
+        # --- [END NEW] ---
 
         main_layout.addLayout(top_bar_row2_layout)  # Add Row 2
 
@@ -882,17 +926,20 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.extractor_combo.setEnabled(False)
         extractor_toolbar.addWidget(self.extractor_combo)
 
-        self.extractor_settings_button = QPushButton("Settings")
-        self.extractor_settings_button.setEnabled(False)  # TODO: Implement settings dialog
-        extractor_toolbar.addWidget(self.extractor_settings_button)
+        # self.extractor_settings_button = QPushButton("Settings")
+        # self.extractor_settings_button.setEnabled(False)  # TODO: Implement settings dialog
+        # extractor_toolbar.addWidget(self.extractor_settings_button)
+
+        self.css_selector_label = QLabel("Selectors:")
+        self.css_selector_input = QLineEdit()
+        self.css_selector_input.setPlaceholderText("e.g., article.content, .post-body")
+        self.css_selector_input.setToolTip("CSS selectors (comma-separated) for Generic CSS Extractor")
+        self.css_selector_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+        extractor_toolbar.addWidget(self.css_selector_label)
+        extractor_toolbar.addWidget(self.css_selector_input)
 
         self.extractor_analyze_button = QPushButton("Analyze")
         extractor_toolbar.addWidget(self.extractor_analyze_button)
-
-        # Add a spacer to push all extractor controls to the left
-        extractor_spacer = QWidget()
-        extractor_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        extractor_toolbar.addWidget(extractor_spacer)
 
         # --- Add both toolbars to the right layout ---
         right_layout.addWidget(fetcher_toolbar)
@@ -936,6 +983,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.url_input.lineEdit().returnPressed.connect(self.start_channel_discovery)
         self.url_input.lineEdit().textChanged.connect(self.on_url_input_changed)
         self.analyze_button.clicked.connect(self.start_channel_discovery)
+        self.discoverer_combo.currentTextChanged.connect(self._update_discoverer_options_ui)
 
         # Tree
         self.tree_widget.itemClicked.connect(self.on_tree_item_clicked)
@@ -945,6 +993,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.article_go_button.clicked.connect(self.on_article_go_clicked)
         self.article_url_input.returnPressed.connect(self.on_article_go_clicked)
         self.extractor_analyze_button.clicked.connect(self.start_extraction_analysis)
+        self.extractor_combo.currentTextChanged.connect(self._update_extractor_options_ui)
 
         # Code Generation Triggers
         self.discoverer_combo.currentTextChanged.connect(self.update_generated_code)
@@ -1116,6 +1165,12 @@ class CrawlerPlaygroundApp(QMainWindow):
         proxy_str = self.discovery_proxy_input.text().strip() or None
         timeout_sec = self.discovery_timeout_spin.value()
 
+        # --- [NEW] ---
+        ai_signature_str = self.ai_signature_input.text().strip() or None
+        if self.discoverer_name != "Smart Analysis":
+            ai_signature_str = None  # 确保只在 Smart Analysis 时传递
+        # --- [END NEW] ---
+
         self.last_used_entry_point = entry_point_for_worker
 
         # 5. 启动（已修改的）Worker
@@ -1128,7 +1183,8 @@ class CrawlerPlaygroundApp(QMainWindow):
             proxy=proxy_str,
             timeout=timeout_sec,
             pause_browser=self.pause_browser,
-            render_page=self.render_page
+            render_page=self.render_page,
+            ai_signature=ai_signature_str
         )
 
         worker.signals.result.connect(self.on_channel_discovery_result)
@@ -1211,6 +1267,14 @@ class CrawlerPlaygroundApp(QMainWindow):
             # For now, we'll hardcode a placeholder
             self.append_log_history("[Warning] Generic CSS Extractor running with no selectors.")
             extractor_kwargs = {'selectors': ['body'], 'exclude_selectors': ['nav', 'footer']}
+
+        # --- [MODIFIED] ---
+        # Get kwargs from our helper function
+        extractor_kwargs = self._get_current_extractor_args(extractor_name)
+
+        if extractor_name == "Generic CSS" and not extractor_kwargs.get('selectors'):
+            self.append_log_history("[Warning] Generic CSS Extractor running with no selectors provided.")
+        # --- [END MODIFICATION] ---
 
         self.markdown_output_view.setPlainText(f"Starting analysis on {url}...")
         self.metadata_output_view.setPlainText("Waiting for analysis to complete...")  # <-- NEW
@@ -1499,9 +1563,53 @@ class CrawlerPlaygroundApp(QMainWindow):
     def on_article_go_clicked(self):
         """Handles clicks on the 'Go' button in the article tab."""
         if self.web_view and QUrl:
+            self._apply_proxy_to_webview()
             url = self.article_url_input.text()
             self.web_view.setUrl(QUrl(url))
             self.web_view.setFocus()
+
+    def _apply_proxy_to_webview(self):
+        """
+        Reads the proxy from the 'article_proxy_input' and applies it
+        to the QWebEngineView instance.
+        (读取 'article_proxy_input' 中的代理并将其应用于 QWebEngineView 实例。)
+        """
+        if not self.web_view or not QUrl:
+            # 如果 webview 不可用，则不执行任何操作
+            return
+
+        proxy_str = self.article_proxy_input.text().strip()
+
+        # 获取 web_view 关联的 profile
+        # (我们使用 page().profile() 而不是 defaultProfile() 以确保获取正确的实例)
+        profile = self.web_view.page().profile()
+
+        if not proxy_str:
+            # 字符串为空，清除代理设置
+            profile.setHttpProxy(QUrl())
+            self.append_log_history("[Webview] 代理已清除。使用系统设置。")
+            return
+
+        # 检查用户是否提供了 scheme (如 http://, socks5://)
+        # 如果没有，默认为 http://
+        if "://" not in proxy_str:
+            proxy_str = "http://" + proxy_str
+            self.append_log_history(f"[Webview] 未检测到代理协议，默认为 http://")
+
+        proxy_url = QUrl(proxy_str)
+
+        if not proxy_url.isValid() or not proxy_url.host():
+            # 处理无效URL (例如 "http://")
+            profile.setHttpProxy(QUrl())  # 为安全起见清除它
+            self.append_log_history(f"[Webview] 代理 URL 无效: {proxy_str}。代理已清除。")
+            return
+
+        # 应用代理
+        # 注意：尽管方法名叫 'setHttpProxy'，
+        # 但它会根据 QUrl 的 scheme (http, https, socks5) 正确处理代理。
+        profile.setHttpProxy(proxy_url)
+
+        self.append_log_history(f"[Webview] 代理已设置为: {proxy_url.toString()}")
 
     def update_generated_code_from_tree(self, item: QTreeWidgetItem, column: int):
         """Wrapper to call code gen when tree checkstate changes."""
@@ -1540,18 +1648,22 @@ class CrawlerPlaygroundApp(QMainWindow):
 
     def _get_current_extractor_args(self, extractor_name: str) -> dict:
         """
-        Placeholder for retrieving extractor-specific arguments.
-        (TODO: Implement this when the 'Settings' button is functional).
-        (用于检索提取器特定参数的占位符。
-         （TODO：在“设置”按钮可用时实现此功能）。)
+        Retrieves extractor-specific arguments from the UI.
+        (从UI检索特定于提取器的参数。)
         """
+        # --- [MODIFIED] ---
         if extractor_name == "Generic CSS":
-            # Hardcoded example for now
-            return {
-                'selectors': ['article', '.content'],
-                'exclude_selectors': ['nav', 'footer']
-            }
-        return {}  # Default
+            if hasattr(self, 'css_selector_input') and self.css_selector_input:
+                selector_str = self.css_selector_input.text().strip()
+                if selector_str:
+                    # 按逗号分割，并去除每个选择器的空白
+                    selectors_list = [s.strip() for s in selector_str.split(',') if s.strip()]
+                    return {
+                        'selectors': selectors_list
+                    }
+            # Fallback if UI not ready or input is empty
+            return {'selectors': ['body']}  # Default fallback
+        return {}  # Default for other extractors
 
     def _generate_channel_filter_list_code(self) -> str:
         """
@@ -1663,7 +1775,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             # --- MODIFICATION: Store new date filter state ---
             "date_filter_enabled": self.date_filter_check.isChecked(),
             "date_filter_days": self.date_filter_days_spin.value(),
-            # "channel_selections": self._get_checked_channel_filter_list()
+            "ai_signature": self.ai_signature_input.text().strip() or None
         }
 
         # --- 2. Extractor Configuration ---
@@ -1707,7 +1819,12 @@ class CrawlerPlaygroundApp(QMainWindow):
          可运行的Python脚本。)
         """
         # --- 1. Class Name Mappings (The "Table" Lookup) ---
-        DISCOVERER_CLASS_MAP = {"Sitemap": "SitemapDiscoverer", "RSS": "RSSDiscoverer"}
+        DISCOVERER_CLASS_MAP = {
+            "Sitemap": "SitemapDiscoverer",
+            "RSS": "RSSDiscoverer",
+            "Smart Analysis": "ListPageDiscoverer"
+        }
+
         FETCHER_CLASS_MAP = {
             "Simple (Requests)": "RequestsFetcher",
             "Advanced (Playwright)": "PlaywrightFetcher",
@@ -1773,7 +1890,14 @@ class CrawlerPlaygroundApp(QMainWindow):
         code_e_fetcher = f"e_fetcher = {e_fetcher_class_name}({e_fetcher_args_str})"
 
         # Note: Renamed variables to avoid conflict with 'pipeline.' call
-        code_discoverer = f"discoverer = {d_class_name}(fetcher=d_fetcher, verbose=True)"
+        code_discoverer = ""
+        if d_class_name == "ListPageDiscoverer":
+            ai_sig_val = d_config['args'].get('ai_signature')
+            code_discoverer = f"discoverer = {d_class_name}(fetcher=d_fetcher, verbose=True, ai_signature={repr(ai_sig_val)})"
+        else:
+            # Default for Sitemap, RSS, etc.
+            code_discoverer = f"discoverer = {d_class_name}(fetcher=d_fetcher, verbose=True)"
+
         code_extractor = f"extractor = {e_class_name}(verbose=True)"
 
         entry_point_value = d_config['args'].get('entry_point')
@@ -1838,6 +1962,24 @@ class CrawlerPlaygroundApp(QMainWindow):
             except Exception as e:
                 self.status_bar.showMessage(f"Error saving file: {e}", 5000)
                 self.append_log_history(f"[Error] Failed to save code: {e}")
+
+    # --- [NEW] UI Helper Functions (for dynamic widgets) ---
+
+    def _update_discoverer_options_ui(self, discoverer_name: str):
+        """Shows/hides discoverer-specific options based on selection."""
+        is_smart = (discoverer_name == "Smart Analysis")
+        if self.ai_signature_label:
+            self.ai_signature_label.setVisible(is_smart)
+        if self.ai_signature_input:
+            self.ai_signature_input.setVisible(is_smart)
+
+    def _update_extractor_options_ui(self, extractor_name: str):
+        """Shows/hides extractor-specific options based on selection."""
+        is_generic_css = (extractor_name == "Generic CSS")
+        if self.css_selector_label:
+            self.css_selector_label.setVisible(is_generic_css)
+        if self.css_selector_input:
+            self.css_selector_input.setVisible(is_generic_css)
 
     # --- NEW: URL History Management Methods ---
 

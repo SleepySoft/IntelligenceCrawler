@@ -10,11 +10,14 @@ import re
 import copy
 import json
 import traceback
+
 import html2text
 import lxml.etree
 import unicodedata
-from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup, Tag
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from typing import List, Dict, Any, Optional, Literal
 
 # --- Library Import Checks ---
@@ -677,6 +680,31 @@ class Crawl4AIExtractor(IExtractor):
             self._log(f"[Error] {error_str}")
             self._log(traceback.format_exc())
             return ExtractionResult(error=error_str)
+
+
+# --- Begin: 链接指纹和聚类的数据模型 ---
+
+class LinkFingerprint(BaseModel):
+    """
+    Represents a single link and its structural context.
+    (代表单个链接及其结构上下文。)
+    """
+    href: str = Field(description="完整的、绝对路径的URL")
+    text: str = Field(description="链接的可见文本")
+    signature: str = Field(description="该链接的结构指纹 (例如 'h2.title.post-title')")
+
+
+class LinkGroup(BaseModel):
+    """
+    Represents a cluster of links sharing the same signature.
+    (代表共享相同指纹的链接聚类。)
+    """
+    signature: str = Field(description="共享的结构指纹")
+    count: int = Field(description="该指纹出现的次数")
+    sample_links: List[LinkFingerprint] = Field(description="该组的链接示例 (最多5个)")
+
+
+# --- End: 数据模型 ---
 
 
 class ArticleListExtractor(IExtractor):

@@ -1,19 +1,26 @@
 import re
+import json
 import logging
 import datetime
 import traceback
-import xml.etree.ElementTree as ET
-from collections import deque
-from usp.tree import sitemap_from_str
-from urllib.parse import urlparse, urljoin
-
-# --- Core Imports ---
 from abc import ABC, abstractmethod
-from typing import Set, List, Dict, Any, Optional, Deque
+import xml.etree.ElementTree as ET
+from usp.tree import sitemap_from_str
+from collections import deque, defaultdict
+from urllib.parse import urlparse, urljoin
+from typing import Set, List, Dict, Any, Optional, Deque, Tuple
 
 # --- RSS/HTML Parsing Imports ---
 import feedparser
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
+from pydantic import BaseModel, Field
+import re
+import json
+import datetime
+from typing import List, Dict, Set, Optional, Tuple, Any
+from collections import defaultdict
+from urllib.parse import urljoin, urlparse
+from bs4 import BeautifulSoup, Tag
 from pydantic import BaseModel, Field
 
 # --- Date Imports (for interface compatibility) ---
@@ -907,3 +914,545 @@ class RSSDiscoverer(IDiscoverer):
 
         self._log(f"  > Found {len(article_urls)} articles in this channel.")
         return article_urls
+
+
+# --- Begin: 改进后的 Link Fingerprint Data Models ---
+
+class LinkFingerprint(BaseModel):
+    """
+    代表一个链接及其结构上下文。
+    """
+    href: str = Field(description="完整的、绝对的 URL")
+    text: str = Field(description="链接的可见文本")
+    signature: str = Field(description="此链接的结构化路径签名")
+
+
+class ClusterFeatures(BaseModel):
+    """
+    用于存储一个集群的统计特征，避免重复计算。
+    """
+    avg_text_len: float = 0.0
+    avg_href_depth: float = 0.0
+    text_uniqueness: float = 0.0  # (0.0 到 1.0) 1.0 = 完全独特
+
+
+class LinkGroup(BaseModel):
+    """
+    代表共享相同签名的一个链接集群。
+    """
+    signature: str = Field(description="共享的结构化路径签名")
+    count: int = Field(description="此签名出现的次数")
+    all_links: List[LinkFingerprint] = Field(description="此集群中的所有链接")
+
+    @property
+    def sample_links(self) -> List[LinkFingerprint]:
+        """返回用于AI提示或调试的样本链接。"""
+        return self.all_links[:5]
+
+
+# --- End: Data Models ---
+
+
+# --- Core Logic: Heuristic Dictionaries & Regex ---
+
+# Filter 1: Junk Content (立即排除)
+FILTER_JUNK: Set[str] = {
+    'nav', 'menu', 'footer', 'copyright', 'legal', 'privacy', 'social', 'breadcrumb',
+    'login', 'register', 'search', 'skip'
+}
+
+# Filter 2: Secondary Content (立即排除)
+FILTER_SECONDARY: Set[str] = {
+    'widget', 'sidebar', 'aside', 'ad', 'banner', 'comment', 'meta',
+    'theme', 'themes', 'topic', 'topics', 'tag', 'tags', 'category', 'categories',
+    'related', 'recommend', 'pagination'
+}
+
+# Final Scoring: Weighted Keywords (权重调整)
+FINAL_SCORING_MAP: Dict[str, int] = {
+    # 强正向
+    'article': 30, 'post': 30, 'entry': 25, 'story': 25, 'news': 25,
+    'feed': 20, 'main': 15, 'list': 10, 'item': 10,
+    # 结构
+    'h2': 10, 'h3': 8, 'title': 15, 'headline': 15,
+    # 负向
+    'top': -20, 'popular': -15, 'li': -5, 'nav': -50  # li 权重调低, nav 强负向
+}
+
+# Fingerprint: "Noisy" classes to ignore (来自你的定义)
+NOISY_CLASSES: Set[str] = {
+    'ng-scope', 'ng-binding', 'ng-isolate-scope', 'react-target',
+    'odd', 'even', 'active', 'selected', 'hidden', 'visible', 'first', 'last'
+}
+
+# 编译后的正则表达式，用于签名泛化
+RE_NUMERIC_CLASS = re.compile(r'\d+')
+RE_UTILITY_CLASS = re.compile(
+    r'^(p|m)(t|b|l|r|x|y)?-\S+|^[wh]-\S+|^bg-\S+|^text-\S+|^font-\S+|^border-\S+|^rounded-\S+'
+    r'|^flex|^grid|^block|^inline|^hidden'
+)
+
+
+# --- End: Dictionaries & Regex ---
+
+
+class ListPageDiscoverer(IDiscoverer):
+
+    def __init__(self,
+                 fetcher: "Fetcher",
+                 verbose: bool = True,
+                 min_group_count: int = 5,  # 默认值提高到 5
+                 ai_signature: Optional[str] = None):
+        super().__init__(fetcher, verbose)
+        self.log_messages: List[str] = []
+        self.min_group_count = min_group_count
+        self.ai_signature = ai_signature
+        self.analysis_cache: Dict[str, Tuple[BeautifulSoup, List[LinkGroup]]] = {}
+
+    def _log(self, message: str, indent: int = 0):
+        log_msg = f"{' ' * (indent * 4)}{message}"
+        self.log_messages.append(log_msg)
+        if self.verbose:
+            print(log_msg)
+
+    # --- Core Logic: Fingerprint Analysis (重构) ---
+
+    def _analyze_page(self, url: str) -> Tuple[Optional[BeautifulSoup], List[LinkGroup]]:
+        if url in self.analysis_cache:
+            return self.analysis_cache[url]
+        self._log(f"  [Fetch] 开始抓取: {url}", indent=1)
+        content = self.fetcher.get_content(url)
+        if not content:
+            return None, []
+        self._log(f"  [Parse] 正在解析 HTML (lxml)...", indent=1)
+        soup = BeautifulSoup(content, 'lxml')
+        self._log(f"  [Analyze] 步骤 1: 生成结构化路径签名 (已改进)...", indent=1)
+        fingerprints = self._generate_fingerprints(soup, url)
+        self._log(f"  [Analyze] 步骤 2: 聚类链接...", indent=1)
+        groups = self._cluster_fingerprints(fingerprints)
+        self._log(f"  [Analyze] 已完成. 发现 {len(fingerprints)} 个链接, 聚类为 {len(groups)} 组.", indent=1)
+        self.analysis_cache[url] = (soup, groups)
+        return soup, groups
+
+    def _normalize_classes(self, classes: List[str]) -> List[str]:
+        """
+        [新] 签名泛化助手：
+        1. 移除噪音/状态类 (odd, even, active...)
+        2. 移除工具类 (mt-4, p-2, flex...)
+        3. 泛化数字 (item-123 -> item-N)
+        """
+        normalized = set()
+        for c in classes:
+            c_lower = c.lower()
+            if c_lower in NOISY_CLASSES:
+                continue
+            if RE_UTILITY_CLASS.match(c_lower):
+                continue
+
+            # 泛化所有数字
+            c_normalized = RE_NUMERIC_CLASS.sub('N', c_lower)
+            normalized.add(c_normalized)
+        return sorted(list(normalized))
+
+    def _get_structural_signature(self, tag: Tag, max_depth: int = 5) -> str:
+        """
+        [重写] 核心改进：生成一个从 <a> 标签向上的结构化路径。
+        忽略无意义的 <div>/<span> 包装器。
+        """
+        path = []
+        current = tag
+        for _ in range(max_depth):
+            if not current or current.name == 'body':
+                break
+
+            name = current.name
+
+            # 仅处理有意义的 class
+            classes = self._normalize_classes(current.get('class', []))
+
+            # 忽略无 class/id 的纯包装元素
+            if name in {'div', 'span'} and not classes and not current.get('id'):
+                current = current.parent
+                continue
+
+            # 使用 id (如果存在) 作为强特征, 但通常不用于列表
+            # tag_id = current.get('id')
+            # if tag_id:
+            #     path.append(f"{name}#{tag_id}") # ID 过于具体，暂不使用
+
+            class_str = f".{'.'.join(classes)}" if classes else ""
+            path.append(f"{name}{class_str}")
+
+            current = current.parent
+            if not current:
+                break
+
+        # 反转路径，使其成为 "parent > child" 的 CSS 选择器格式
+        return " > ".join(reversed(path))
+
+    def _generate_fingerprints(self, soup: BeautifulSoup, base_url: str) -> List[LinkFingerprint]:
+        fingerprints = []
+        seen_hrefs = set()
+
+        # 考虑在 'main', 'article' 区域内查找，减少噪音
+        main_content = soup.find('main') or soup.find('article') or soup.body
+
+        for a_tag in main_content.find_all('a', href=True):
+            href = a_tag['href'].strip()
+            # 强化过滤
+            if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                continue
+
+            text = a_tag.get_text(strip=True)
+            # 过滤掉没有文本的链接（例如纯图标链接）
+            if not text:
+                continue
+
+            try:
+                full_url = urljoin(base_url, href)
+            except Exception:
+                continue
+
+            # 过滤掉重复的 URL
+            if full_url in seen_hrefs:
+                continue
+
+            # 过滤掉明显指向同一页面的链接
+            if urlparse(full_url).path == urlparse(base_url).path:
+                continue
+
+            seen_hrefs.add(full_url)
+
+            # [调用新方法]
+            signature = self._get_structural_signature(a_tag)
+
+            fingerprints.append(LinkFingerprint(href=full_url, text=text, signature=signature))
+        return fingerprints
+
+    def _cluster_fingerprints(self, fingerprints: List[LinkFingerprint]) -> List[LinkGroup]:
+        groups_map = defaultdict(list)
+        for fp in fingerprints:
+            groups_map[fp.signature].append(fp)
+
+        link_groups = [
+            LinkGroup(signature=sig, count=len(fps), all_links=fps)  # [修改] 使用 all_links
+            for sig, fps in groups_map.items()
+        ]
+        link_groups.sort(key=lambda g: g.count, reverse=True)
+        return link_groups
+
+    # --- Core Logic: Decision (重构) ---
+
+    def _get_signature_tokens(self, signature: str) -> Set[str]:
+        # 'div.content > h3.title' -> {'div', 'content', 'h3', 'title'}
+        # '.' '>' '#' ' ' 都是分隔符
+        return set(re.split(r'[._ >#-]', signature.lower()))
+
+    def _get_cluster_features(self, group: LinkGroup) -> ClusterFeatures:
+        """
+        [新] 计算一个集群的所有统计特征。
+        """
+        if not group.all_links:
+            return ClusterFeatures()
+
+        features = ClusterFeatures()
+        all_texts = [fp.text for fp in group.all_links if fp.text]
+
+        # 1. 文本长度 和 唯一性
+        if all_texts:
+            try:
+                features.avg_text_len = sum(len(t) for t in all_texts) / len(all_texts)
+                # [关键特征]
+                features.text_uniqueness = len(set(all_texts)) / len(all_texts)
+            except ZeroDivisionError:
+                pass  # 保持为 0
+
+        # 2. Href 深度
+        try:
+            total_depth = 0
+            for fp in group.all_links:
+                path = urlparse(fp.href).path.strip('/')
+                if path:
+                    total_depth += path.count('/') + 1
+            features.avg_href_depth = total_depth / len(group.all_links)
+        except ZeroDivisionError:
+            pass  # 保持为 0
+
+        return features
+
+    def _guess_by_heuristics(self, groups: List[LinkGroup]) -> Optional[LinkGroup]:
+        """
+        [重构] 启发式逻辑：
+        1. "淘汰赛" (使用更强的过滤器)
+        2. "决赛评分" (使用 "文本唯一性" 作为核心权重)
+        """
+        self._log("    [Decision] 开始 '淘汰赛' 启发式...", indent=1)
+
+        candidates = list(groups)
+
+        # --- 预选: 存储特征以备后用 ---
+        self._log(f"    [Round 0] 预计算 {len(candidates)} 个集群的特征...", indent=1)
+        candidates_with_features: List[Tuple[LinkGroup, ClusterFeatures]] = []
+        for g in candidates:
+            if g.count < self.min_group_count:
+                continue
+            features = self._get_cluster_features(g)
+            candidates_with_features.append((g, features))
+
+        self._log(f"    [Round 0] 初始候选: {len(candidates_with_features)} (淘汰了 count < {self.min_group_count} 的)",
+                  indent=1)
+        if not candidates_with_features:
+            return None
+
+        # --- Round 1: Junk Filter ---
+        self._log(f"    [Round 1] '垃圾内容过滤器' (候选: {len(candidates_with_features)})...", indent=1)
+        candidates_round_1 = []
+        for group, features in candidates_with_features:
+            tokens = self._get_signature_tokens(group.signature)
+            if tokens.intersection(FILTER_JUNK):
+                reason = tokens.intersection(FILTER_JUNK).pop()
+                self._log(f"      - [淘汰] {group.signature} (原因: 含 '{reason}')", indent=2)
+            else:
+                candidates_round_1.append((group, features))
+        self._log(f"    [Round 1] 幸存: {len(candidates_round_1)}", indent=1)
+        if not candidates_round_1:
+            return None
+
+        # --- Round 2: Secondary Content Filter ---
+        self._log(f"    [Round 2] '次要内容过滤器' (候选: {len(candidates_round_1)})...", indent=1)
+        candidates_round_2 = []
+        for group, features in candidates_round_1:
+            tokens = self._get_signature_tokens(group.signature)
+            if tokens.intersection(FILTER_SECONDARY):
+                reason = tokens.intersection(FILTER_SECONDARY).pop()
+                self._log(f"      - [淘汰] {group.signature} (原因: 含 '{reason}')", indent=2)
+            else:
+                candidates_round_2.append((group, features))
+        self._log(f"    [Round 2] 幸存: {len(candidates_round_2)}", indent=1)
+        if not candidates_round_2:
+            return None
+
+        # --- Round 3: Content Sanity Filter (强化) ---
+        self._log(f"    [Round 3] '内容合理性过滤器' (候选: {len(candidates_round_2)})...", indent=1)
+        candidates_round_3 = []
+        for group, features in candidates_round_2:
+            if features.avg_text_len < 10:  # 标题平均长度至少 10
+                self._log(f"      - [淘汰] {group.signature} (原因: 平均文本长度太短 {features.avg_text_len:.1f})",
+                          indent=2)
+            elif features.text_uniqueness < 0.3:  # [关键] 文本唯一性太低 (例如 "阅读更多")
+                self._log(f"      - [淘汰] {group.signature} (原因: 文本唯一性太低 {features.text_uniqueness:.2f})",
+                          indent=2)
+            else:
+                candidates_round_3.append((group, features))
+        self._log(f"    [Round 3] 幸存: {len(candidates_round_3)}", indent=1)
+        if not candidates_round_3:
+            return None
+
+        # --- Finals: Final Scoring (重构权重) ---
+        self._log(f"    [Finals] '决赛评分' (候选: {len(candidates_round_3)})...", indent=1)
+        best_group = None
+        best_score = -999
+
+        for group, features in candidates_round_3:
+            score = 0
+            log_details = []
+
+            # 1. 文本唯一性 (最高权重)
+            uniqueness_score = 0
+            if features.text_uniqueness > 0.9:
+                uniqueness_score = 100  # 强正向信号（几乎都是标题）
+            elif features.text_uniqueness < 0.5:
+                uniqueness_score = -200  # 强负向（很多重复）
+            score += uniqueness_score
+            log_details.append(f"唯一性得分 {uniqueness_score}")
+
+            # 2. 签名关键词得分 (高权重)
+            tokens = self._get_signature_tokens(group.signature)
+            signature_score = 0
+            for token in tokens:
+                signature_score += FINAL_SCORING_MAP.get(token, 0)
+            score += signature_score
+            log_details.append(f"签名得分 {signature_score}")
+
+            # 3. 数量得分 (中等权重)
+            count_score = group.count * 2  # 权重降低
+            score += count_score
+            log_details.append(f"数量得分 {count_score:.0f}")
+
+            # 4. 文本长度得分 (中等权重)
+            text_len_score = min(features.avg_text_len * 0.5, 20.0)  # 权重调整
+            score += text_len_score
+            log_details.append(f"文本长度得分 {text_len_score:.1f}")
+
+            # 5. Href 深度得分 (低权重)
+            depth_score = features.avg_href_depth * 3  # 权重降低
+            score += depth_score
+            log_details.append(f"深度得分 {depth_score:.1f}")
+
+            self._log(f"      - [评分] {group.signature} | 总分: {score:.1f}", indent=2)
+            self._log(f"        (详情: {', '.join(log_details)})", indent=2)
+
+            if score > best_score:
+                best_score = score
+                best_group = group
+
+        if not best_group:
+            self._log("    [Finals] 决赛评分未能选出获胜者。", indent=1)
+            return None
+
+        self._log(f"    [Winner] {best_group.signature} (总分: {best_score:.1f})", indent=1)
+        return best_group
+
+    def _find_group_by_signature(self, groups: List[LinkGroup], signature: str) -> Optional[LinkGroup]:
+        for group in groups:
+            if group.signature == signature:
+                return group
+        return None
+
+    # --- Core Logic: Extraction (已修复) ---
+
+    def _extract_links_by_signature(self, soup: BeautifulSoup, signature: str, base_url: str) -> List[str]:
+        """
+        [已修复]
+        新的签名 (e.g., "div > h3 > a") 直接指向 <a> 标签。
+        因此，soup.select(signature) 会精确返回链接本身，而不是其父元素。
+        """
+        self._log(f"    [Extract] 正在使用 CSS 选择器提取链接: '{signature}'...", indent=1)
+
+        # [修复] signature 现在直接选择 <a> 标签
+        link_tags = soup.select(signature)
+
+        final_links = []
+        seen_hrefs = set()
+        for a_tag in link_tags:
+            # 确保它确实是一个标签 (soup.select 可能返回 NavigableString 等)
+            if not isinstance(a_tag, Tag):
+                continue
+
+            href = a_tag.get('href', '').strip()
+            if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                continue
+            try:
+                full_url = urljoin(base_url, href)
+                if full_url not in seen_hrefs:
+                    final_links.append(full_url)
+                    seen_hrefs.add(full_url)
+            except Exception:
+                continue
+        self._log(f"    [Extract] 成功提取 {len(final_links)} 个链接。", indent=1)
+        return final_links
+
+    # --- IDiscoverer Interface Implementation (来自你的代码) ---
+
+    def discover_channels(self, entry_point: Any, start_date: Optional[datetime.datetime] = None,
+                          end_date: Optional[datetime.datetime] = None) -> List[str]:
+        self.log_messages.clear()
+        self._log(f"开始频道发现: {entry_point}")
+        if not isinstance(entry_point, str) or not entry_point.startswith(('http://', 'https://')):
+            self._log(f"  错误: 入口点必须是有效的 URL 字符串。", indent=1)
+            return []
+        self._log(f"  ListPageDiscoverer 将入口点视为单个频道。", indent=1)
+        return [entry_point]
+
+    def get_articles_for_channel(self, channel_url: str) -> List[str]:
+        self.log_messages.clear()
+        self._log(f"开始从频道 (列表页) 提取文章: {channel_url}")
+
+        soup, groups = self._analyze_page(channel_url)
+        if not soup or not groups:
+            self._log(f"  分析失败或未找到链接组。", indent=1)
+            return []
+
+        winning_group: Optional[LinkGroup] = None
+        if self.ai_signature:
+            self._log(f"  [Decision] 正在使用预配置的 AI 签名: '{self.ai_signature}'", indent=1)
+            winning_group = self._find_group_by_signature(groups, self.ai_signature)
+        else:
+            self._log(f"  [Decision] 未提供 AI 签名, 正在使用启发式算法...", indent=1)
+            winning_group = self._guess_by_heuristics(groups)
+
+        if not winning_group:
+            self._log(f"  [Decision] 无法确定获胜组。", indent=1)
+            return []
+
+        self._log(f"  [Extract] 获胜签名: {winning_group.signature} (数量: {winning_group.count})", indent=1)
+
+        # [调用修复后的提取逻辑]
+        final_links = self._extract_links_by_signature(soup, winning_group.signature, channel_url)
+
+        # [备用方案] 如果 CSS 选择器失败 (e.g., 动态页面), 从已存储的链接中提取
+        if not final_links and winning_group.all_links:
+            self._log(f"    [Extract] CSS 选择器提取失败，回退到使用已存储的链接。", indent=1)
+            final_links = [fp.href for fp in winning_group.all_links]
+
+        return final_links
+
+    # --- AI Helper Method (已更新以使用 'sample_links' 属性) ---
+    def generate_ai_discovery_prompt(self, entry_point_url: str) -> Optional[str]:
+        self.log_messages.clear()
+        self._log(f"正在为以下地址生成 AI 发现提示: {entry_point_url}")
+        soup, groups = self._analyze_page(entry_point_url)
+        if not soup:
+            return None
+        if not groups:
+            return None
+        page_title = soup.title.string.strip() if soup.title else ""
+        prompt = self._prepare_ai_prompt(groups, page_title, entry_point_url)
+        self._log(f"  成功生成 AI 提示。", indent=1)
+        return prompt
+
+    def _prepare_ai_prompt(self, groups: List[LinkGroup], page_title: str, page_url: str) -> str:
+        # [修复] 手动构建字典以正确包含 'sample_links' 属性
+        groups_data = []
+        for g in groups:
+            groups_data.append({
+                "signature": g.signature,
+                "count": g.count,
+                # 'sample_links' 是一个属性，我们在这里调用它
+                "sample_links": [fp.model_dump() for fp in g.sample_links]
+            })
+
+        payload = {"page_url": page_url, "page_title": page_title, "link_groups": groups_data}
+        json_payload = json.dumps(payload, indent=2, ensure_ascii=False)
+        system_prompt = """You are a professional web structure analysis engine. Your task is to analyze a JSON input...
+(AI prompt details omitted for brevity)...
+**Task:**
+Analyze the following JSON data and **return only** the `signature` string of the group you believe is the **main article list**. If none is found, return `null`.
+"""
+        return f"{system_prompt}\n\n**Input Data:**\n```json\n{json_payload}\n```"
+
+
+# --- 示例用法 (用于测试) ---
+if __name__ == "__main__":
+
+    # 1. 创建一个模拟的 Fetcher
+    mock_fetcher = Fetcher()
+
+    # 2. 实例化 Discoverer
+    discoverer = ListPageDiscoverer(fetcher=mock_fetcher, verbose=True)
+
+    # 3. 定义一个目标 URL
+    # test_url = "https://news.ycombinator.com/"
+    test_url = "https://www.theverge.com/"
+
+    # 4. (可选) 生成 AI 提示
+    print("--- 1. 生成 AI 提示 ---")
+    ai_prompt = discoverer.generate_ai_discovery_prompt(test_url)
+    if ai_prompt:
+        # 打印提示的开头和结尾
+        print(ai_prompt[:500] + "\n...\n" + ai_prompt[-100:])
+    print("-" * 30 + "\n")
+
+    # 5. 运行核心功能：获取文章
+    print("--- 2. 运行启发式算法获取文章 ---")
+    articles = discoverer.get_articles_for_channel(test_url)
+
+    print("\n--- 提取结果 ---")
+    if articles:
+        print(f"成功提取 {len(articles)} 篇文章:")
+        for i, article_url in enumerate(articles[:10]):
+            print(f"  {i + 1}. {article_url}")
+        if len(articles) > 10:
+            print(f"  ... (及其他 {len(articles) - 10} 篇)")
+    else:
+        print("未能提取到文章。")

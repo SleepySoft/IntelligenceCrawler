@@ -18,6 +18,7 @@ except ImportError:
 # --- Playwright Imports (with detailed error checking) ---
 try:
     from playwright.sync_api import sync_playwright, Error as PlaywrightError
+    from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
 except ImportError:
     print("!!! IMPORT ERROR: Could not import 'playwright.sync_api'.")
     print("!!! Please ensure playwright is installed correctly: pip install playwright")
@@ -218,7 +219,14 @@ class PlaywrightFetcher(Fetcher):
         This method will block until the browser is successfully launched or fails.
 
         Args:
-            (Same as your original class)
+            log_callback (callable): Function to use for logging.
+            proxy (Optional[str]): Proxy string (e.g., "http://user:pass@host:port").
+            timeout_s (int): Default timeout in seconds for operations.
+            stealth (bool): Whether to enable playwright-stealth.
+            pause_browser (bool): If True, launches browser non-headless and
+                                  calls page.pause() for debugging.
+            render_page (bool): If True, gets page.content() (rendered HTML).
+                                If False, gets response.body() (raw response).
         """
         self._log = also_print(log_callback)
         self.timeout_ms = timeout_s * 1000  # Playwright timeout is in ms
@@ -230,16 +238,17 @@ class PlaywrightFetcher(Fetcher):
         self.proxy_config: Optional[Dict[str, str]] = None
 
         # --- Queues for thread communication ---
-        # Main thread -> Worker thread
-        self.job_queue = queue.Queue()
-        # Worker thread -> Main thread (for startup signal)
-        self.startup_queue = queue.Queue(maxsize=1)
+        self.job_queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
+        self.startup_queue: "queue.Queue[Any]" = queue.Queue(maxsize=1)
+
+        # --- Threading resources ---
+        self.worker_thread: Optional[threading.Thread] = None
 
         # --- 1. Verify Library Availability ---
         if not sync_playwright:
-            raise ImportError("Playwright is not installed.")
+            raise ImportError("Playwright is not installed. Please install 'playwright' and 'playwright install'.")
         if self.stealth_mode and (not sync_stealth and not Stealth):
-            raise ImportError("Playwright-Stealth (v1 or v2) is not installed.")
+            raise ImportError("Playwright-Stealth (v1 or v2) is not installed. Please install 'playwright-stealth'.")
 
         # --- 2. Parse Proxy Configuration ---
         if proxy:
@@ -263,7 +272,6 @@ class PlaywrightFetcher(Fetcher):
         self.worker_thread.start()
 
         # --- 4. Wait for Browser to Launch ---
-        # This blocks __init__ until the worker is ready or fails
         try:
             # Wait up to 60s for browser to start
             startup_result = self.startup_queue.get(timeout=60)
@@ -276,12 +284,12 @@ class PlaywrightFetcher(Fetcher):
 
     def _start_playwright(self):
         """[Worker Thread] Initializes Playwright and launches the browser."""
-        mode = "Stealth" if self.stealth_mode else "Advanced"
-        self._log(f"[Worker] Starting Playwright ({mode}, Slow)...")
+        mode = "Stealth" if self.stealth_mode else "Standard"
+        self._log(f"[Worker] Starting Playwright ({mode}, Headless: {not self.pause_browser})...")
         headless_mode = not self.pause_browser
 
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(headless=headless_mode)
+        self.playwright: "Playwright" = sync_playwright().start()
+        self.browser: "Browser" = self.playwright.chromium.launch(headless=headless_mode)
 
         log_msg = "[Worker] Headless browser started." if headless_mode \
             else "[Worker] Headful browser started (pause_browser=True)."
@@ -291,9 +299,15 @@ class PlaywrightFetcher(Fetcher):
         """[Worker Thread] Shuts down the Playwright browser and process."""
         self._log("[Worker] Stopping Playwright browser...")
         if hasattr(self, 'browser') and self.browser:
-            self.browser.close()
+            try:
+                self.browser.close()
+            except Exception as e:
+                self._log(f"[Worker Warning] Error closing browser: {e}")
         if hasattr(self, 'playwright') and self.playwright:
-            self.playwright.stop()
+            try:
+                self.playwright.stop()
+            except Exception as e:
+                self._log(f"[Worker Warning] Error stopping playwright: {e}")
         self._log("[Worker] Playwright stopped.")
 
     def _worker_loop(self):
@@ -313,8 +327,6 @@ class PlaywrightFetcher(Fetcher):
         while True:
             try:
                 # Wait for a job from the main thread
-                # A job is a tuple: (url, result_queue)
-                # Or a signal: ('shutdown', shutdown_complete_event)
                 job_data = self.job_queue.get()
                 if not job_data:
                     continue
@@ -327,11 +339,13 @@ class PlaywrightFetcher(Fetcher):
                     break  # Exit loop
 
                 if job_type == 'get_content':
-                    url = data
+                    # 'data' is now a job_payload dictionary
+                    job_payload = data
+                    url = job_payload['url']
                     self._log(f"[Worker] Starting job for: {url}")
                     try:
                         # Call the *actual* fetching logic
-                        content = self._fetch_page_content(url)
+                        content = self._fetch_page_content(job_payload)
                         result_queue.put(content)  # Send content back
                     except Exception as e:
                         self._log(f"[Worker Error] Job failed for {url}: {e}")
@@ -344,22 +358,55 @@ class PlaywrightFetcher(Fetcher):
         self._stop_playwright()
         self._log("[Worker] Thread exiting.")
 
-    def get_content(self, url: str) -> Optional[bytes]:
+
+    def get_content(self,
+                    url: str,
+                    wait_until: str = 'networkidle',
+                    wait_for_selector: Optional[str] = None,
+                    wait_for_timeout_s: Optional[int] = None
+                    ) -> Optional[bytes]:
         """
-        [Main Thread] Fetches content from a URL.
+        [Main Thread] Fetches content from a URL with flexible wait conditions.
 
         This method is synchronous and thread-safe. It sends the request
         to the background worker thread and blocks until the result is returned.
+
+        Args:
+            url (str): The URL to fetch.
+            wait_until (str): The 'wait_until' strategy for page.goto().
+                One of: 'load', 'domcontentloaded', 'networkidle'.
+                Defaults to 'load'.
+            wait_for_selector (Optional[str]): A CSS selector to wait for
+                after the page.goto() completes. (Best-effort wait).
+            wait_for_timeout_s (Optional[int]): Specific timeout in seconds
+                for the 'wait_for_selector'. If None, defaults to the
+                main 'timeout_s' defined in __init__.
+
+        Returns:
+            Optional[bytes]: The fetched page content (HTML or raw bytes).
+
+        Raises:
+            RuntimeError: If the worker thread is not running.
+            TimeoutError: If the worker thread times out responding.
+            PlaywrightError: If a non-recoverable error occurs (e.g., page load failure).
         """
-        if not self.worker_thread.is_alive():
+        if not self.worker_thread or not self.worker_thread.is_alive():
             raise RuntimeError(
                 "Playwright worker thread is not running. Fetcher may have been closed or failed to start.")
 
         # Create a one-time queue to get the result back
-        result_queue = queue.Queue(maxsize=1)
+        result_queue: "queue.Queue[Any]" = queue.Queue(maxsize=1)
+
+        # --- Create the job payload with all wait parameters ---
+        job_payload = {
+            'url': url,
+            'wait_until': wait_until,
+            'wait_for_selector': wait_for_selector,
+            'wait_for_timeout_ms': (wait_for_timeout_s * 1000) if wait_for_timeout_s is not None else None
+        }
 
         # Send the job to the worker thread
-        self.job_queue.put(('get_content', url, result_queue))
+        self.job_queue.put(('get_content', job_payload, result_queue))
 
         # Block and wait for the result
         # Add a 10-second buffer to the timeout
@@ -377,13 +424,23 @@ class PlaywrightFetcher(Fetcher):
             self._log(f"[Main Thread] Timeout waiting for worker response for {url}")
             raise TimeoutError(f"Playwright job for {url} timed out after {wait_timeout}s")
 
-    def _fetch_page_content(self, url: str) -> Optional[bytes]:
+
+    def _fetch_page_content(self, job_payload: dict) -> Optional[bytes]:
         """
-        [Worker Thread] The *actual* browser logic,
-        (This is your original get_content() method, renamed)
+        [Worker Thread] The *actual* browser logic, now with flexible
+        and best-effort waiting.
         """
+        # --- 1. Unpack Job Payload ---
+        url = job_payload['url']
+        wait_until = job_payload.get('wait_until', 'load')
+        wait_for_selector = job_payload.get('wait_for_selector')
+
+        # Use specific selector timeout, or fall back to the main timeout
+        selector_timeout_ms = job_payload.get('wait_for_timeout_ms') or self.timeout_ms
+
         context = None
         try:
+            # --- 2. Create Context and Page ---
             context_options = {
                 "user_agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
             }
@@ -393,52 +450,98 @@ class PlaywrightFetcher(Fetcher):
             context = self.browser.new_context(**context_options)
             page = context.new_page()
 
+            # --- 3. Apply Stealth (if enabled) ---
             if self.stealth_mode:
-                if sync_stealth:
-                    sync_stealth(page)
-                elif Stealth:
+                if Stealth:  # v2
                     Stealth().apply_stealth_sync(page)
-                else:
+                elif sync_stealth:  # v1
+                    sync_stealth(page)
+                else:  # Fallback
                     page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             else:
                 page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-            response = page.goto(url, timeout=self.timeout_ms, wait_until='domcontentloaded')
+            # --- 4. Main Page Navigation (Hard Fail) ---
+            response = page.goto(
+                url,
+                timeout=self.timeout_ms,
+                wait_until=wait_until
+            )
 
             if self.pause_browser:
                 page.pause()
 
+            # This is a hard failure. If the page didn't load, we must error.
             if not response or not response.ok:
                 status = response.status if response else 'N/A'
-                # --- MODIFICATION: Raise error instead of returning None ---
                 raise PlaywrightError(f"Failed to get valid response. Status: {status}")
 
+            self._log(f"[Worker] page.goto() successful for {url} (Status: {response.status}, Wait: {wait_until})")
+
+            # --- 5. Best-Effort Selector Wait (Soft Fail) ---
+            if wait_for_selector:
+                self._log(f"[Worker] Waiting for selector '{wait_for_selector}' (timeout: {selector_timeout_ms}ms)...")
+                try:
+                    page.wait_for_selector(
+                        wait_for_selector,
+                        state='visible',
+                        timeout=selector_timeout_ms
+                    )
+                    self._log(f"[Worker] Found selector '{wait_for_selector}'.")
+                except Exception as e:
+                    # This is the "best-effort" logic. We log the warning
+                    # but DO NOT raise the error.
+                    self._log(f"[Worker Warning] Timeout or error waiting for selector '{wait_for_selector}': {str(e)}")
+                    self._log("[Worker] Proceeding to extract content anyway (best-effort).")
+
+            # --- 6. Extract Content ---
+            # This code is now reached even if the selector times out.
             content_bytes: Optional[bytes]
             if self.render_page:
+                self._log("[Worker] Rendering page.content()...")
                 content_str = page.content()
                 content_bytes = content_str.encode('utf-8')
             else:
+                self._log("[Worker] Getting raw response.body()...")
                 content_bytes = response.body()
 
             context.close()
             return content_bytes
 
+        except PlaywrightTimeoutError:
+            if self._log_callback:
+                self._log_callback(f"[Warning] Page.goto timed out for {job_payload.url}. "
+                                   f"Attempting to grab content anyway.")
+
+            # !!! 关键：超时了，但我们不在乎，我们直接尝试获取内容
+            # 如果页面（如HTML）已经存在，这将成功返回
+            content = page.content()
+
+            if not content or "<html>" not in content.lower():
+                # 如果内容为空或无效，才真正抛出异常
+                raise ValueError(f"Timeout occurred AND page content was empty/invalid.")
+
+            # 如果我们拿到了内容，就假装什么都没发生，返回它
+            return content.encode('utf-8')
+
         except Exception as e:
-            # --- MODIFICATION: Must raise exception to send it back to main thread ---
+            # This outer catch block handles hard failures (like page.goto)
+            # or failures during page.content()
             self._log(f"[Worker Error] _fetch_page_content failed for {url}: {e}")
             if context:
                 context.close()
-            raise e  # Re-raise the exception
+            raise e  # Re-raise to send back to main thread
+
 
     def close(self):
         """
         [Main Thread] Shuts down the Playwright worker thread and browser.
         """
         self._log("Sending shutdown signal to worker thread...")
-        if hasattr(self, 'worker_thread') and self.worker_thread.is_alive():
+        if hasattr(self, 'worker_thread') and self.worker_thread and self.worker_thread.is_alive():
             try:
                 # Use a queue to wait for acknowledgment
-                shutdown_queue = queue.Queue(maxsize=1)
+                shutdown_queue: "queue.Queue[Any]" = queue.Queue(maxsize=1)
                 self.job_queue.put(('shutdown', None, shutdown_queue))
                 # Wait 10s for acknowledgment
                 shutdown_queue.get(timeout=10)
@@ -450,3 +553,11 @@ class PlaywrightFetcher(Fetcher):
             if self.worker_thread.is_alive():
                 self._log("[Error] Worker thread failed to join.")
         self._log("PlaywrightFetcher closed.")
+
+
+    def __enter__(self):
+        return self
+
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
