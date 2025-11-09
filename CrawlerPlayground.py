@@ -118,7 +118,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QSplitter,
     QTextEdit, QStatusBar, QTabWidget, QLabel, QFrame, QComboBox,
     QDateEdit, QCheckBox, QToolBar, QSizePolicy, QSpinBox,
-    QMenu, QAction, QFileDialog
+    QMenu, QAction, QFileDialog, QFormLayout, QGridLayout
 )
 from PyQt5.QtCore import (
     Qt, QRunnable, QThreadPool, QObject, pyqtSignal, QTimer, QSettings
@@ -207,6 +207,138 @@ def create_extractor_instance(extractor_name: str, log_callback) -> IExtractor:
 
     ExtractorClass = EXTRACTOR_MAP[extractor_name]
     return ExtractorClass(verbose=True)
+
+
+
+# =============================================================================
+#
+# Reusable Fetcher Configuration Widget
+#
+# =============================================================================
+
+class FetcherConfigWidget(QWidget):
+    """
+    A reusable widget encapsulating all UI controls for fetcher configuration.
+    (一个可复用的窗口部件，封装了所有用于 fetcher 配置的 UI 控件。)
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+
+        # --- Create Widgets ---
+        self.fetcher_combo = QComboBox()
+        self.fetcher_combo.addItems([
+            "Simple (Requests)",
+            "Advanced (Playwright)",
+            "Stealth (Playwright)"
+        ])
+        if not sync_playwright:
+            self.fetcher_combo.model().item(1).setEnabled(False)
+            self.fetcher_combo.model().item(2).setEnabled(False)
+        if not sync_stealth and not Stealth:
+            self.fetcher_combo.model().item(2).setEnabled(False)
+
+        self.proxy_input = QLineEdit()
+        self.proxy_input.setPlaceholderText("e.g., http://user:pass@host:port")
+
+        self.timeout_spin = QSpinBox()
+        self.timeout_spin.setRange(1, 300)
+        self.timeout_spin.setValue(10)
+        self.timeout_spin.setSuffix(" s")
+
+        self.pause_check = QCheckBox("Pause")
+        self.pause_check.setToolTip("Pauses Playwright (in headful mode) for debugging.")
+
+        self.render_check = QCheckBox("Render")
+        self.render_check.setToolTip("Fetches final rendered HTML (slower) vs. raw response (faster).")
+
+        # --- New Playwright-specific widgets ---
+        self.wait_until_label = QLabel("WaitUntil:")
+        self.wait_until_combo = QComboBox()
+        self.wait_until_combo.addItems(['networkidle', 'load', 'domcontentloaded', 'commit'])
+        self.wait_until_combo.setToolTip("Playwright page.goto() wait_until option.")
+
+        self.wait_selector_label = QLabel("Wait Selector:")
+        self.wait_selector_input = QLineEdit()
+        self.wait_selector_input.setPlaceholderText("e.g., #main-content")
+        self.wait_selector_input.setToolTip("Playwright: wait for this selector to appear before returning.")
+
+        # --- Layout ---
+        # We use QGridLayout for precise alignment
+        grid_layout = QGridLayout(self)
+        grid_layout.setContentsMargins(0, 0, 0, 0)  # No external margins
+
+        # Row 0
+        grid_layout.addWidget(QLabel("Fetcher:"), 0, 0)
+        grid_layout.addWidget(self.fetcher_combo, 0, 1)
+        grid_layout.addWidget(QLabel("Timeout:"), 0, 2)
+        grid_layout.addWidget(self.timeout_spin, 0, 3)
+        grid_layout.addWidget(self.pause_check, 0, 4)
+        grid_layout.addWidget(self.render_check, 0, 5)
+
+        # Row 1
+        grid_layout.addWidget(QLabel("Proxy:"), 1, 0)
+        grid_layout.addWidget(self.proxy_input, 1, 1, 1, 5)  # Spans 5 columns
+
+        # Row 2 (Playwright options)
+        grid_layout.addWidget(self.wait_until_label, 2, 0)
+        grid_layout.addWidget(self.wait_until_combo, 2, 1)
+        grid_layout.addWidget(self.wait_selector_label, 2, 2)
+        grid_layout.addWidget(self.wait_selector_input, 2, 3, 1, 3)  # Spans 3 columns
+
+        # Set column stretch
+        grid_layout.setColumnStretch(1, 1)
+        grid_layout.setColumnStretch(3, 1)
+
+        # --- Connect Signals ---
+        self.fetcher_combo.currentTextChanged.connect(self._on_fetcher_changed)
+
+        # --- Initial State ---
+        self._on_fetcher_changed(self.fetcher_combo.currentText())
+
+    def _on_fetcher_changed(self, text: str):
+        """Show/hide Playwright options based on fetcher selection."""
+        is_playwright = "Playwright" in text
+        self.wait_until_label.setVisible(is_playwright)
+        self.wait_until_combo.setVisible(is_playwright)
+        self.wait_selector_label.setVisible(is_playwright)
+        self.wait_selector_input.setVisible(is_playwright)
+
+        # Playwright-specific checks
+        self.pause_check.setEnabled(is_playwright)
+        self.render_check.setEnabled(is_playwright)
+        if not is_playwright:
+            self.pause_check.setChecked(False)
+            self.render_check.setChecked(False)  # Requests cannot render
+
+    def set_defaults(self, fetcher_name: str, timeout: int, render: bool, proxy: str = ""):
+        """Set the default values for the widget."""
+        self.fetcher_combo.setCurrentText(fetcher_name)
+        self.timeout_spin.setValue(timeout)
+        self.render_check.setChecked(render)
+        self.proxy_input.setText(proxy)
+
+        # Ensure correct state is triggered
+        self._on_fetcher_changed(fetcher_name)
+
+    def set_render_tooltip(self, tooltip: str):
+        """Allow parent to override the 'Render' checkbox tooltip."""
+        self.render_check.setToolTip(tooltip)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return the current configuration as a dictionary."""
+        fetcher_name = self.fetcher_combo.currentText()
+        is_playwright = "Playwright" in fetcher_name
+
+        return {
+            'fetcher_name': fetcher_name,
+            'proxy': self.proxy_input.text().strip() or None,
+            'timeout': self.timeout_spin.value(),
+            'pause': self.pause_check.isChecked() and is_playwright,
+            'render': self.render_check.isChecked() and is_playwright,
+            'wait_until': self.wait_until_combo.currentText() if is_playwright else 'networkidle',
+            'wait_for_selector': self.wait_selector_input.text().strip() or None if is_playwright else None,
+        }
 
 
 # =============================================================================
@@ -416,23 +548,15 @@ class ExtractionWorker(QRunnable):
     """Worker thread for Stage 3: Fetching and Extracting a single article."""
 
     def __init__(self,
-                 fetcher_name: str,
+                 fetcher_config: dict,  # <-- 接收整个配置字典
                  extractor_name: str,
                  url_to_extract: str,
-                 extractor_kwargs: dict,
-                 proxy: Optional[str],
-                 timeout: int,
-                 pause_browser: bool,
-                 render_page: bool):
+                 extractor_kwargs: dict):
         super(ExtractionWorker, self).__init__()
-        self.fetcher_name = fetcher_name
+        self.fetcher_config = fetcher_config  # 存储字典
         self.extractor_name = extractor_name
         self.url_to_extract = url_to_extract
         self.extractor_kwargs = extractor_kwargs
-        self.proxy = proxy
-        self.timeout = timeout
-        self.pause_browser = pause_browser
-        self.render_page = render_page  # This SHOULD be respected
         self.signals = WorkerSignals()
 
     def run(self):
@@ -440,21 +564,38 @@ class ExtractionWorker(QRunnable):
         try:
             log_callback = self.signals.progress.emit
 
+            # --- [MODIFIED] ---
             # 1. Create Fetcher
-            log_callback(f"Fetching {self.url_to_extract} using {self.fetcher_name}...")
+            fetcher_name = self.fetcher_config.get('fetcher_name')
+            log_callback(f"Fetching {self.url_to_extract} using {fetcher_name}...")
+
             fetcher = create_fetcher_instance(
-                self.fetcher_name,
+                fetcher_name,
                 log_callback,
-                proxy=self.proxy,
-                timeout=self.timeout,
-                pause_browser=self.pause_browser,
-                render_page=self.render_page
+                proxy=self.fetcher_config.get('proxy'),
+                timeout=self.fetcher_config.get('timeout'),
+                pause_browser=self.fetcher_config.get('pause'),
+                render_page=self.fetcher_config.get('render')
             )
 
             # 2. Get Content
-            content_bytes = fetcher.get_content(self.url_to_extract)
+            # 准备传递给 get_content() 的参数
+            wait_until_val = self.fetcher_config.get('wait_until', 'networkidle')
+            wait_for_selector_val = self.fetcher_config.get('wait_for_selector')
+            # 使用主超时作为 'wait_for_timeout_s'
+            wait_for_timeout_s_val = self.fetcher_config.get('timeout')
+
+            # 假设 fetcher.get_content 签名已更新
+            content_bytes = fetcher.get_content(
+                self.url_to_extract,
+                wait_until=wait_until_val,
+                wait_for_selector=wait_for_selector_val,
+                wait_for_timeout_s=wait_for_timeout_s_val
+            )
+
             if not content_bytes:
                 raise ValueError("Failed to fetch content (returned None).")
+            # --- [END MODIFICATION] ---
 
             log_callback(f"Fetched {len(content_bytes)} bytes. Extracting using {self.extractor_name}...")
 
@@ -475,6 +616,8 @@ class ExtractionWorker(QRunnable):
         finally:
             if fetcher: fetcher.close()
             self.signals.finished.emit()
+
+
 
 
 # =============================================================================
@@ -531,6 +674,7 @@ if __name__ == "__main__":
         print(traceback.format_exc())
 """
 
+
 # --- REQ 4: New Name ---
 class CrawlerPlaygroundApp(QMainWindow):
     """
@@ -543,9 +687,9 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         # --- Internal State ---
         self.discoverer_name: str = "Sitemap"
-        self.discovery_fetcher_name: str = "Simple (Requests)"
-        self.pause_browser: bool = False
-        self.render_page: bool = False
+
+        self.discovery_fetcher_widget: Optional[FetcherConfigWidget] = None
+        self.article_fetcher_widget: Optional[FetcherConfigWidget] = None
 
         # --- [NEW] UI attribute placeholders ---
         self.ai_signature_label: Optional[QLabel] = None
@@ -574,13 +718,28 @@ class CrawlerPlaygroundApp(QMainWindow):
         # --- Initialize UI ---
         self.init_ui()
         self._load_url_history()
+
+        settings = QSettings(SETTING_ORG, SETTING_APP)
+        saved_d_proxy = settings.value(self.DISCOVERY_PROXY_KEY, "", type=str)
+        saved_a_proxy = settings.value(self.ARTICLE_PROXY_KEY, "", type=str)
+
+        if self.discovery_fetcher_widget:
+            self.discovery_fetcher_widget.proxy_input.setText(saved_d_proxy)
+        if self.article_fetcher_widget:
+            # 在 Article 侧设置默认值和加载的代理
+            self.article_fetcher_widget.set_defaults(
+                fetcher_name="Stealth (Playwright)",
+                timeout=20,
+                render=True,
+                proxy=saved_a_proxy
+            )
+
         self.connect_signals()  # Centralize signal connections
 
-        # --- [NEW] Set initial visibility for dynamic UI ---
+        # --- Set initial visibility for dynamic UI ---
         self.update_generated_code()  # Show initial code
         self._update_discoverer_options_ui(self.discoverer_combo.currentText())
         self._update_extractor_options_ui(self.extractor_combo.currentText())
-        # --- [END NEW] ---
 
         self.setWindowTitle("Crawler Playground (v4.0)")
         self.setWindowIcon(QIcon.fromTheme("internet-web-browser"))
@@ -677,6 +836,21 @@ class CrawlerPlaygroundApp(QMainWindow):
         # --- Row 2: Fetcher Options and Proxy ---
         top_bar_row2_layout = QHBoxLayout()
         top_bar_row2_layout.setSpacing(10)
+
+        top_bar_row2_layout.addWidget(QLabel("Discovery Fetcher:"))
+
+        self.discovery_fetcher_widget = FetcherConfigWidget(self)
+        self.discovery_fetcher_widget.set_defaults(
+            fetcher_name="Simple (Requests)",
+            timeout=10,
+            render=False
+        )
+        self.discovery_fetcher_widget.set_render_tooltip(
+            "Fetches final rendered HTML (slower).\n"
+            "[Discovery] Will be forced OFF to ensure XML/RSS parsing.\n"
+            "[Extraction] Will be used as set."
+        )
+        top_bar_row2_layout.addWidget(self.discovery_fetcher_widget, 1)
 
         top_bar_row2_layout.addWidget(QLabel("Discovery Fetcher:"))
         self.discovery_fetcher_combo = QComboBox()
@@ -856,60 +1030,11 @@ class CrawlerPlaygroundApp(QMainWindow):
         right_layout.setSpacing(5)
         right_layout.setContentsMargins(5, 0, 0, 0)  # Left margin
 
-        # --- MODIFICATION: Create TWO toolbars ---
-
         # --- Toolbar 1: Fetcher Settings ---
         fetcher_toolbar = QToolBar("Fetcher Tools")
-        fetcher_toolbar.layout().setSpacing(5)  # <-- MODIFICATION: Add spacing
-        fetcher_toolbar.addWidget(QLabel("Fetcher:"))
-        self.article_fetcher_combo = QComboBox()
-        self.article_fetcher_combo.addItems([
-            "Simple (Requests)",
-            "Advanced (Playwright)",
-            "Stealth (Playwright)"
-        ])
-        if not sync_playwright:
-            self.article_fetcher_combo.model().item(1).setEnabled(False)
-            self.article_fetcher_combo.model().item(2).setEnabled(False)
-        if not sync_stealth and not Stealth:
-            self.article_fetcher_combo.model().item(2).setEnabled(False)
-        self.article_fetcher_combo.setCurrentText("Stealth (Playwright)")
-        fetcher_toolbar.addWidget(self.article_fetcher_combo)
 
-        fetcher_toolbar.addWidget(QLabel("Proxy:"))
-        self.article_proxy_input = QLineEdit()
-        self.article_proxy_input.setPlaceholderText("e.g., socks5://user:pass@host:port")
-        self.article_proxy_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-
-        # --- NEW (REQ 1): Load Article Proxy ---
-        settings = QSettings("MyOrg", "CrawlerPlayground")
-        saved_a_proxy = settings.value(self.ARTICLE_PROXY_KEY, "", type=str)
-        self.article_proxy_input.setText(saved_a_proxy)
-        # --- END NEW ---
-
-        fetcher_toolbar.addWidget(self.article_proxy_input)
-
-        self.article_pause_check = QCheckBox("Pause")
-        self.article_pause_check.setToolTip("Pauses Playwright (in headful mode) for debugging.")
-        fetcher_toolbar.addWidget(self.article_pause_check)
-
-        self.article_render_check = QCheckBox("Render")
-        self.article_render_check.setToolTip("Fetches final rendered HTML (slower) vs. raw response (faster).")
-        self.article_render_check.setChecked(True)  # Default to checked
-        fetcher_toolbar.addWidget(self.article_render_check)
-
-        # --- NEW: Extraction Timeout ---
-        fetcher_toolbar.addWidget(QLabel("Timeout(s):"))
-        self.article_timeout_spin = QSpinBox()
-        self.article_timeout_spin.setRange(1, 300)
-        self.article_timeout_spin.setValue(20)  # Default 20
-        self.article_timeout_spin.setToolTip("Fetcher timeout in seconds for extraction.")
-        fetcher_toolbar.addWidget(self.article_timeout_spin)
-
-        # Add a spacer to push all fetcher controls to the left
-        fetcher_spacer = QWidget()
-        fetcher_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        fetcher_toolbar.addWidget(fetcher_spacer)
+        self.article_fetcher_widget = FetcherConfigWidget(self)
+        fetcher_toolbar.addWidget(self.article_fetcher_widget)
 
         # --- Toolbar 2: Extractor Settings ---
         extractor_toolbar = QToolBar("Extractor Tools")
@@ -925,10 +1050,6 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.extractor_combo.addItem("No Extractors Found")
             self.extractor_combo.setEnabled(False)
         extractor_toolbar.addWidget(self.extractor_combo)
-
-        # self.extractor_settings_button = QPushButton("Settings")
-        # self.extractor_settings_button.setEnabled(False)  # TODO: Implement settings dialog
-        # extractor_toolbar.addWidget(self.extractor_settings_button)
 
         self.css_selector_label = QLabel("Selectors:")
         self.css_selector_input = QLineEdit()
@@ -995,13 +1116,17 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.extractor_analyze_button.clicked.connect(self.start_extraction_analysis)
         self.extractor_combo.currentTextChanged.connect(self._update_extractor_options_ui)
 
-        # Code Generation Triggers
         self.discoverer_combo.currentTextChanged.connect(self.update_generated_code)
-        self.discovery_fetcher_combo.currentTextChanged.connect(self.update_generated_code)
-        self.article_fetcher_combo.currentTextChanged.connect(self.update_generated_code)
+
+        # 连接新 widget 内部的 ComboBox
+        if self.discovery_fetcher_widget:
+            self.discovery_fetcher_widget.fetcher_combo.currentTextChanged.connect(self.update_generated_code)
+        if self.article_fetcher_widget:
+            self.article_fetcher_widget.fetcher_combo.currentTextChanged.connect(self.update_generated_code)
+
         self.extractor_combo.currentTextChanged.connect(self.update_generated_code)
         self.tree_widget.itemChanged.connect(self.update_generated_code_from_tree)
-        # --- NEW: Save button ---
+
         self.save_code_button.clicked.connect(self._save_generated_code)
 
     def set_loading_state(self, is_loading: bool, message: str = ""):
@@ -1010,15 +1135,18 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.url_input.setEnabled(not is_loading)
         self.analyze_button.setEnabled(not is_loading)
         self.discoverer_combo.setEnabled(not is_loading)
-        self.discovery_fetcher_combo.setEnabled(not is_loading)
-        self.pause_browser_check.setEnabled(not is_loading)
-        self.render_page_check.setEnabled(not is_loading)
+
+        if self.discovery_fetcher_widget:
+            self.discovery_fetcher_widget.setEnabled(not is_loading)
 
         # Tree
         self.tree_widget.setEnabled(not is_loading)
 
         # Article Tab (partially)
         self.extractor_analyze_button.setEnabled(not is_loading)
+
+        if self.article_fetcher_widget:
+            self.article_fetcher_widget.setEnabled(not is_loading)
 
         if is_loading:
             self.status_bar.showMessage(message)
@@ -1155,35 +1283,27 @@ class CrawlerPlaygroundApp(QMainWindow):
         # --- (日期设置结束) ---
 
         # 存储策略
-        self.discovery_fetcher_name = self.discovery_fetcher_combo.currentText()
-        self.pause_browser = self.pause_browser_check.isChecked()
-        self.render_page = self.render_page_check.isChecked()
+        fetcher_config = self.discovery_fetcher_widget.get_config()
 
         self.set_loading_state(True, f"Discovering {self.discoverer_name} channels...")
         self.update_generated_code()  # 更新代码片段
 
-        proxy_str = self.discovery_proxy_input.text().strip() or None
-        timeout_sec = self.discovery_timeout_spin.value()
-
-        # --- [NEW] ---
         ai_signature_str = self.ai_signature_input.text().strip() or None
         if self.discoverer_name != "Smart Analysis":
             ai_signature_str = None  # 确保只在 Smart Analysis 时传递
-        # --- [END NEW] ---
 
         self.last_used_entry_point = entry_point_for_worker
 
-        # 5. 启动（已修改的）Worker
         worker = ChannelDiscoveryWorker(
             discoverer_name=self.discoverer_name,
-            fetcher_name=self.discovery_fetcher_name,
+            fetcher_name=fetcher_config['fetcher_name'],
             entry_point=entry_point_for_worker,
             start_date=start_date,
             end_date=end_date,
-            proxy=proxy_str,
-            timeout=timeout_sec,
-            pause_browser=self.pause_browser,
-            render_page=self.render_page,
+            proxy=fetcher_config['proxy'],
+            timeout=fetcher_config['timeout'],
+            pause_browser=fetcher_config['pause'],
+            render_page=fetcher_config['render'],
             ai_signature=ai_signature_str
         )
 
@@ -1203,17 +1323,16 @@ class CrawlerPlaygroundApp(QMainWindow):
         channel_item.setExpanded(True)
         self.status_bar.showMessage(f"Loading articles for {channel_url}...")
 
-        proxy_str = self.discovery_proxy_input.text().strip() or None
-        timeout_sec = self.discovery_timeout_spin.value()
+        fetcher_config = self.discovery_fetcher_widget.get_config()
 
         worker = ArticleListWorker(
             discoverer_name=self.discoverer_name,
-            fetcher_name=self.discovery_fetcher_name,
+            fetcher_name=fetcher_config['fetcher_name'],
             channel_url=channel_url,
-            proxy=proxy_str,
-            timeout=timeout_sec,
-            pause_browser=self.pause_browser,
-            render_page=self.render_page
+            proxy=fetcher_config['proxy'],
+            timeout=fetcher_config['timeout'],
+            pause_browser=fetcher_config['pause'],
+            render_page=fetcher_config['render']
         )
 
         worker.signals.result.connect(self.on_article_list_result)
@@ -1229,17 +1348,16 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.channel_source_viewer.setPlainText(f"Loading source from {url}...")
         self.tab_widget.setCurrentWidget(self.channel_source_viewer)
 
-        proxy_str = self.discovery_proxy_input.text().strip() or None
-        timeout_sec = self.discovery_timeout_spin.value()
+        fetcher_config = self.discovery_fetcher_widget.get_config()
 
         worker = ChannelSourceWorker(
             discoverer_name=self.discoverer_name,
-            fetcher_name=self.discovery_fetcher_name,
+            fetcher_name=fetcher_config['fetcher_name'],
             url=url,
-            proxy=proxy_str,
-            timeout=timeout_sec,
-            pause_browser=self.pause_browser,
-            render_page=self.render_page
+            proxy=fetcher_config['proxy'],
+            timeout=fetcher_config['timeout'],
+            pause_browser=fetcher_config['pause'],
+            render_page=fetcher_config['render']
         )
 
         worker.signals.result.connect(self.on_channel_source_result)
@@ -1257,18 +1375,9 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.status_bar.showMessage("Error: No article URL to analyze.")
             return
 
-        fetcher_name = self.article_fetcher_combo.currentText()
+        fetcher_config = self.article_fetcher_widget.get_config()
         extractor_name = self.extractor_combo.currentText()
 
-        # TODO: Get kwargs from a dialog opened by self.extractor_settings_button
-        extractor_kwargs = {}
-        if extractor_name == "Generic CSS":
-            # This is where you would pop a dialog to ask for selectors
-            # For now, we'll hardcode a placeholder
-            self.append_log_history("[Warning] Generic CSS Extractor running with no selectors.")
-            extractor_kwargs = {'selectors': ['body'], 'exclude_selectors': ['nav', 'footer']}
-
-        # --- [MODIFIED] ---
         # Get kwargs from our helper function
         extractor_kwargs = self._get_current_extractor_args(extractor_name)
 
@@ -1277,22 +1386,15 @@ class CrawlerPlaygroundApp(QMainWindow):
         # --- [END MODIFICATION] ---
 
         self.markdown_output_view.setPlainText(f"Starting analysis on {url}...")
-        self.metadata_output_view.setPlainText("Waiting for analysis to complete...")  # <-- NEW
+        self.metadata_output_view.setPlainText("Waiting for analysis to complete...")
         self.set_loading_state(True, f"Extracting {url} with {extractor_name}...")
         self.update_generated_code()  # Update code snippet
 
-        proxy_str = self.article_proxy_input.text().strip() or None
-        timeout_sec = self.article_timeout_spin.value()
-
         worker = ExtractionWorker(
-            fetcher_name=fetcher_name,
+            fetcher_config=fetcher_config,
             extractor_name=extractor_name,
             url_to_extract=url,
-            extractor_kwargs=extractor_kwargs,
-            proxy=proxy_str,
-            timeout=timeout_sec,
-            pause_browser=self.article_pause_check.isChecked(),
-            render_page=self.article_render_check.isChecked()
+            extractor_kwargs=extractor_kwargs
         )
 
         worker.signals.result.connect(self.on_extraction_result)
@@ -1555,6 +1657,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.update_generated_code()
 
             if self.web_view and QUrl:
+                self._apply_proxy_to_webview()
                 self.web_view.setUrl(QUrl(url))
                 self.web_view.setFocus()
                 self.tab_widget.setCurrentWidget(self.article_preview_widget)
@@ -1755,14 +1858,16 @@ class CrawlerPlaygroundApp(QMainWindow):
         (读取所有UI控件并构建标准化的配置字典。)
         """
         # --- 1. Discoverer Configuration ---
-        discovery_fetcher_name = self.discovery_fetcher_combo.currentText()
+        d_fetcher_config_dict = self.discovery_fetcher_widget.get_config()
+        discovery_fetcher_name = d_fetcher_config_dict['fetcher_name']
+
         discoverer_fetcher_params = {
             "class": discovery_fetcher_name,
             "parameters": {
-                "proxy": self.discovery_proxy_input.text().strip() or None,
-                "timeout": self.discovery_timeout_spin.value(),
+                "proxy": d_fetcher_config_dict['proxy'],
+                "timeout": d_fetcher_config_dict['timeout'],
                 "stealth": "Stealth" in discovery_fetcher_name,
-                "pause_browser": self.pause_browser_check.isChecked(),
+                "pause_browser": d_fetcher_config_dict['pause'],
                 "render_page": False  # Hardcoded False for discovery
             }
         }
@@ -1779,20 +1884,31 @@ class CrawlerPlaygroundApp(QMainWindow):
         }
 
         # --- 2. Extractor Configuration ---
-        article_fetcher_name = self.article_fetcher_combo.currentText()
+        e_fetcher_config_dict = self.article_fetcher_widget.get_config()
+        article_fetcher_name = e_fetcher_config_dict['fetcher_name']
+
         extractor_fetcher_params = {
             "class": article_fetcher_name,
             "parameters": {
-                "proxy": self.article_proxy_input.text().strip() or None,
-                "timeout": self.article_timeout_spin.value(),
+                "proxy": e_fetcher_config_dict['proxy'],
+                "timeout": e_fetcher_config_dict['timeout'],
                 "stealth": "Stealth" in article_fetcher_name,
-                "pause_browser": self.article_pause_check.isChecked(),
-                "render_page": self.article_render_check.isChecked()
+                "pause_browser": e_fetcher_config_dict['pause'],
+                "render_page": e_fetcher_config_dict['render']
             }
         }
 
         extractor_name = self.extractor_combo.currentText()
+
+        # 合并 CSS args 和 Playwright wait args
         extractor_args = self._get_current_extractor_args(extractor_name)
+
+        # 将 Playwright-wait 参数添加到 extractor_kwargs 中
+        # 生成的脚本中的 CrawlPipeline 将需要解析这些
+        extractor_args['wait_until'] = e_fetcher_config_dict['wait_until']
+        extractor_args['wait_for_selector'] = e_fetcher_config_dict['wait_for_selector']
+        # 传递超时，以便 get_content 可以使用它
+        extractor_args['wait_for_timeout_s'] = e_fetcher_config_dict['timeout']
 
         # --- 3. Assemble Final Config ---
         config = {
@@ -1803,10 +1919,8 @@ class CrawlerPlaygroundApp(QMainWindow):
             },
             "extractor": {
                 "class": extractor_name,
-                "args": extractor_args,
+                "args": extractor_args,  # 现在包含 wait-args
                 "fetcher": extractor_fetcher_params
-                # --- MODIFICATION: URL removed (Request 2) ---
-                # It will now be sourced from the discovery pipeline
             }
         }
         return config
@@ -1927,11 +2041,11 @@ class CrawlerPlaygroundApp(QMainWindow):
         """Ensure threads are cleaned up on exit."""
         self.status_bar.showMessage("Shutting down... waiting for tasks...")
 
-        # --- NEW (REQ 1): Save proxy settings ---
-        settings = QSettings("MyOrg", "CrawlerPlayground")
-        settings.setValue(self.DISCOVERY_PROXY_KEY, self.discovery_proxy_input.text())
-        settings.setValue(self.ARTICLE_PROXY_KEY, self.article_proxy_input.text())
-        # --- END NEW ---
+        settings = QSettings(SETTING_ORG, SETTING_APP)
+        if self.discovery_fetcher_widget:
+            settings.setValue(self.DISCOVERY_PROXY_KEY, self.discovery_fetcher_widget.proxy_input.text())
+        if self.article_fetcher_widget:
+            settings.setValue(self.ARTICLE_PROXY_KEY, self.article_fetcher_widget.proxy_input.text())
 
         self.thread_pool.waitForDone(3000)
         self.thread_pool.clear()
