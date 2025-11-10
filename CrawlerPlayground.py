@@ -2069,15 +2069,15 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         extractor_name = self.extractor_combo.currentText()
 
-        # 合并 CSS args 和 Playwright wait args
+        # [修复] 1. 仅获取 extractor 自己的参数 (例如 {'selectors': [...]})
         extractor_args = self._get_current_extractor_args(extractor_name)
 
-        # 将 Playwright-wait 参数添加到 extractor_kwargs 中
-        # 生成的脚本中的 CrawlPipeline 将需要解析这些
-        extractor_args['wait_until'] = e_fetcher_config_dict['wait_until']
-        extractor_args['wait_for_selector'] = e_fetcher_config_dict['wait_for_selector']
-        # 传递超时，以便 get_content 可以使用它
-        extractor_args['wait_for_timeout_s'] = e_fetcher_config_dict['timeout']
+        # [修复] 2. 为 fetcher.get_content() 创建一个单独的参数字典
+        fetcher_get_content_kwargs = {
+            'wait_until': e_fetcher_config_dict['wait_until'],
+            'wait_for_selector': e_fetcher_config_dict['wait_for_selector'],
+            'wait_for_timeout_s': e_fetcher_config_dict['timeout']
+        }
 
         # --- 3. Assemble Final Config ---
         config = {
@@ -2088,8 +2088,11 @@ class CrawlerPlaygroundApp(QMainWindow):
             },
             "extractor": {
                 "class": extractor_name,
-                "args": extractor_args,  # 现在包含 wait-args
-                "fetcher": extractor_fetcher_params
+                "args": extractor_args,
+                "fetcher": extractor_fetcher_params,
+
+                # [新增] 显式分离 fetcher 的 "get_content" 参数
+                "fetcher_kwargs": fetcher_get_content_kwargs
             }
         }
         return config

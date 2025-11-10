@@ -15,7 +15,7 @@ from IntelligenceCrawler.Fetcher import Fetcher, RequestsFetcher, PlaywrightFetc
 from IntelligenceCrawler.Extractor import (
     ExtractionResult, IExtractor, TrafilaturaExtractor, ReadabilityExtractor,
     Newspaper3kExtractor, GenericCSSExtractor, Crawl4AIExtractor)
-from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer
+from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer, ListPageDiscoverer
 
 log_cb = print
 

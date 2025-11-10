@@ -4,21 +4,17 @@ from IntelligenceCrawler.CrawlPipeline import *
 
 def run_pipeline():
     # === 1. Initialize Components ===
-    d_fetcher = RequestsFetcher(log_callback=log_cb, proxy='http://127.0.0.1:10809', timeout_s=10)
-    e_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy='http://127.0.0.1:10809', timeout_s=20, stealth=True, pause_browser=False, render_page=True)
-    discoverer = SitemapDiscoverer(fetcher=d_fetcher, verbose=True)
+    d_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy=None, timeout_s=10, stealth=True, pause_browser=False, render_page=False)
+    e_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy=None, timeout_s=20, stealth=True, pause_browser=False, render_page=True)
+    discoverer = ListPageDiscoverer(fetcher=d_fetcher, verbose=True, manual_specified_signature='div.fr > div.clearfix.pNcon > ul.clearfix.listN > li > a')
     extractor = TrafilaturaExtractor(verbose=True)
     
     # === 2. Define Parameters ===
-    entry_point = 'https://tass.com/'
-    days_ago = 7
-    end_date = datetime.datetime.now()
-    start_date = end_date - datetime.timedelta(days=days_ago)
-    extractor_kwargs = {}
-    channel_filter_list = [
-        'sitemap/sitemap_hot.xml',
-        'sitemap/sitemap_section.xml',
-    ]
+    entry_point = 'https://world.people.com.cn/GB/1030/index.html'
+    start_date = None
+    end_date = None
+    extractor_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20}
+    channel_filter_list = []
 
     # === 3. Build pipeline ===
     pipeline = CrawlPipeline(
