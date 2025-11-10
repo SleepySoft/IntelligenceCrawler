@@ -509,8 +509,8 @@ class PlaywrightFetcher(Fetcher):
             return content_bytes
 
         except PlaywrightTimeoutError:
-            if self._log_callback:
-                self._log_callback(f"[Warning] Page.goto timed out for {job_payload.url}. "
+            if self._log:
+                self._log(f"[Warning] Page.goto timed out for {job_payload['url']}. "
                                    f"Attempting to grab content anyway.")
 
             # !!! 关键：超时了，但我们不在乎，我们直接尝试获取内容

@@ -209,7 +209,6 @@ def create_extractor_instance(extractor_name: str, log_callback) -> IExtractor:
     return ExtractorClass(verbose=True)
 
 
-
 # =============================================================================
 #
 # Reusable Fetcher Configuration Widget
@@ -220,12 +219,26 @@ class FetcherConfigWidget(QWidget):
     """
     A reusable widget encapsulating all UI controls for fetcher configuration.
     (一个可复用的窗口部件，封装了所有用于 fetcher 配置的 UI 控件。)
+
+    [MODIFIED] Now supports 'one_row' or 'two_row' (multi-row grid) layout.
+    ([已修改] 现在支持 'one_row' 或 'two_row' (多行网格) 布局。)
     """
 
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
+    def __init__(self, layout_style: str = 'two_row', parent: Optional[QWidget] = None):
+        """
+        Initialize the widget.
+        (初始化窗口部件。)
 
-        # --- Create Widgets ---
+        Args:
+            layout_style (str): 'one_row' or 'two_row'.
+                                'one_row' uses a QHBoxLayout.
+                                'two_row' (default) uses a QGridLayout.
+            parent (Optional[QWidget]): Parent widget.
+        """
+        super().__init__(parent)
+        self.layout_style = layout_style
+
+        # --- Create Widgets (This part is unchanged) ---
         self.fetcher_combo = QComboBox()
         self.fetcher_combo.addItems([
             "Simple (Requests)",
@@ -252,7 +265,6 @@ class FetcherConfigWidget(QWidget):
         self.render_check = QCheckBox("Render")
         self.render_check.setToolTip("Fetches final rendered HTML (slower) vs. raw response (faster).")
 
-        # --- New Playwright-specific widgets ---
         self.wait_until_label = QLabel("WaitUntil:")
         self.wait_until_combo = QComboBox()
         self.wait_until_combo.addItems(['networkidle', 'load', 'domcontentloaded', 'commit'])
@@ -263,53 +275,83 @@ class FetcherConfigWidget(QWidget):
         self.wait_selector_input.setPlaceholderText("e.g., #main-content")
         self.wait_selector_input.setToolTip("Playwright: wait for this selector to appear before returning.")
 
-        # --- Layout ---
-        # We use QGridLayout for precise alignment
-        grid_layout = QGridLayout(self)
-        grid_layout.setContentsMargins(0, 0, 0, 0)  # No external margins
+        # --- [MODIFIED] Conditional Layout ---
+        if self.layout_style == 'one_row':
+            # --- 'one_row' LAYOUT (using QHBoxLayout) ---
+            # (用于 Discovery bar)
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(5)  # 控件间的紧凑间距
 
-        # Row 0
-        grid_layout.addWidget(QLabel("Fetcher:"), 0, 0)
-        grid_layout.addWidget(self.fetcher_combo, 0, 1)
-        grid_layout.addWidget(QLabel("Timeout:"), 0, 2)
-        grid_layout.addWidget(self.timeout_spin, 0, 3)
-        grid_layout.addWidget(self.pause_check, 0, 4)
-        grid_layout.addWidget(self.render_check, 0, 5)
+            layout.addWidget(QLabel("Fetcher:"))
+            layout.addWidget(self.fetcher_combo)
+            layout.addWidget(QLabel("Timeout:"))
+            layout.addWidget(self.timeout_spin)
+            layout.addWidget(self.pause_check)
+            layout.addWidget(self.render_check)
 
-        # Row 1
-        grid_layout.addWidget(QLabel("Proxy:"), 1, 0)
-        grid_layout.addWidget(self.proxy_input, 1, 1, 1, 5)  # Spans 5 columns
+            layout.addWidget(QLabel("Proxy:"))
+            layout.addWidget(self.proxy_input, 1)  # 代理输入框占满剩余空间
 
-        # Row 2 (Playwright options)
-        grid_layout.addWidget(self.wait_until_label, 2, 0)
-        grid_layout.addWidget(self.wait_until_combo, 2, 1)
-        grid_layout.addWidget(self.wait_selector_label, 2, 2)
-        grid_layout.addWidget(self.wait_selector_input, 2, 3, 1, 3)  # Spans 3 columns
+            # 添加 Playwright 控件 (它们默认隐藏)
+            layout.addWidget(self.wait_until_label)
+            layout.addWidget(self.wait_until_combo)
+            layout.addWidget(self.wait_selector_label)
+            layout.addWidget(self.wait_selector_input, 1)  # 选择器输入框也占满空间
 
-        # Set column stretch
-        grid_layout.setColumnStretch(1, 1)
-        grid_layout.setColumnStretch(3, 1)
+        else:
+            # --- [REVISED] 'two_row' LAYOUT (using QGridLayout) ---
+            # (用于 Article tab - 修正为真正的2行)
+            grid_layout = QGridLayout(self)
+            grid_layout.setContentsMargins(0, 0, 0, 0)
+            grid_layout.setSpacing(5)  # 增加控件间距
 
-        # --- Connect Signals ---
+            # --- Row 0 ---
+            grid_layout.addWidget(QLabel("Fetcher:"), 0, 0)
+            grid_layout.addWidget(self.fetcher_combo, 0, 1)  # Col 1
+            grid_layout.addWidget(QLabel("Timeout:"), 0, 2)
+            grid_layout.addWidget(self.timeout_spin, 0, 3)  # Col 3
+            grid_layout.addWidget(self.pause_check, 0, 4)  # Col 4
+            grid_layout.addWidget(self.render_check, 0, 5)  # Col 5
+
+            # --- Row 1 ---
+            grid_layout.addWidget(QLabel("Proxy:"), 1, 0)
+            grid_layout.addWidget(self.proxy_input, 1, 1)  # Col 1
+
+            # [FIX] Playwright 控件现在位于第 1 行 (Row 1)
+            grid_layout.addWidget(self.wait_until_label, 1, 2)
+            grid_layout.addWidget(self.wait_until_combo, 1, 3)  # Col 3
+            grid_layout.addWidget(self.wait_selector_label, 1, 4)
+            grid_layout.addWidget(self.wait_selector_input, 1, 5)  # Col 5
+
+            # --- Set Column Stretches ---
+            # (设置列的拉伸，使输入框和下拉框可以扩展)
+            grid_layout.setColumnStretch(1, 2)  # (Fetcher Combo / Proxy Input)
+            grid_layout.setColumnStretch(3, 1)  # (Timeout Spin / WaitUntil Combo)
+            grid_layout.setColumnStretch(5, 2)  # (Render Check / Wait Selector Input)
+
+        # --- [END MODIFICATION] ---
+
+        # --- Connect Signals (Unchanged) ---
         self.fetcher_combo.currentTextChanged.connect(self._on_fetcher_changed)
 
-        # --- Initial State ---
+        # --- Initial State (Unchanged) ---
         self._on_fetcher_changed(self.fetcher_combo.currentText())
 
     def _on_fetcher_changed(self, text: str):
         """Show/hide Playwright options based on fetcher selection."""
+        # (This method works for both layouts without modification)
         is_playwright = "Playwright" in text
         self.wait_until_label.setVisible(is_playwright)
         self.wait_until_combo.setVisible(is_playwright)
         self.wait_selector_label.setVisible(is_playwright)
         self.wait_selector_input.setVisible(is_playwright)
 
-        # Playwright-specific checks
         self.pause_check.setEnabled(is_playwright)
         self.render_check.setEnabled(is_playwright)
         if not is_playwright:
             self.pause_check.setChecked(False)
-            self.render_check.setChecked(False)  # Requests cannot render
+            self.render_check.setChecked(False)
 
     def set_defaults(self, fetcher_name: str, timeout: int, render: bool, proxy: str = ""):
         """Set the default values for the widget."""
@@ -317,8 +359,6 @@ class FetcherConfigWidget(QWidget):
         self.timeout_spin.setValue(timeout)
         self.render_check.setChecked(render)
         self.proxy_input.setText(proxy)
-
-        # Ensure correct state is triggered
         self._on_fetcher_changed(fetcher_name)
 
     def set_render_tooltip(self, tooltip: str):
@@ -839,7 +879,7 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         top_bar_row2_layout.addWidget(QLabel("Discovery Fetcher:"))
 
-        self.discovery_fetcher_widget = FetcherConfigWidget(self)
+        self.discovery_fetcher_widget = FetcherConfigWidget(layout_style='one_row', parent=self)
         self.discovery_fetcher_widget.set_defaults(
             fetcher_name="Simple (Requests)",
             timeout=10,
@@ -985,7 +1025,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         # --- Toolbar 1: Fetcher Settings ---
         fetcher_toolbar = QToolBar("Fetcher Tools")
 
-        self.article_fetcher_widget = FetcherConfigWidget(self)
+        self.article_fetcher_widget = FetcherConfigWidget(layout_style='two_row', parent=self)
         fetcher_toolbar.addWidget(self.article_fetcher_widget)
 
         # --- Toolbar 2: Extractor Settings ---
@@ -1177,14 +1217,14 @@ class CrawlerPlaygroundApp(QMainWindow):
                 # 情况 B: RSS + 单个 URL -> 传递 str
                 entry_point_for_worker = http_urls[0]
                 if http_urls[0] != url_input_text:
-                    self.url_input.setText(http_urls[0])  # 清理 UI
+                    self.url_input.setCurrentText(http_urls[0])  # 清理 UI
 
             else:
                 # 情况 C: RSS + 非 http 字符串 (如 example.com 或单个 feed) -> 传递 str
                 # 我们假设 RSS 的 _handle_single_url 可以处理 'example.com' (如果不能，就添加 https://)
                 # 为了安全起见，我们添加 https://
                 entry_point_for_worker = "https://" + url_input_text
-                self.url_input.setText(entry_point_for_worker)
+                self.url_input.setCurrentText(entry_point_for_worker)
                 self.append_log_history("[Info] Non-http string detected, adding 'https://'.")
 
         elif self.discoverer_name == "Sitemap":
@@ -1199,12 +1239,12 @@ class CrawlerPlaygroundApp(QMainWindow):
                 # 情况 E: Sitemap + 单个 URL -> 传递 str
                 entry_point_for_worker = http_urls[0]
                 if http_urls[0] != url_input_text:
-                    self.url_input.setText(http_urls[0])  # 清理 UI
+                    self.url_input.setCurrentText(http_urls[0])  # 清理 UI
 
             else:
                 # 情况 F: Sitemap + 非 http 字符串 (example.com) -> 传递 str
                 entry_point_for_worker = "https://" + url_input_text
-                self.url_input.setText(entry_point_for_worker)
+                self.url_input.setCurrentText(entry_point_for_worker)
                 self.append_log_history("[Info] Non-http string detected, adding 'https://'.")
 
         else:
@@ -1216,7 +1256,7 @@ class CrawlerPlaygroundApp(QMainWindow):
 
             entry_point_for_worker = http_urls[0] if http_urls else "https://" + url_input_text
             if entry_point_for_worker != self.url_input.currentText():
-                self.url_input.setText(entry_point_for_worker)
+                self.url_input.setCurrentText(entry_point_for_worker)
 
         # 4. 清理并准备 Worker
         self.clear_all_controls()
