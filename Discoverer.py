@@ -1015,8 +1015,6 @@ class ListPageDiscoverer(IDiscoverer):
         if self.verbose:
             print(log_msg)
 
-    # --- Core Logic: Fingerprint Analysis (重构) ---
-
     def _analyze_page(self, url: str) -> Tuple[Optional[BeautifulSoup], List[LinkGroup]]:
         if url in self.analysis_cache:
             return self.analysis_cache[url]
@@ -1386,6 +1384,63 @@ class ListPageDiscoverer(IDiscoverer):
             final_links = [fp.href for fp in winning_group.all_links]
 
         return final_links
+
+    def get_signature_groups(self, page_url: str) -> List[Dict[str, Any]]:
+        """
+        为 UI 提供分析结果。
+
+        运行 (或从缓存获取) 页面分析，并返回一个简化的、
+        适合 UI 显示的 "签名组" 列表。
+
+        Args:
+            page_url (str): 要分析的列表页 URL。
+
+        Returns:
+            List[Dict[str, Any]]:
+            一个字典列表，每个字典代表一个签名组，包含:
+            - "signature" (str): 签名
+            - "count" (int): 链接数量
+            - "sample_links" (List[Dict]): 示例链接 (href, text)
+        """
+        self.log_messages.clear()
+        self._log(f"开始为 UI 分析签名组: {page_url}")
+
+        try:
+            # 1. 运行核心分析 (这将使用缓存，如果存在)
+            soup, groups = self._analyze_page(page_url)
+
+            if not groups:
+                self._log(f"  分析未找到任何链接组。", indent=1)
+                return []
+
+            # 2. 将 Pydantic 模型转换为简单的字典列表
+            #    我们使用 `sample_links` 属性，而不是 `all_links`，以保持数据量可控
+            results_for_ui = []
+            for group in groups:
+                # 将 LinkFingerprint (Pydantic) 转换为 dict
+                sample_links_as_dicts = [
+                    {"href": fp.href, "text": fp.text}
+                    for fp in group.sample_links  # 使用 @property
+                ]
+
+                group_data = {
+                    "signature": group.signature,
+                    "count": group.count,
+                    "sample_links": sample_links_as_dicts
+                }
+                results_for_ui.append(group_data)
+
+            self._log(f"  分析完成. 返回 {len(results_for_ui)} 个签名组。", indent=1)
+
+            # 结果已按数量降序排列 (来自 _cluster_fingerprints)
+            return results_for_ui
+
+        except Exception as e:
+            # 确保导入 traceback
+            import traceback
+            self._log(f"  [Error] get_signature_groups 失败: {str(e)}")
+            self._log(traceback.format_exc())
+            return []
 
     # --- AI Helper Method (已更新以使用 'sample_links' 属性) ---
     def generate_ai_discovery_prompt(self, entry_point_url: str) -> Optional[str]:

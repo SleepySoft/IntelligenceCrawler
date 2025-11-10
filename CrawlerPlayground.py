@@ -118,7 +118,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QSplitter,
     QTextEdit, QStatusBar, QTabWidget, QLabel, QFrame, QComboBox,
     QDateEdit, QCheckBox, QToolBar, QSizePolicy, QSpinBox,
-    QMenu, QAction, QFileDialog, QFormLayout, QGridLayout
+    QMenu, QAction, QFileDialog, QFormLayout, QGridLayout, QDialogButtonBox, QDialog
 )
 from PyQt5.QtCore import (
     Qt, QRunnable, QThreadPool, QObject, pyqtSignal, QTimer, QSettings
@@ -379,6 +379,103 @@ class FetcherConfigWidget(QWidget):
             'wait_until': self.wait_until_combo.currentText() if is_playwright else 'networkidle',
             'wait_for_selector': self.wait_selector_input.text().strip() or None if is_playwright else None,
         }
+
+
+class SignatureInspectorDialog(QDialog):
+    """
+    A dialog to display signature groups and select the best one.
+    (一个用于显示签名组并选择最佳签名的对话框。)
+    """
+
+    def __init__(self, groups_data: List[Dict[str, Any]], page_url: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.groups_data = groups_data
+        self.selected_signature: Optional[str] = None
+
+        self.setWindowTitle(f"Signature Inspector - {page_url}")
+        self.setMinimumSize(800, 600)  # 设置一个合理的最小尺寸
+        self.setLayout(QVBoxLayout())
+
+        # 1. 帮助文本
+        self.layout().addWidget(QLabel(
+            "Double-click or select a signature and press OK. "
+            "Clicking a sample link also selects its parent signature."
+        ))
+
+        # 2. 树形控件
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Signature / Sample Text", "Count / Sample URL"])
+        self.tree.setColumnWidth(0, 500)  # 签名列更宽
+        self.layout().addWidget(self.tree, 1)
+
+        self._populate_tree()
+
+        # 3. 按钮
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        # OK 按钮默认禁用，直到用户选择
+        self.ok_button = self.button_box.button(QDialogButtonBox.Ok)
+        self.ok_button.setEnabled(False)
+        self.layout().addWidget(self.button_box)
+
+        # 4. 连接信号
+        self.tree.itemClicked.connect(self.on_item_clicked)
+        self.tree.itemDoubleClicked.connect(self.on_item_double_clicked)
+
+    def _populate_tree(self):
+        """Fills the tree with signature groups and their sample links."""
+        self.tree.clear()
+        for group in self.groups_data:
+            # 创建父项 (签名)
+            parent_item = QTreeWidgetItem([
+                group.get('signature', 'N/A'),
+                str(group.get('count', 0))
+            ])
+            # [关键] 将签名字符串存储在 UserRole 中，以便轻松检索
+            parent_item.setData(0, Qt.UserRole, group.get('signature'))
+            parent_item.setToolTip(0, f"Signature:\n{group.get('signature')}")
+            parent_item.setToolTip(1, f"Count: {group.get('count', 0)}")
+            self.tree.addTopLevelItem(parent_item)
+
+            # 创建子项 (样本链接)
+            for link in group.get('sample_links', []):
+                child_item = QTreeWidgetItem([
+                    link.get('text', '[no text]'),
+                    link.get('href', 'N/A')
+                ])
+                child_item.setToolTip(0, f"Sample Text:\n{link.get('text')}")
+                child_item.setToolTip(1, f"Sample URL:\n{link.get('href')}")
+                parent_item.addChild(child_item)
+
+        self.tree.expandAll()
+        self.tree.resizeColumnToContents(0)
+        self.tree.resizeColumnToContents(1)
+
+    def on_item_clicked(self, item: QTreeWidgetItem, column: int):
+        """Selects the parent signature when any item is clicked."""
+        parent = item
+        # 循环查找顶层父项
+        while parent.parent():
+            parent = parent.parent()
+
+        # 检索存储的签名
+        signature = parent.data(0, Qt.UserRole)
+        if signature:
+            self.selected_signature = signature
+            self.ok_button.setEnabled(True)
+            # (可选) 设置窗口状态栏文本，如果它有的话
+            # self.statusBar().showMessage(f"Selected: {signature}")
+
+    def on_item_double_clicked(self, item: QTreeWidgetItem, column: int):
+        """Double-clicking accepts the selection."""
+        self.on_item_clicked(item, column)  # 确保选中
+        if self.selected_signature:
+            self.accept()  # 接受对话框
+
+    def get_selected_signature(self) -> Optional[str]:
+        """Public method to retrieve the result."""
+        return self.selected_signature
 
 
 # =============================================================================
@@ -658,6 +755,59 @@ class ExtractionWorker(QRunnable):
             self.signals.finished.emit()
 
 
+class SignatureAnalysisWorker(QRunnable):
+    """
+    Worker thread to analyze a list page and get all signature groups.
+    (用于分析列表页并获取所有签名组的 Worker 线程。)
+    """
+
+    def __init__(self,
+                 fetcher_config: dict,
+                 url_to_analyze: str):
+        super(SignatureAnalysisWorker, self).__init__()
+        self.fetcher_config = fetcher_config
+        self.url_to_analyze = url_to_analyze
+        self.signals = WorkerSignals()
+
+    def run(self):
+        fetcher: Optional[Fetcher] = None
+        discoverer: Optional[IDiscoverer] = None
+        try:
+            log_callback = self.signals.progress.emit
+            log_callback(f"Starting signature analysis on {self.url_to_analyze}...")
+
+            # 1. Create Fetcher
+            fetcher_name = self.fetcher_config.get('fetcher_name')
+            fetcher = create_fetcher_instance(
+                fetcher_name,
+                log_callback,
+                proxy=self.fetcher_config.get('proxy'),
+                timeout=self.fetcher_config.get('timeout'),
+                pause_browser=self.fetcher_config.get('pause'),
+                render_page=self.fetcher_config.get('render')
+            )
+
+            # 2. Create Discoverer (Must be ListPageDiscoverer)
+            # 确保 ListPageDiscoverer 已导入
+            if 'ListPageDiscoverer' not in globals():
+                raise ImportError("ListPageDiscoverer class not found.")
+
+            discoverer = ListPageDiscoverer(fetcher, verbose=True)
+
+            # 3. Do the work
+            # [核心] 调用你的新接口
+            groups_data = discoverer.get_signature_groups(self.url_to_analyze)
+
+            self.signals.result.emit(groups_data)
+
+        except Exception as e:
+            ex_type, ex_value, tb_str = sys.exc_info()
+            self.signals.error.emit((str(ex_type), str(e), traceback.format_exc()))
+        finally:
+            # 确保 discoverer (及其 fetcher) 被正确关闭
+            # (注意: 我们的 Discoverer 基类没有 .close(), 但 Fetcher 有)
+            if fetcher: fetcher.close()
+            self.signals.finished.emit()
 
 
 # =============================================================================
@@ -849,6 +999,15 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.manual_specified_signature_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
         top_bar_row1_layout.addWidget(self.manual_specified_signature_label)
         top_bar_row1_layout.addWidget(self.manual_specified_signature_input, 1)  # Give it stretch
+
+        # --- [NEW] 'Inspect Signatures' Button ---
+        self.inspect_signature_button = QPushButton("Inspect...")
+        self.inspect_signature_button.setToolTip(
+            "Analyze the entry URL to find all possible link signatures.\n"
+            "(Requires 'Smart Analysis' mode)"
+        )
+        self.inspect_signature_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        top_bar_row1_layout.addWidget(self.inspect_signature_button)
         # --- [END NEW] ---
 
         self.date_filter_check = QCheckBox("Filter last:")
@@ -1097,6 +1256,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.url_input.lineEdit().textChanged.connect(self.on_url_input_changed)
         self.analyze_button.clicked.connect(self.start_channel_discovery)
         self.discoverer_combo.currentTextChanged.connect(self._update_discoverer_options_ui)
+        self.inspect_signature_button.clicked.connect(self.start_signature_inspection)
 
         # Tree
         self.tree_widget.itemClicked.connect(self.on_tree_item_clicked)
@@ -1390,12 +1550,74 @@ class CrawlerPlaygroundApp(QMainWindow):
         )
 
         worker.signals.result.connect(self.on_extraction_result)
-        worker.signals.finished.connect(self.on_extraction_finished)
+        worker.signals.finished.connect(self.on_subtask_finished)
         worker.signals.error.connect(self.on_worker_error)
         worker.signals.progress.connect(self.status_bar.showMessage)
         worker.signals.progress.connect(self.append_log_history)
 
         self.thread_pool.start(worker)
+
+    def start_signature_inspection(self):
+        """
+        Slot for the 'Inspect...' button.
+        Starts the SignatureAnalysisWorker.
+        """
+        if self.discoverer_combo.currentText() != "Smart Analysis":
+            self.status_bar.showMessage("Error: Signature inspection only works with 'Smart Analysis' discoverer.")
+            return
+
+        url = self.url_input.currentText().strip()
+        if not url:
+            self.status_bar.showMessage("Error: Please enter a URL to inspect.")
+            return
+
+        # 发现 (Discovery) fetcher 通常用于此操作
+        fetcher_config = self.discovery_fetcher_widget.get_config()
+
+        self.set_loading_state(True, f"Inspecting signatures for {url}...")
+
+        worker = SignatureAnalysisWorker(
+            fetcher_config=fetcher_config,
+            url_to_analyze=url
+        )
+
+        # [关键] 将结果连接到新的 dialog-showing slot
+        worker.signals.result.connect(self.on_signature_inspection_result)
+        worker.signals.finished.connect(self.on_subtask_finished)  # (复用 extraction a的 'finished' 处理器)
+        worker.signals.error.connect(self.on_worker_error)
+        worker.signals.progress.connect(self.status_bar.showMessage)
+        worker.signals.progress.connect(self.append_log_history)
+
+        self.thread_pool.start(worker)
+
+    def on_signature_inspection_result(self, groups_data: List[Dict[str, Any]]):
+        """
+        Slot for SignatureAnalysisWorker 'result' signal.
+        Shows the SignatureInspectorDialog.
+        """
+        self.set_loading_state(False, "Signature inspection complete.")
+
+        if not groups_data:
+            self.status_bar.showMessage("Inspection found 0 signature groups.")
+            self.append_log_history("[Inspect] No signature groups found.")
+            return
+
+        self.append_log_history(f"[Inspect] Found {len(groups_data)} signature groups. Opening dialog...")
+
+        url = self.url_input.currentText().strip()  # 获取 URL 用于对话框标题
+        dialog = SignatureInspectorDialog(groups_data, url, self)
+
+        # 以模态方式执行对话框
+        if dialog.exec_() == QDialog.Accepted:
+            selected_sig = dialog.get_selected_signature()
+            if selected_sig:
+                self.ai_signature_input.setText(selected_sig)
+                self.status_bar.showMessage(f"AI Signature set from inspector.")
+                self.append_log_history(f"[Inspect] User selected signature: {selected_sig}")
+            else:
+                self.append_log_history("[Inspect] Dialog accepted but no signature selected.")
+        else:
+            self.append_log_history("[Inspect] User cancelled signature selection.")
 
     # --- Thread Result Slots ---
 
@@ -1485,7 +1707,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             except Exception as e:
                 self.metadata_output_view.setPlainText(f"Could not serialize metadata: {e}\n\n{result.metadata}")
 
-    def on_extraction_finished(self):
+    def on_subtask_finished(self):
         """Slot for *ExtractionWorker* 'finished' signal."""
         self.set_loading_state(False, "Extraction complete.")
 
@@ -2078,6 +2300,8 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.manual_specified_signature_label.setVisible(is_smart)
         if self.manual_specified_signature_input:
             self.manual_specified_signature_input.setVisible(is_smart)
+        if hasattr(self, 'inspect_signature_button'):
+            self.inspect_signature_button.setVisible(is_smart)
 
     def _update_extractor_options_ui(self, extractor_name: str):
         """Shows/hides extractor-specific options based on selection."""
