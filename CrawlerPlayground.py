@@ -852,54 +852,6 @@ class CrawlerPlaygroundApp(QMainWindow):
         )
         top_bar_row2_layout.addWidget(self.discovery_fetcher_widget, 1)
 
-        top_bar_row2_layout.addWidget(QLabel("Discovery Fetcher:"))
-        self.discovery_fetcher_combo = QComboBox()
-        self.discovery_fetcher_combo.addItems([
-            "Simple (Requests)",
-            "Advanced (Playwright)",
-            "Stealth (Playwright)"
-        ])
-        if not sync_playwright:
-            self.discovery_fetcher_combo.model().item(1).setEnabled(False)
-            self.discovery_fetcher_combo.model().item(2).setEnabled(False)
-        if not sync_stealth and not Stealth:
-            self.discovery_fetcher_combo.model().item(2).setEnabled(False)
-        top_bar_row2_layout.addWidget(self.discovery_fetcher_combo)
-
-        self.pause_browser_check = QCheckBox("Pause Browser")
-        self.pause_browser_check.setToolTip("Pauses Playwright (in headful mode) for debugging.")
-        top_bar_row2_layout.addWidget(self.pause_browser_check)
-
-        self.render_page_check = QCheckBox("Render Page")
-        self.render_page_check.setToolTip(
-            "Fetches final rendered HTML (slower).\n"
-            "[Discovery] Will be forced OFF to ensure XML/RSS parsing.\n"
-            "[Extraction] Will be used as set.")
-        top_bar_row2_layout.addWidget(self.render_page_check)
-
-        top_bar_row2_layout.addSpacing(5)
-        top_bar_row2_layout.addWidget(QLabel("Timeout(s):"))
-        self.discovery_timeout_spin = QSpinBox()
-        self.discovery_timeout_spin.setRange(1, 300)  # 1s to 5min
-        self.discovery_timeout_spin.setValue(10)  # Default 10
-        self.discovery_timeout_spin.setToolTip("Fetcher timeout in seconds for discovery.")
-        top_bar_row2_layout.addWidget(self.discovery_timeout_spin)
-
-        top_bar_row2_layout.addSpacing(15)
-
-        top_bar_row2_layout.addWidget(QLabel("Proxy:"))
-        self.discovery_proxy_input = QLineEdit()
-        self.discovery_proxy_input.setPlaceholderText("e.g., http://user:pass@host:port")
-        self.discovery_proxy_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-
-        # --- NEW (REQ 1): Load Discovery Proxy ---
-        settings = QSettings("MyOrg", "CrawlerPlayground")
-        saved_d_proxy = settings.value(self.DISCOVERY_PROXY_KEY, "", type=str)
-        self.discovery_proxy_input.setText(saved_d_proxy)
-        # --- END NEW ---
-
-        top_bar_row2_layout.addWidget(self.discovery_proxy_input, 1)  # Give it stretch factor 1
-
         # --- [NEW] Analyze button moved to Row 2 ---
         top_bar_row2_layout.addSpacing(15)
         self.analyze_button = QPushButton("Discover Channels")
@@ -1681,7 +1633,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             # 如果 webview 不可用，则不执行任何操作
             return
 
-        proxy_str = self.article_proxy_input.text().strip()
+        proxy_str = self.article_fetcher_widget.proxy_input.text().strip()
 
         # 获取 web_view 关联的 profile
         # (我们使用 page().profile() 而不是 defaultProfile() 以确保获取正确的实例)
