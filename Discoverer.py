@@ -1078,7 +1078,18 @@ class ListPageDiscoverer(IDiscoverer):
             # if tag_id:
             #     path.append(f"{name}#{tag_id}") # ID 过于具体，暂不使用
 
-            class_str = f".{'.'.join(classes)}" if classes else ""
+            # [关键修复]
+            if classes:
+                # 在将类名用于 CSS 选择器之前，必须转义特殊字符。
+                # 尤其是 Tailwind CSS 等框架使用的 ':' 和 '/'。
+                escaped_classes = [
+                    c.replace(':', r'\:').replace('/', r'\/')
+                    for c in classes
+                ]
+                class_str = f".{'.'.join(escaped_classes)}"
+            else:
+                class_str = ""
+
             path.append(f"{name}{class_str}")
 
             current = current.parent
@@ -1094,6 +1105,9 @@ class ListPageDiscoverer(IDiscoverer):
 
         # 考虑在 'main', 'article' 区域内查找，减少噪音
         main_content = soup.find('main') or soup.find('article') or soup.body
+
+        if main_content is None:
+            return []
 
         for a_tag in main_content.find_all('a', href=True):
             href = a_tag['href'].strip()
