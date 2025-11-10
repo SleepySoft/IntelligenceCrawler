@@ -1611,7 +1611,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             selected_sig = dialog.get_selected_signature()
             if selected_sig:
-                self.ai_signature_input.setText(selected_sig)
+                self.manual_specified_signature_input.setText(selected_sig)
                 self.status_bar.showMessage(f"AI Signature set from inspector.")
                 self.append_log_history(f"[Inspect] User selected signature: {selected_sig}")
             else:

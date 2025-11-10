@@ -517,7 +517,7 @@ class PlaywrightFetcher(Fetcher):
             # 如果页面（如HTML）已经存在，这将成功返回
             content = page.content()
 
-            if not content or "<html>" not in content.lower():
+            if not content:
                 # 如果内容为空或无效，才真正抛出异常
                 raise ValueError(f"Timeout occurred AND page content was empty/invalid.")
 
