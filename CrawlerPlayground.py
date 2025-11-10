@@ -1871,7 +1871,6 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.update_generated_code()
 
             if self.web_view and QUrl:
-                self._apply_proxy_to_webview()
                 self.web_view.setUrl(QUrl(url))
                 self.web_view.setFocus()
                 self.tab_widget.setCurrentWidget(self.article_preview_widget)
@@ -1880,53 +1879,9 @@ class CrawlerPlaygroundApp(QMainWindow):
     def on_article_go_clicked(self):
         """Handles clicks on the 'Go' button in the article tab."""
         if self.web_view and QUrl:
-            self._apply_proxy_to_webview()
             url = self.article_url_input.text()
             self.web_view.setUrl(QUrl(url))
             self.web_view.setFocus()
-
-    def _apply_proxy_to_webview(self):
-        """
-        Reads the proxy from the 'article_proxy_input' and applies it
-        to the QWebEngineView instance.
-        (读取 'article_proxy_input' 中的代理并将其应用于 QWebEngineView 实例。)
-        """
-        if not self.web_view or not QUrl:
-            # 如果 webview 不可用，则不执行任何操作
-            return
-
-        proxy_str = self.article_fetcher_widget.proxy_input.text().strip()
-
-        # 获取 web_view 关联的 profile
-        # (我们使用 page().profile() 而不是 defaultProfile() 以确保获取正确的实例)
-        profile = self.web_view.page().profile()
-
-        if not proxy_str:
-            # 字符串为空，清除代理设置
-            profile.setHttpProxy(QUrl())
-            self.append_log_history("[Webview] 代理已清除。使用系统设置。")
-            return
-
-        # 检查用户是否提供了 scheme (如 http://, socks5://)
-        # 如果没有，默认为 http://
-        if "://" not in proxy_str:
-            proxy_str = "http://" + proxy_str
-            self.append_log_history(f"[Webview] 未检测到代理协议，默认为 http://")
-
-        proxy_url = QUrl(proxy_str)
-
-        if not proxy_url.isValid() or not proxy_url.host():
-            # 处理无效URL (例如 "http://")
-            profile.setHttpProxy(QUrl())  # 为安全起见清除它
-            self.append_log_history(f"[Webview] 代理 URL 无效: {proxy_str}。代理已清除。")
-            return
-
-        # 应用代理
-        # 注意：尽管方法名叫 'setHttpProxy'，
-        # 但它会根据 QUrl 的 scheme (http, https, socks5) 正确处理代理。
-        profile.setHttpProxy(proxy_url)
-
-        self.append_log_history(f"[Webview] 代理已设置为: {proxy_url.toString()}")
 
     def update_generated_code_from_tree(self, item: QTreeWidgetItem, column: int):
         """Wrapper to call code gen when tree checkstate changes."""
