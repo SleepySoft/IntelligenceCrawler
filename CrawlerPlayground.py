@@ -193,9 +193,9 @@ def create_discoverer_instance(discoverer_name: str, fetcher: Fetcher, log_callb
         return RSSDiscoverer(fetcher, verbose=True)
     elif discoverer_name == "Smart Analysis":
         if 'ListPageDiscoverer' not in globals(): raise ImportError("ListPageDiscoverer not found.")
-        # 从 kwargs 获取 ai_signature
-        ai_sig = kwargs.get('ai_signature', None)
-        return ListPageDiscoverer(fetcher, verbose=True, ai_signature=ai_sig)
+        # 从 kwargs 获取 manual_specified_signature
+        ai_sig = kwargs.get('manual_specified_signature', None)
+        return ListPageDiscoverer(fetcher, verbose=True, manual_specified_signature=ai_sig)
     else:
         raise ValueError(f"Unknown discoverer_name: {discoverer_name}")
 
@@ -409,7 +409,7 @@ class ChannelDiscoveryWorker(QRunnable):
                  timeout: int,
                  pause_browser: bool,
                  render_page: bool,
-                 ai_signature: Optional[str] = None):
+                 manual_specified_signature: Optional[str] = None):
         super(ChannelDiscoveryWorker, self).__init__()
         self.discoverer_name = discoverer_name
         self.fetcher_name = fetcher_name
@@ -419,7 +419,7 @@ class ChannelDiscoveryWorker(QRunnable):
         self.proxy = proxy
         self.timeout = timeout
         self.pause_browser = pause_browser
-        self.ai_signature = ai_signature
+        self.manual_specified_signature = manual_specified_signature
         self.render_page = render_page  # Note: This is for XML, may break parsing
         self.signals = WorkerSignals()
 
@@ -449,7 +449,7 @@ class ChannelDiscoveryWorker(QRunnable):
                 self.discoverer_name,
                 fetcher,
                 log_callback,
-                ai_signature=self.ai_signature
+                manual_specified_signature=self.manual_specified_signature
             )
 
             # 3. Do the work
@@ -732,8 +732,8 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.article_fetcher_widget: Optional[FetcherConfigWidget] = None
 
         # --- [NEW] UI attribute placeholders ---
-        self.ai_signature_label: Optional[QLabel] = None
-        self.ai_signature_input: Optional[QLineEdit] = None
+        self.manual_specified_signature_label: Optional[QLabel] = None
+        self.manual_specified_signature_input: Optional[QLineEdit] = None
         self.css_selector_label: Optional[QLabel] = None
         self.css_selector_input: Optional[QLineEdit] = None
         # --- [END NEW] ---
@@ -842,13 +842,13 @@ class CrawlerPlaygroundApp(QMainWindow):
         top_bar_row1_layout.addWidget(self.discoverer_combo)
 
         # --- [NEW] AI Signature (for Smart Analysis) ---
-        self.ai_signature_label = QLabel("AI Signature:")
-        self.ai_signature_input = QLineEdit()
-        self.ai_signature_input.setPlaceholderText("Optional: e.g., 'a[class*=\"title\"]'")
-        self.ai_signature_input.setToolTip("Manually specify the 'link fingerprint' signature.")
-        self.ai_signature_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-        top_bar_row1_layout.addWidget(self.ai_signature_label)
-        top_bar_row1_layout.addWidget(self.ai_signature_input, 1)  # Give it stretch
+        self.manual_specified_signature_label = QLabel("AI Signature:")
+        self.manual_specified_signature_input = QLineEdit()
+        self.manual_specified_signature_input.setPlaceholderText("Optional: e.g., 'a[class*=\"title\"]'")
+        self.manual_specified_signature_input.setToolTip("Manually specify the 'link fingerprint' signature.")
+        self.manual_specified_signature_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+        top_bar_row1_layout.addWidget(self.manual_specified_signature_label)
+        top_bar_row1_layout.addWidget(self.manual_specified_signature_input, 1)  # Give it stretch
         # --- [END NEW] ---
 
         self.date_filter_check = QCheckBox("Filter last:")
@@ -1280,9 +1280,9 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.set_loading_state(True, f"Discovering {self.discoverer_name} channels...")
         self.update_generated_code()  # 更新代码片段
 
-        ai_signature_str = self.ai_signature_input.text().strip() or None
+        manual_specified_signature_str = self.manual_specified_signature_input.text().strip() or None
         if self.discoverer_name != "Smart Analysis":
-            ai_signature_str = None  # 确保只在 Smart Analysis 时传递
+            manual_specified_signature_str = None  # 确保只在 Smart Analysis 时传递
 
         self.last_used_entry_point = entry_point_for_worker
 
@@ -1296,7 +1296,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             timeout=fetcher_config['timeout'],
             pause_browser=fetcher_config['pause'],
             render_page=fetcher_config['render'],
-            ai_signature=ai_signature_str
+            manual_specified_signature=manual_specified_signature_str
         )
 
         worker.signals.result.connect(self.on_channel_discovery_result)
@@ -1872,7 +1872,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             # --- MODIFICATION: Store new date filter state ---
             "date_filter_enabled": self.date_filter_check.isChecked(),
             "date_filter_days": self.date_filter_days_spin.value(),
-            "ai_signature": self.ai_signature_input.text().strip() or None
+            "manual_specified_signature": self.manual_specified_signature_input.text().strip() or None
         }
 
         # --- 2. Extractor Configuration ---
@@ -1998,8 +1998,8 @@ class CrawlerPlaygroundApp(QMainWindow):
         # Note: Renamed variables to avoid conflict with 'pipeline.' call
         code_discoverer = ""
         if d_class_name == "ListPageDiscoverer":
-            ai_sig_val = d_config['args'].get('ai_signature')
-            code_discoverer = f"discoverer = {d_class_name}(fetcher=d_fetcher, verbose=True, ai_signature={repr(ai_sig_val)})"
+            ai_sig_val = d_config['args'].get('manual_specified_signature')
+            code_discoverer = f"discoverer = {d_class_name}(fetcher=d_fetcher, verbose=True, manual_specified_signature={repr(ai_sig_val)})"
         else:
             # Default for Sitemap, RSS, etc.
             code_discoverer = f"discoverer = {d_class_name}(fetcher=d_fetcher, verbose=True)"
@@ -2074,10 +2074,10 @@ class CrawlerPlaygroundApp(QMainWindow):
     def _update_discoverer_options_ui(self, discoverer_name: str):
         """Shows/hides discoverer-specific options based on selection."""
         is_smart = (discoverer_name == "Smart Analysis")
-        if self.ai_signature_label:
-            self.ai_signature_label.setVisible(is_smart)
-        if self.ai_signature_input:
-            self.ai_signature_input.setVisible(is_smart)
+        if self.manual_specified_signature_label:
+            self.manual_specified_signature_label.setVisible(is_smart)
+        if self.manual_specified_signature_input:
+            self.manual_specified_signature_input.setVisible(is_smart)
 
     def _update_extractor_options_ui(self, extractor_name: str):
         """Shows/hides extractor-specific options based on selection."""

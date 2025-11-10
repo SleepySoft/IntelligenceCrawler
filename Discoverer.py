@@ -1002,11 +1002,11 @@ class ListPageDiscoverer(IDiscoverer):
                  fetcher: "Fetcher",
                  verbose: bool = True,
                  min_group_count: int = 5,  # 默认值提高到 5
-                 ai_signature: Optional[str] = None):
+                 manual_specified_signature: Optional[str] = None):
         super().__init__(fetcher, verbose)
         self.log_messages: List[str] = []
         self.min_group_count = min_group_count
-        self.ai_signature = ai_signature
+        self.manual_specified_signature = manual_specified_signature
         self.analysis_cache: Dict[str, Tuple[BeautifulSoup, List[LinkGroup]]] = {}
 
     def _log(self, message: str, indent: int = 0):
@@ -1364,9 +1364,9 @@ class ListPageDiscoverer(IDiscoverer):
             return []
 
         winning_group: Optional[LinkGroup] = None
-        if self.ai_signature:
-            self._log(f"  [Decision] 正在使用预配置的 AI 签名: '{self.ai_signature}'", indent=1)
-            winning_group = self._find_group_by_signature(groups, self.ai_signature)
+        if self.manual_specified_signature:
+            self._log(f"  [Decision] 正在使用预配置的 AI 签名: '{self.manual_specified_signature}'", indent=1)
+            winning_group = self._find_group_by_signature(groups, self.manual_specified_signature)
         else:
             self._log(f"  [Decision] 未提供 AI 签名, 正在使用启发式算法...", indent=1)
             winning_group = self._guess_by_heuristics(groups)
@@ -1420,39 +1420,3 @@ class ListPageDiscoverer(IDiscoverer):
 Analyze the following JSON data and **return only** the `signature` string of the group you believe is the **main article list**. If none is found, return `null`.
 """
         return f"{system_prompt}\n\n**Input Data:**\n```json\n{json_payload}\n```"
-
-
-# --- 示例用法 (用于测试) ---
-if __name__ == "__main__":
-
-    # 1. 创建一个模拟的 Fetcher
-    mock_fetcher = Fetcher()
-
-    # 2. 实例化 Discoverer
-    discoverer = ListPageDiscoverer(fetcher=mock_fetcher, verbose=True)
-
-    # 3. 定义一个目标 URL
-    # test_url = "https://news.ycombinator.com/"
-    test_url = "https://www.theverge.com/"
-
-    # 4. (可选) 生成 AI 提示
-    print("--- 1. 生成 AI 提示 ---")
-    ai_prompt = discoverer.generate_ai_discovery_prompt(test_url)
-    if ai_prompt:
-        # 打印提示的开头和结尾
-        print(ai_prompt[:500] + "\n...\n" + ai_prompt[-100:])
-    print("-" * 30 + "\n")
-
-    # 5. 运行核心功能：获取文章
-    print("--- 2. 运行启发式算法获取文章 ---")
-    articles = discoverer.get_articles_for_channel(test_url)
-
-    print("\n--- 提取结果 ---")
-    if articles:
-        print(f"成功提取 {len(articles)} 篇文章:")
-        for i, article_url in enumerate(articles[:10]):
-            print(f"  {i + 1}. {article_url}")
-        if len(articles) > 10:
-            print(f"  ... (及其他 {len(articles) - 10} 篇)")
-    else:
-        print("未能提取到文章。")
