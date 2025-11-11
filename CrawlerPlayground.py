@@ -275,6 +275,17 @@ class FetcherConfigWidget(QWidget):
         self.wait_selector_input.setPlaceholderText("e.g., #main-content")
         self.wait_selector_input.setToolTip("Playwright: wait for this selector to appear before returning.")
 
+        # --- [NEW] Scroll Pages Widget ---
+        self.scroll_pages_label = QLabel("Scroll:")
+        self.scroll_pages_spin = QSpinBox()
+        self.scroll_pages_spin.setRange(-100, 100)
+        self.scroll_pages_spin.setValue(0)
+        self.scroll_pages_spin.setToolTip("How many 'pages' to scroll to load lazy content.\n"
+                                          "> 0: Scroll Down (load more)\n"
+                                          "< 0: Scroll Up\n"
+                                          "0: Disabled")
+        # --- [END NEW] ---
+
         # --- [MODIFIED] Conditional Layout ---
         if self.layout_style == 'one_row':
             # --- 'one_row' LAYOUT (using QHBoxLayout) ---
@@ -299,9 +310,12 @@ class FetcherConfigWidget(QWidget):
             layout.addWidget(self.wait_selector_label)
             layout.addWidget(self.wait_selector_input, 1)  # 选择器输入框也占满空间
 
+            # --- [NEW] Add scroll widgets to one_row layout ---
+            layout.addWidget(self.scroll_pages_label)
+            layout.addWidget(self.scroll_pages_spin)
+
         else:
             # --- [REVISED] 'two_row' LAYOUT (using QGridLayout) ---
-            # (用于 Article tab - 修正为真正的2行)
             grid_layout = QGridLayout(self)
             grid_layout.setContentsMargins(0, 0, 0, 0)
             grid_layout.setSpacing(5)  # 增加控件间距
@@ -313,6 +327,10 @@ class FetcherConfigWidget(QWidget):
             grid_layout.addWidget(self.timeout_spin, 0, 3)  # Col 3
             grid_layout.addWidget(self.pause_check, 0, 4)  # Col 4
             grid_layout.addWidget(self.render_check, 0, 5)  # Col 5
+
+            # --- [NEW] Add Scroll to Row 0 (to keep it 2 rows) ---
+            grid_layout.addWidget(self.scroll_pages_label, 0, 6)  # Col 6
+            grid_layout.addWidget(self.scroll_pages_spin, 0, 7)   # Col 7
 
             # --- Row 1 ---
             grid_layout.addWidget(QLabel("Proxy:"), 1, 0)
@@ -329,6 +347,7 @@ class FetcherConfigWidget(QWidget):
             grid_layout.setColumnStretch(1, 2)  # (Fetcher Combo / Proxy Input)
             grid_layout.setColumnStretch(3, 1)  # (Timeout Spin / WaitUntil Combo)
             grid_layout.setColumnStretch(5, 2)  # (Render Check / Wait Selector Input)
+            grid_layout.setColumnStretch(7, 1)  # [NEW] (Scroll Spin)
 
         # --- [END MODIFICATION] ---
 
@@ -347,11 +366,17 @@ class FetcherConfigWidget(QWidget):
         self.wait_selector_label.setVisible(is_playwright)
         self.wait_selector_input.setVisible(is_playwright)
 
+        # --- [NEW] Add scroll widgets to show/hide logic ---
+        self.scroll_pages_label.setVisible(is_playwright)
+        self.scroll_pages_spin.setVisible(is_playwright)
+        # --- [END NEW] ---
+
         self.pause_check.setEnabled(is_playwright)
         self.render_check.setEnabled(is_playwright)
         if not is_playwright:
             self.pause_check.setChecked(False)
             self.render_check.setChecked(False)
+            self.scroll_pages_spin.setValue(0)  # [NEW] Reset to 0 if not PW
 
     def set_defaults(self, fetcher_name: str, timeout: int, render: bool, proxy: str = ""):
         """Set the default values for the widget."""
@@ -359,6 +384,7 @@ class FetcherConfigWidget(QWidget):
         self.timeout_spin.setValue(timeout)
         self.render_check.setChecked(render)
         self.proxy_input.setText(proxy)
+        self.scroll_pages_spin.setValue(0) # 确保滚动默认为0
         self._on_fetcher_changed(fetcher_name)
 
     def set_render_tooltip(self, tooltip: str):
@@ -378,6 +404,7 @@ class FetcherConfigWidget(QWidget):
             'render': self.render_check.isChecked() and is_playwright,
             'wait_until': self.wait_until_combo.currentText() if is_playwright else 'networkidle',
             'wait_for_selector': self.wait_selector_input.text().strip() or None if is_playwright else None,
+            'scroll_pages': self.scroll_pages_spin.value() if is_playwright else 0
         }
 
 
@@ -506,6 +533,7 @@ class ChannelDiscoveryWorker(QRunnable):
                  timeout: int,
                  pause_browser: bool,
                  render_page: bool,
+                 fetcher_kwargs: Dict[str, Any],
                  manual_specified_signature: Optional[str] = None):
         super(ChannelDiscoveryWorker, self).__init__()
         self.discoverer_name = discoverer_name
@@ -518,6 +546,7 @@ class ChannelDiscoveryWorker(QRunnable):
         self.pause_browser = pause_browser
         self.manual_specified_signature = manual_specified_signature
         self.render_page = render_page  # Note: This is for XML, may break parsing
+        self.fetcher_kwargs = fetcher_kwargs
         self.signals = WorkerSignals()
 
     def run(self):
@@ -553,7 +582,8 @@ class ChannelDiscoveryWorker(QRunnable):
             channel_list = discoverer.discover_channels(
                 self.entry_point,
                 start_date=self.start_date,
-                end_date=self.end_date
+                end_date=self.end_date,
+                fetcher_kwargs=self.fetcher_kwargs
             )
             self.signals.result.emit(channel_list)
 
@@ -576,7 +606,9 @@ class ArticleListWorker(QRunnable):
                  proxy: Optional[str],
                  timeout: int,
                  pause_browser: bool,
-                 render_page: bool):
+                 render_page: bool,
+                 fetcher_kwargs: Dict[str, Any]
+                 ):
         super(ArticleListWorker, self).__init__()
         self.discoverer_name = discoverer_name
         self.fetcher_name = fetcher_name
@@ -585,6 +617,7 @@ class ArticleListWorker(QRunnable):
         self.timeout = timeout
         self.pause_browser = pause_browser
         self.render_page = render_page
+        self.fetcher_kwargs = fetcher_kwargs
         self.signals = WorkerSignals()
 
     def run(self):
@@ -610,7 +643,10 @@ class ArticleListWorker(QRunnable):
             discoverer = create_discoverer_instance(self.discoverer_name, fetcher, log_callback)
 
             # 3. Do the work
-            article_list = discoverer.get_articles_for_channel(self.channel_url)
+            article_list = discoverer.get_articles_for_channel(
+                self.channel_url,
+                fetcher_kwargs=self.fetcher_kwargs
+            )
             self.signals.result.emit({
                 'channel_url': self.channel_url,
                 'articles': article_list
@@ -636,7 +672,9 @@ class ChannelSourceWorker(QRunnable):
                  proxy: Optional[str],
                  timeout: int,
                  pause_browser: bool,
-                 render_page: bool):
+                 render_page: bool,
+                 fetcher_kwargs: Dict[str, Any]
+                 ):
         super(ChannelSourceWorker, self).__init__()
         self.discoverer_name = discoverer_name
         self.fetcher_name = fetcher_name
@@ -645,6 +683,7 @@ class ChannelSourceWorker(QRunnable):
         self.timeout = timeout
         self.pause_browser = pause_browser
         self.render_page = render_page
+        self.fetcher_kwargs = fetcher_kwargs
         self.signals = WorkerSignals()
 
     def run(self):
@@ -670,7 +709,10 @@ class ChannelSourceWorker(QRunnable):
             discoverer = create_discoverer_instance(self.discoverer_name, fetcher, log_callback)
 
             # 3. Do the work (using the generic interface method)
-            content_string = discoverer.get_content_str(self.url)
+            content_string = discoverer.get_content_str(
+                self.url,
+                fetcher_kwargs=self.fetcher_kwargs
+            )
             self.signals.result.emit(content_string)
         except Exception as e:
             ex_type, ex_value, tb_str = sys.exc_info()
@@ -721,13 +763,15 @@ class ExtractionWorker(QRunnable):
             wait_for_selector_val = self.fetcher_config.get('wait_for_selector')
             # 使用主超时作为 'wait_for_timeout_s'
             wait_for_timeout_s_val = self.fetcher_config.get('timeout')
+            scroll_pages_val = self.fetcher_config.get('scroll_pages', 0)
 
             # 假设 fetcher.get_content 签名已更新
             content_bytes = fetcher.get_content(
                 self.url_to_extract,
                 wait_until=wait_until_val,
                 wait_for_selector=wait_for_selector_val,
-                wait_for_timeout_s=wait_for_timeout_s_val
+                wait_for_timeout_s=wait_for_timeout_s_val,
+                scroll_pages=scroll_pages_val
             )
 
             if not content_bytes:
@@ -794,9 +838,19 @@ class SignatureAnalysisWorker(QRunnable):
 
             discoverer = ListPageDiscoverer(fetcher, verbose=True)
 
+            fetcher_kwargs = {
+                'wait_until': self.fetcher_config.get('wait_until', 'networkidle'),
+                'wait_for_selector': self.fetcher_config.get('wait_for_selector'),
+                'wait_for_timeout_s': self.fetcher_config.get('timeout'),
+                'scroll_pages': self.fetcher_config.get('scroll_pages', 0)
+            }
+
             # 3. Do the work
             # [核心] 调用你的新接口
-            groups_data = discoverer.get_signature_groups(self.url_to_analyze)
+            groups_data = discoverer.get_signature_groups(
+                self.url_to_analyze,
+                fetcher_kwargs=fetcher_kwargs
+            )
 
             self.signals.result.emit(groups_data)
 
@@ -826,7 +880,7 @@ def run_pipeline():
     {code_e_fetcher}
     {code_discoverer}
     {code_extractor}
-    
+
     # === 2. Define Parameters ===
     {parameters}
     {channel_filter_list}
@@ -841,18 +895,21 @@ def run_pipeline():
     )
 
     # Step 1: Discover all channels
-    pipeline.discover_channels(entry_point, start_date, end_date)
+    pipeline.discover_channels(entry_point, start_date, end_date,
+                               fetcher_kwargs=d_fetcher_kwargs)
 
     # Step 2: Discover and fetch articles (populates pipeline.contents)
     pipeline.discover_articles(channel_filter=partial(
-        common_channel_filter, channel_filter_list=channel_filter_list))
+        common_channel_filter, channel_filter_list=channel_filter_list),
+        fetcher_kwargs=d_fetcher_kwargs)
 
     # Step 3: Extract content and run handlers
     pipeline.extract_articles(
         article_filter=lambda url: True,
         content_handler=save_article_to_disk,
         exception_handler=lambda url, exception: None,
-        **extractor_kwargs
+        fetcher_kwargs=e_fetcher_kwargs,
+        extractor_kwargs=extractor_kwargs
     )
 
 
@@ -934,8 +991,6 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.setWindowTitle("Crawler Playground (v4.0)")
         self.setWindowIcon(QIcon.fromTheme("internet-web-browser"))
 
-        # --- MODIFICATION (REQ 3): HiDPI-aware window sizing ---
-        # Replace fixed self.setGeometry(100, 100, 1400, 900)
         try:
             # Get 80% of the *available* screen geometry (respects taskbars)
             screen_geometry = QApplication.primaryScreen().availableGeometry()
@@ -947,9 +1002,8 @@ class CrawlerPlaygroundApp(QMainWindow):
             )
         except Exception as e:
             # Fallback for any error (e.g., no screen found)
-            print(f"Could not get screen geometry, falling back to fixed size. Error: {e}")
+            print(f"Warning: Could not get screen geometry, falling back to fixed size. Error: {e}")
             self.setGeometry(100, 100, 1400, 900)
-        # --- END MODIFICATION ---
 
         self.update_generated_code()  # Show initial code
 
@@ -1437,6 +1491,13 @@ class CrawlerPlaygroundApp(QMainWindow):
         # 存储策略
         fetcher_config = self.discovery_fetcher_widget.get_config()
 
+        fetcher_kwargs = {
+            'wait_until': fetcher_config.get('wait_until'),
+            'wait_for_selector': fetcher_config.get('wait_for_selector'),
+            'wait_for_timeout_s': fetcher_config.get('timeout'),
+            'scroll_pages': fetcher_config.get('scroll_pages', 0)
+        }
+
         self.set_loading_state(True, f"Discovering {self.discoverer_name} channels...")
         self.update_generated_code()  # 更新代码片段
 
@@ -1456,6 +1517,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             timeout=fetcher_config['timeout'],
             pause_browser=fetcher_config['pause'],
             render_page=fetcher_config['render'],
+            fetcher_kwargs=fetcher_kwargs,
             manual_specified_signature=manual_specified_signature_str
         )
 
@@ -1477,6 +1539,13 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         fetcher_config = self.discovery_fetcher_widget.get_config()
 
+        fetcher_kwargs = {
+            'wait_until': fetcher_config.get('wait_until'),
+            'wait_for_selector': fetcher_config.get('wait_for_selector'),
+            'wait_for_timeout_s': fetcher_config.get('timeout'),
+            'scroll_pages': fetcher_config.get('scroll_pages', 0)
+        }
+
         worker = ArticleListWorker(
             discoverer_name=self.discoverer_name,
             fetcher_name=fetcher_config['fetcher_name'],
@@ -1484,7 +1553,8 @@ class CrawlerPlaygroundApp(QMainWindow):
             proxy=fetcher_config['proxy'],
             timeout=fetcher_config['timeout'],
             pause_browser=fetcher_config['pause'],
-            render_page=fetcher_config['render']
+            render_page=fetcher_config['render'],
+            fetcher_kwargs=fetcher_kwargs
         )
 
         worker.signals.result.connect(self.on_article_list_result)
@@ -1502,6 +1572,13 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         fetcher_config = self.discovery_fetcher_widget.get_config()
 
+        fetcher_kwargs = {
+            'wait_until': fetcher_config.get('wait_until'),
+            'wait_for_selector': fetcher_config.get('wait_for_selector'),
+            'wait_for_timeout_s': fetcher_config.get('timeout'),
+            'scroll_pages': fetcher_config.get('scroll_pages', 0)
+        }
+
         worker = ChannelSourceWorker(
             discoverer_name=self.discoverer_name,
             fetcher_name=fetcher_config['fetcher_name'],
@@ -1509,7 +1586,8 @@ class CrawlerPlaygroundApp(QMainWindow):
             proxy=fetcher_config['proxy'],
             timeout=fetcher_config['timeout'],
             pause_browser=fetcher_config['pause'],
-            render_page=fetcher_config['render']
+            render_page=fetcher_config['render'],
+            fetcher_kwargs=fetcher_kwargs
         )
 
         worker.signals.result.connect(self.on_channel_source_result)
@@ -2041,6 +2119,13 @@ class CrawlerPlaygroundApp(QMainWindow):
             }
         }
 
+        discoverer_fetcher_kwargs = {
+            'wait_until': d_fetcher_config_dict.get('wait_until'),
+            'wait_for_selector': d_fetcher_config_dict.get('wait_for_selector'),
+            'wait_for_timeout_s': d_fetcher_config_dict.get('timeout'),
+            'scroll_pages': d_fetcher_config_dict.get('scroll_pages', 0)
+        }
+
         discoverer_name = self.discoverer_combo.currentText()
         discoverer_args = {
             # Read from our cache, not the live (and potentially empty) UI control.
@@ -2068,15 +2153,13 @@ class CrawlerPlaygroundApp(QMainWindow):
         }
 
         extractor_name = self.extractor_combo.currentText()
-
-        # [修复] 1. 仅获取 extractor 自己的参数 (例如 {'selectors': [...]})
         extractor_args = self._get_current_extractor_args(extractor_name)
 
-        # [修复] 2. 为 fetcher.get_content() 创建一个单独的参数字典
         fetcher_get_content_kwargs = {
             'wait_until': e_fetcher_config_dict['wait_until'],
             'wait_for_selector': e_fetcher_config_dict['wait_for_selector'],
-            'wait_for_timeout_s': e_fetcher_config_dict['timeout']
+            'wait_for_timeout_s': e_fetcher_config_dict['timeout'],
+            'scroll_pages': e_fetcher_config_dict['scroll_pages']
         }
 
         # --- 3. Assemble Final Config ---
@@ -2084,15 +2167,14 @@ class CrawlerPlaygroundApp(QMainWindow):
             "discoverer": {
                 "class": discoverer_name,
                 "args": discoverer_args,
-                "fetcher": discoverer_fetcher_params
+                "fetcher": discoverer_fetcher_params,
+                "fetcher_kwargs": discoverer_fetcher_kwargs
             },
             "extractor": {
                 "class": extractor_name,
                 "args": extractor_args,
                 "fetcher": extractor_fetcher_params,
-
-                # [新增] 显式分离 fetcher 的 "get_content" 参数
-                "fetcher_kwargs": fetcher_get_content_kwargs
+                "fetcher_kwargs": fetcher_get_content_kwargs,
             }
         }
         return config
@@ -2123,6 +2205,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         # --- 2. Get Discovery Config ---
         d_config = config['discoverer']
         d_fetcher_config = d_config['fetcher']
+
         d_class_name = DISCOVERER_CLASS_MAP.get(d_config['class'], "UnknownDiscoverer")
         d_fetcher_class_name = FETCHER_CLASS_MAP.get(d_fetcher_config['class'], "UnknownFetcher")
 
@@ -2131,18 +2214,17 @@ class CrawlerPlaygroundApp(QMainWindow):
         d_arg_list = ['log_callback=log_cb']
 
         if 'Playwright' in d_fetcher_class_name:
-            # Match PlaywrightFetcher.__init__
             d_arg_list.append(f"proxy={repr(d_fetcher_params.get('proxy'))}")
-            d_arg_list.append(f"timeout_s={repr(d_fetcher_params.get('timeout'))}")  # Use 'timeout_s'
+            d_arg_list.append(f"timeout_s={repr(d_fetcher_params.get('timeout'))}")
             d_arg_list.append(f"stealth={repr(d_fetcher_params.get('stealth'))}")
             d_arg_list.append(f"pause_browser={repr(d_fetcher_params.get('pause_browser'))}")
             d_arg_list.append(f"render_page={repr(d_fetcher_params.get('render_page'))}")
         elif 'Requests' in d_fetcher_class_name:
-            # Match RequestsFetcher.__init__
             d_arg_list.append(f"proxy={repr(d_fetcher_params.get('proxy'))}")
-            d_arg_list.append(f"timeout_s={repr(d_fetcher_params.get('timeout'))}")  # Use 'timeout_s'
+            d_arg_list.append(f"timeout_s={repr(d_fetcher_params.get('timeout'))}")
 
         d_fetcher_args_str = ", ".join(d_arg_list)
+        d_fetcher_kwargs_str = repr(d_config.get('fetcher_kwargs', {}))
 
         # --- 3. Get Extraction Config ---
         e_config = config['extractor']
@@ -2152,24 +2234,24 @@ class CrawlerPlaygroundApp(QMainWindow):
             e_class_name = EXTRACTOR_MAP[e_config['class']].__name__
         e_fetcher_class_name = FETCHER_CLASS_MAP.get(e_fetcher_config['class'], "UnknownFetcher")
 
-        # --- [FIXED] Build Extraction Fetcher Args ---
+        # --- Build Extraction Fetcher Args ---
         e_fetcher_params = e_fetcher_config['parameters']
         e_arg_list = ['log_callback=log_cb']
 
         if 'Playwright' in e_fetcher_class_name:
-            # Match PlaywrightFetcher.__init__
             e_arg_list.append(f"proxy={repr(e_fetcher_params.get('proxy'))}")
-            e_arg_list.append(f"timeout_s={repr(e_fetcher_params.get('timeout'))}")  # Use 'timeout_s'
+            e_arg_list.append(f"timeout_s={repr(e_fetcher_params.get('timeout'))}")
             e_arg_list.append(f"stealth={repr(e_fetcher_params.get('stealth'))}")
             e_arg_list.append(f"pause_browser={repr(e_fetcher_params.get('pause_browser'))}")
             e_arg_list.append(f"render_page={repr(e_fetcher_params.get('render_page'))}")
         elif 'Requests' in e_fetcher_class_name:
-            # Match RequestsFetcher.__init__
             e_arg_list.append(f"proxy={repr(e_fetcher_params.get('proxy'))}")
-            e_arg_list.append(f"timeout_s={repr(e_fetcher_params.get('timeout'))}")  # Use 'timeout_s'
+            e_arg_list.append(f"timeout_s={repr(e_fetcher_params.get('timeout'))}")
 
         e_fetcher_args_str = ", ".join(e_arg_list)
-        e_kwargs_str = repr(e_config['args'])  # Extractor-specific args
+
+        e_fetcher_kwargs_str = repr(e_config.get('fetcher_kwargs', {}))
+        extractor_kwargs_str = repr(e_config.get('args', {}))
 
         # --- 4. Build {parameters} String ---
         code_d_fetcher = f"d_fetcher = {d_fetcher_class_name}({d_fetcher_args_str})"
@@ -2186,16 +2268,24 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         code_extractor = f"extractor = {e_class_name}(verbose=True)"
 
+        parameters = []
         entry_point_value = d_config['args'].get('entry_point')
-        parameters = f"entry_point = {repr(entry_point_value)}\n"
-        if d_config['args']['date_filter_enabled']:
-            parameters += f"    days_ago = {d_config['args']['date_filter_days']}\n"
-            parameters += "    end_date = datetime.datetime.now()\n"
-            parameters += "    start_date = end_date - datetime.timedelta(days=days_ago)\n"
+        parameters.append(f"entry_point = {repr(entry_point_value)}")
+
+        if d_config['args'].get('date_filter_enabled'):
+            parameters.append(f"    days_ago = {d_config['args']['date_filter_days']}")
+            parameters.append("    end_date = datetime.datetime.now()")
+            parameters.append("    start_date = end_date - datetime.timedelta(days=days_ago)")
         else:
-            parameters += "    start_date = None\n"
-            parameters += "    end_date = None\n"
-        parameters += f"    extractor_kwargs = {e_kwargs_str}"
+            parameters.append("    start_date = None")
+            parameters.append("    end_date = None")
+
+        # 添加所有 kwargs 字典
+        parameters.append(f"    d_fetcher_kwargs = {d_fetcher_kwargs_str}")
+        parameters.append(f"    e_fetcher_kwargs = {e_fetcher_kwargs_str}")
+        parameters.append(f"    extractor_kwargs = {extractor_kwargs_str}")
+
+        parameters_str = "\n".join(parameters)
 
         # --- 5. Format the final code ---
         code = CODE_TEMPLATE.format(
@@ -2203,7 +2293,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             code_e_fetcher=code_e_fetcher,
             code_discoverer=code_discoverer,
             code_extractor=code_extractor,
-            parameters=parameters,
+            parameters=parameters_str,
             channel_filter_list=channel_list_code
         )
 

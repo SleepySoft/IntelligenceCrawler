@@ -1444,7 +1444,10 @@ class ListPageDiscoverer(IDiscoverer):
 
         return final_links
 
-    def get_signature_groups(self, page_url: str) -> List[Dict[str, Any]]:
+    def get_signature_groups(self,
+                             page_url: str,
+                             fetcher_kwargs: Optional[Dict[str, Any]] = None
+                             ) -> List[Dict[str, Any]]:
         """
         为 UI 提供分析结果。
 
@@ -1453,6 +1456,7 @@ class ListPageDiscoverer(IDiscoverer):
 
         Args:
             page_url (str): 要分析的列表页 URL。
+            fetcher_kwargs (Optional[Dict...]): [新增] 传递给 fetcher 的参数
 
         Returns:
             List[Dict[str, Any]]:
@@ -1466,7 +1470,7 @@ class ListPageDiscoverer(IDiscoverer):
 
         try:
             # 1. 运行核心分析 (这将使用缓存，如果存在)
-            soup, groups = self._analyze_page(page_url)
+            soup, groups = self._analyze_page(page_url, fetcher_kwargs=fetcher_kwargs)
 
             if not groups:
                 self._log(f"  分析未找到任何链接组。", indent=1)
