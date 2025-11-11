@@ -432,10 +432,23 @@ class PlaywrightFetcher(Fetcher):
         # Send the job to the worker thread
         self.job_queue.put(('get_content', job_payload, result_queue))
 
-        # Block and wait for the result
-        # Add a 10-second buffer to the timeout
-        wait_timeout = (self.timeout_ms / 1000) + 10
+        # --- 动态计算等待超时时间 ---
+
+        # 1. 主超时时间 (默认为 20s)
+        base_timeout = self.timeout_ms / 1000
+
+        # 2. 估算滚动所需时间: 滚动次数 * (最大抖动 1s + 网络等待 3s)
+        # 注意: 即使网络等待超时，Playwright 也会在 3s 后返回，所以用 3s 是安全的估算。
+        scroll_time_estimate = abs(scroll_pages_val) * (1 + 3)
+
+        # 3. 总等待超时 = 主超时 + 滚动估时 + 额外缓冲
+        wait_timeout = base_timeout + scroll_time_estimate + 5  # 5s 缓冲
+
+        # 记录日志，以便调试
+        self._log(f"[Main Thread] Calculated wait_timeout: {wait_timeout:.2f}s")
+
         try:
+            # Block and wait for the result
             result = result_queue.get(timeout=wait_timeout)
 
             # If the worker sent back an exception, re-raise it in the main thread
@@ -528,7 +541,7 @@ class PlaywrightFetcher(Fetcher):
                 js_scroll_distance = "window.innerHeight" if scroll_pages > 0 else "-window.innerHeight"
 
                 # 智能等待（networkidle）的超时时间
-                scroll_network_timeout = 5000
+                scroll_network_timeout = 3000
 
                 for i in range(abs(scroll_pages)):
                     # --- 1. 执行滚动 ---
