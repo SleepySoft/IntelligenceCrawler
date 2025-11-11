@@ -75,12 +75,13 @@ class Fetcher(ABC):
     """
 
     @abstractmethod
-    def get_content(self, url: str) -> Optional[bytes]:
+    def get_content(self, url: str, **kwargs) -> Optional[bytes]:
         """
         Fetches content from a given URL.
 
         Args:
             url (str): The URL to fetch.
+            **kwargs: Additional implementation-specific arguments.
 
         Returns:
             Optional[bytes]: The raw content of the response as bytes,
@@ -164,12 +165,15 @@ class RequestsFetcher(Fetcher):
         else:
             self._log("Using RequestsFetcher (Fast, Simple)")
 
-    def get_content(self, url: str) -> Optional[bytes]:
+    def get_content(self, url: str, **kwargs) -> Optional[bytes]:
         """
         Fetches content from a URL using the configured requests.Session.
 
         Args:
             url (str): The URL to fetch.
+            **kwargs: Can include 'timeout' (int) or 'headers' (dict)
+                      to override session defaults for this single request.
+                      Other kwargs are ignored.
 
         Returns:
             Optional[bytes]: The raw response content, or None on failure.
@@ -179,10 +183,20 @@ class RequestsFetcher(Fetcher):
             parsed_url = urlparse(url)
             referer = f"{parsed_url.scheme}://{parsed_url.netloc}/"
 
+            # 1. 确定超时
+            # (用户传入的 'timeout' 优先于 'timeout_s'，也优先于实例的 self.timeout)
+            request_timeout = kwargs.get('timeout', self.timeout)
+
+            # 2. 合并 Headers
+            request_headers = self.session.headers.copy()
+            request_headers['Referer'] = referer
+            if 'headers' in kwargs and isinstance(kwargs['headers'], dict):
+                request_headers.update(kwargs['headers'])
+
             response = self.session.get(
                 url,
-                timeout=self.timeout,
-                headers={'Referer': referer}
+                timeout=request_timeout,
+                headers=request_headers
             )
             response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
             return response.content
@@ -358,13 +372,7 @@ class PlaywrightFetcher(Fetcher):
         self._stop_playwright()
         self._log("[Worker] Thread exiting.")
 
-
-    def get_content(self,
-                    url: str,
-                    wait_until: str = 'networkidle',
-                    wait_for_selector: Optional[str] = None,
-                    wait_for_timeout_s: Optional[int] = None
-                    ) -> Optional[bytes]:
+    def get_content(self, url: str, **kwargs) -> Optional[bytes]:
         """
         [Main Thread] Fetches content from a URL with flexible wait conditions.
 
@@ -373,14 +381,19 @@ class PlaywrightFetcher(Fetcher):
 
         Args:
             url (str): The URL to fetch.
-            wait_until (str): The 'wait_until' strategy for page.goto().
-                One of: 'load', 'domcontentloaded', 'networkidle'.
-                Defaults to 'load'.
-            wait_for_selector (Optional[str]): A CSS selector to wait for
-                after the page.goto() completes. (Best-effort wait).
-            wait_for_timeout_s (Optional[int]): Specific timeout in seconds
-                for the 'wait_for_selector'. If None, defaults to the
-                main 'timeout_s' defined in __init__.
+            **kwargs: Flexible options passed to the worker, including:
+                wait_until (str): The 'wait_until' strategy for page.goto().
+                    One of: 'load', 'domcontentloaded', 'networkidle'.
+                    Defaults to 'load'.
+                wait_for_selector (Optional[str]): A CSS selector to wait for
+                    after the page.goto() completes. (Best-effort wait).
+                wait_for_timeout_s (Optional[int]): Specific timeout in seconds
+                    for the 'wait_for_selector'. If None, defaults to the
+                    main 'timeout_s' defined in __init__.
+                scroll_pages (int): Number of pages to scroll.
+                    > 0: Scroll down (content moves up).
+                    < 0: Scroll up (content moves down).
+                    0: No scrolling (default).
 
         Returns:
             Optional[bytes]: The fetched page content (HTML or raw bytes).
@@ -397,13 +410,22 @@ class PlaywrightFetcher(Fetcher):
         # Create a one-time queue to get the result back
         result_queue: "queue.Queue[Any]" = queue.Queue(maxsize=1)
 
+        wait_until_val = kwargs.get('wait_until', 'networkidle')
+        wait_for_selector_val = kwargs.get('wait_for_selector', None)
+        wait_for_timeout_s_val = kwargs.get('wait_for_timeout_s', None)
+        scroll_pages_val = kwargs.get('scroll_pages', 0)
+
         # --- Create the job payload with all wait parameters ---
         job_payload = {
             'url': url,
-            'wait_until': wait_until,
-            'wait_for_selector': wait_for_selector,
-            'wait_for_timeout_ms': (wait_for_timeout_s * 1000) if wait_for_timeout_s is not None else None
+            'wait_until': wait_until_val,
+            'wait_for_selector': wait_for_selector_val,
+            'wait_for_timeout_ms': (wait_for_timeout_s_val * 1000) if wait_for_timeout_s_val is not None else None,
+            'scroll_pages': scroll_pages_val
         }
+
+        # 添加任何其他传入的 kwargs (未来扩展性)
+        # job_payload.update(kwargs)
 
         # Send the job to the worker thread
         self.job_queue.put(('get_content', job_payload, result_queue))
@@ -424,7 +446,6 @@ class PlaywrightFetcher(Fetcher):
             self._log(f"[Main Thread] Timeout waiting for worker response for {url}")
             raise TimeoutError(f"Playwright job for {url} timed out after {wait_timeout}s")
 
-
     def _fetch_page_content(self, job_payload: dict) -> Optional[bytes]:
         """
         [Worker Thread] The *actual* browser logic, now with flexible
@@ -434,11 +455,13 @@ class PlaywrightFetcher(Fetcher):
         url = job_payload['url']
         wait_until = job_payload.get('wait_until', 'load')
         wait_for_selector = job_payload.get('wait_for_selector')
+        scroll_pages = job_payload.get('scroll_pages', 0)
 
         # Use specific selector timeout, or fall back to the main timeout
         selector_timeout_ms = job_payload.get('wait_for_timeout_ms') or self.timeout_ms
 
         context = None
+        page = None
         try:
             # --- 2. Create Context and Page ---
             context_options = {
@@ -494,6 +517,30 @@ class PlaywrightFetcher(Fetcher):
                     self._log(f"[Worker Warning] Timeout or error waiting for selector '{wait_for_selector}': {str(e)}")
                     self._log("[Worker] Proceeding to extract content anyway (best-effort).")
 
+            # --- 5.5. Handle Scrolling (NEW) ---
+            if scroll_pages != 0:
+                scroll_direction = 'down' if scroll_pages > 0 else 'up'
+                self._log(f"[Worker] Scrolling {abs(scroll_pages)} pages {scroll_direction}...")
+
+                # 使用 JS evaluation 来滚动
+                # scroll_pages > 0: 向下滚动 (内容向上翻)
+                # scroll_pages < 0: 向上滚动 (内容向下拉)
+                js_scroll_distance = "window.innerHeight" if scroll_pages > 0 else "-window.innerHeight"
+
+                for i in range(abs(scroll_pages)):
+                    page.evaluate(f"window.scrollBy(0, {js_scroll_distance});")
+                    # 短暂暂停，允许内容开始加载
+                    page.wait_for_timeout(250)
+
+                self._log(f"[Worker] Finished scrolling. Waiting for network idle (max 5s)...")
+                try:
+                    # 等待所有懒加载的内容完成
+                    page.wait_for_load_state('networkidle', timeout=5000)
+                    self._log("[Worker] Network is idle after scrolling.")
+                except Exception:
+                    self._log(
+                        "[Worker Warning] Network did not become idle after scrolling (5s timeout). Proceeding anyway.")
+
             # --- 6. Extract Content ---
             # This code is now reached even if the selector times out.
             content_bytes: Optional[bytes]
@@ -511,11 +558,15 @@ class PlaywrightFetcher(Fetcher):
         except PlaywrightTimeoutError:
             if self._log:
                 self._log(f"[Warning] Page.goto timed out for {job_payload['url']}. "
-                                   f"Attempting to grab content anyway.")
+                          f"Attempting to grab content anyway.")
 
             # !!! 关键：超时了，但我们不在乎，我们直接尝试获取内容
             # 如果页面（如HTML）已经存在，这将成功返回
-            content = page.content()
+            # 确保 'page' 对象存在
+            if page:
+                content = page.content()
+            else:
+                content = None
 
             if not content:
                 # 如果内容为空或无效，才真正抛出异常
@@ -531,7 +582,6 @@ class PlaywrightFetcher(Fetcher):
             if context:
                 context.close()
             raise e  # Re-raise to send back to main thread
-
 
     def close(self):
         """
@@ -554,10 +604,8 @@ class PlaywrightFetcher(Fetcher):
                 self._log("[Error] Worker thread failed to join.")
         self._log("PlaywrightFetcher closed.")
 
-
     def __enter__(self):
         return self
-
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()

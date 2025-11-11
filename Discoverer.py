@@ -75,7 +75,8 @@ class IDiscoverer(ABC):
     def discover_channels(self,
                           entry_point: Any,  # <-- [MODIFIED] 更改为 Any
                           start_date: Optional[datetime.datetime] = None,
-                          end_date: Optional[datetime.datetime] = None
+                          end_date: Optional[datetime.datetime] = None,
+                          fetcher_kwargs: Optional[Dict[str, Any]] = None
                           ) -> List[str]:
         """
         Stage 1: Discovers all "channels" (e.g., leaf sitemaps, RSS feeds)
@@ -89,13 +90,18 @@ class IDiscoverer(ABC):
                            relevant *after* this date.
         :param end_date: (Optional) Filter to include only channels
                          relevant *before* this date.
+        :param fetcher_kwargs: (Optional) A dictionary of keyword arguments
+                               to pass to the fetcher's get_content() method.
         :return: A list of string URLs, each representing a "channel"
                  that contains article links.
         """
         pass
 
     @abstractmethod
-    def get_articles_for_channel(self, channel_url: str) -> List[str]:
+    def get_articles_for_channel(self,
+                                 channel_url: str,
+                                 fetcher_kwargs: Optional[Dict[str, Any]] = None
+                                 ) -> List[str]:
         """
         Stage 2: Fetches and parses a single "channel" URL (found in Stage 1)
         to extract all individual article URLs it contains.
@@ -104,11 +110,16 @@ class IDiscoverer(ABC):
 
         :param channel_url: The URL of a single channel
                             (e.g., a leaf sitemap or an RSS feed URL).
+        :param fetcher_kwargs: (Optional) A dictionary of keyword arguments
+                               to pass to the fetcher's get_content() method.
         :return: A list of string URLs for individual articles.
         """
         pass
 
-    def get_content_str(self, url: str) -> str:
+    def get_content_str(self,
+                        url: str,
+                        fetcher_kwargs: Optional[Dict[str, Any]] = None
+                        ) -> str:
         """
         Helper to get raw content as a string for display or debugging.
         (辅助函数：获取原始内容的字符串用于显示或调试。)
@@ -119,7 +130,7 @@ class IDiscoverer(ABC):
         """
         self.log_messages.clear()
         self._log(f"Fetching raw content for: {url}")
-        content = self.fetcher.get_content(url)
+        content = self.fetcher.get_content(url, **(fetcher_kwargs or {}))
         if content:
             try:
                 return content.decode('utf-8', errors='ignore')
@@ -341,15 +352,18 @@ class SitemapDiscoverer(IDiscoverer):
 
     def discover_channels(self,
                           entry_point: Any,
-                          start_date: Optional[datetime.datetime] = datetime.datetime.now() - datetime.timedelta(
-                              days=7),
-                          end_date: Optional[datetime.datetime] = datetime.datetime.now()) -> List[str]:
+                          start_date: Optional[datetime.datetime] = datetime.datetime.now() - datetime.timedelta(days=7),
+                          end_date: Optional[datetime.datetime] = datetime.datetime.now(),
+                          fetcher_kwargs: Optional[Dict[str, Any]] = None
+                          ) -> List[str]:
         """
         STAGE 1: Discover all "channels" (leaf sitemaps containing articles).
 
         :param entry_point: The root URL of the website (MUST be a string).
         :param start_date: (Optional) The earliest date to include sitemaps from.
         :param end_date: (Optional) The latest date to include sitemaps from.
+        :param fetcher_kwargs: (Optional) A dictionary of keyword arguments
+                               to pass to the fetcher's get_content() method.
         """
         if not isinstance(entry_point, str):
             self._log(f"[Error] SitemapDiscoverer requires a string URL as an entry_point. Got {type(entry_point)}.")
@@ -367,6 +381,8 @@ class SitemapDiscoverer(IDiscoverer):
         self.leaf_sitemaps.clear()
         self.to_process_queue.clear()
         self.processed_sitemaps.clear()
+
+        kwargs_to_pass = fetcher_kwargs or {}
 
         initial_sitemaps = self._discover_sitemap_entry_points(homepage_url)
         if not initial_sitemaps:
@@ -391,13 +407,7 @@ class SitemapDiscoverer(IDiscoverer):
                 continue
 
             self._log(f"\n--- Analyzing index: {sitemap_url} ---")
-            xml_content = self.fetcher.get_content(sitemap_url)
-
-            # (Your debug print, you can remove this)
-            # print('------------------------------------------ XML ------------------------------------------')
-            # xml_text = xml_content.decode('utf-8') if xml_content else "NO CONTENT"
-            # print(xml_text)
-            # print('-----------------------------------------------------------------------------------------')
+            xml_content = self.fetcher.get_content(sitemap_url, **kwargs_to_pass)
 
             if not xml_content:
                 self._log("  Failed to fetch, skipping.", 1)
@@ -437,13 +447,16 @@ class SitemapDiscoverer(IDiscoverer):
         return list(self.leaf_sitemaps)
 
     # --- (get_articles_for_channel & get_xml_content_str are unchanged) ---
-    def get_articles_for_channel(self, channel_url: str) -> List[str]:
+    def get_articles_for_channel(self,
+                                 channel_url: str,
+                                 fetcher_kwargs: Optional[Dict[str, Any]] = None
+                                 ) -> List[str]:
         """
         Helper for Stage 2 (Lazy Loading): Gets pages for ONE specific channel.
         """
         self.log_messages.clear()
         self._log(f"--- STAGE 2: Fetching articles for {channel_url} ---")
-        xml_content = self.fetcher.get_content(channel_url)
+        xml_content = self.fetcher.get_content(channel_url, **(fetcher_kwargs or {}))
         if not xml_content:
             return []
 
@@ -453,11 +466,14 @@ class SitemapDiscoverer(IDiscoverer):
         self._log(f"  > Found {len(parse_result['pages'])} articles.")
         return parse_result['pages']
 
-    def get_xml_content_str(self, url: str) -> str:
+    def get_xml_content_str(self,
+                            url: str,
+                            fetcher_kwargs: Optional[Dict[str, Any]] = None
+                            ) -> str:
         """Helper to get raw XML as a string for display."""
         self.log_messages.clear()
         self._log(f"Fetching XML content for: {url}")
-        content = self.fetcher.get_content(url)
+        content = self.fetcher.get_content(url, **(fetcher_kwargs or {}))
         if content:
             try:
                 return content.decode('utf-8', errors='ignore')
@@ -751,7 +767,8 @@ class RSSDiscoverer(IDiscoverer):
     def _handle_single_url(self,
                            entry_point_url: str,
                            start_date: Optional[datetime.datetime] = None,
-                           end_date: Optional[datetime.datetime] = None
+                           end_date: Optional[datetime.datetime] = None,
+                           fetcher_kwargs: Optional[Dict[str, Any]] = None
                            ) -> List[str]:
         """
         Handles the "discovery" case from a single URL (homepage or feed).
@@ -764,7 +781,7 @@ class RSSDiscoverer(IDiscoverer):
         found_feeds_set: Set[str] = set()
 
         # 1. Fetch the content
-        content_bytes = self.fetcher.get_content(entry_point_url)
+        content_bytes = self.fetcher.get_content(entry_point_url, **(fetcher_kwargs or {}))
         if not content_bytes:
             self._log(f"[Error] Failed to fetch content: {entry_point_url}", 1)
             return []
@@ -825,7 +842,8 @@ class RSSDiscoverer(IDiscoverer):
     def discover_channels(self,
                           entry_point: Any,  # <-- 适配新接口
                           start_date: Optional[datetime.datetime] = None,
-                          end_date: Optional[datetime.datetime] = None
+                          end_date: Optional[datetime.datetime] = None,
+                          fetcher_kwargs: Optional[Dict[str, Any]] = None
                           ) -> List[str]:
         """
         STAGE 1: Discovers all RSS/Atom feed URLs ("channels").
@@ -843,6 +861,8 @@ class RSSDiscoverer(IDiscoverer):
                             feed URLs (List[str]).
         :param start_date: (Optional) Ignored by this discoverer.
         :param end_date: (Optional) Ignored by this discoverer.
+        :param fetcher_kwargs: (Optional) A dictionary of keyword arguments
+                               to pass to the fetcher's get_content() method.
         :return: A list of discovered RSS/Atom feed URLs.
         """
         self.log_messages.clear()
@@ -853,13 +873,16 @@ class RSSDiscoverer(IDiscoverer):
 
         elif isinstance(entry_point, str):
             # --- "发现RSS" 模式 ---
-            return self._handle_single_url(entry_point, start_date, end_date)
+            return self._handle_single_url(entry_point, start_date, end_date, fetcher_kwargs)
 
         else:
             self._log(f"[Error] Invalid entry_point type: {type(entry_point)}. Must be str or List[str].")
             return []
 
-    def get_articles_for_channel(self, channel_url: str) -> List[str]:
+    def get_articles_for_channel(self,
+                                 channel_url: str,
+                                 fetcher_kwargs: Optional[Dict[str, Any]] = None
+                                 ) -> List[str]:
         """
         STAGE 2: Fetches and parses a single RSS/Atom feed ("channel")
         to extract all individual article URLs it contains.
@@ -867,6 +890,8 @@ class RSSDiscoverer(IDiscoverer):
         (This method was correct and did not need modification)
 
         :param channel_url: The URL of a single RSS/Atom feed.
+        :param fetcher_kwargs: (Optional) A dictionary of keyword arguments
+                               to pass to the fetcher's get_content() method.
         :return: A list of string URLs for individual articles.
         """
         self.log_messages.clear()
@@ -875,7 +900,7 @@ class RSSDiscoverer(IDiscoverer):
         article_urls: List[str] = []
 
         # 1. Fetch the raw XML content
-        xml_content_bytes = self.fetcher.get_content(channel_url)
+        xml_content_bytes = self.fetcher.get_content(channel_url, **(fetcher_kwargs or {}))
         if not xml_content_bytes:
             self._log("[Error] Failed to fetch feed content.", 1)
             return []
@@ -1001,7 +1026,7 @@ class ListPageDiscoverer(IDiscoverer):
     def __init__(self,
                  fetcher: "Fetcher",
                  verbose: bool = True,
-                 min_group_count: int = 5,  # 默认值提高到 5
+                 min_group_count: int = 5,
                  manual_specified_signature: Optional[str] = None):
         super().__init__(fetcher, verbose)
         self.log_messages: List[str] = []
@@ -1015,11 +1040,19 @@ class ListPageDiscoverer(IDiscoverer):
         if self.verbose:
             print(log_msg)
 
-    def _analyze_page(self, url: str) -> Tuple[Optional[BeautifulSoup], List[LinkGroup]]:
-        if url in self.analysis_cache:
+    def _analyze_page(self,
+                      url: str,
+                      fetcher_kwargs: Optional[Dict[str, Any]] = None
+                      ) -> Tuple[Optional[BeautifulSoup], List[LinkGroup]]:
+        if not fetcher_kwargs and url in self.analysis_cache:
+            self._log(f"  [Cache] 从缓存加载: {url}", indent=1)
             return self.analysis_cache[url]
+
+        if fetcher_kwargs:
+            self._log(f"  [Info] 提供了 Fetcher kwargs，绕过缓存。", indent=1)
+
         self._log(f"  [Fetch] 开始抓取: {url}", indent=1)
-        content = self.fetcher.get_content(url)
+        content = self.fetcher.get_content(url, **(fetcher_kwargs or {}))
         if not content:
             return None, []
         self._log(f"  [Parse] 正在解析 HTML (lxml)...", indent=1)
@@ -1030,6 +1063,11 @@ class ListPageDiscoverer(IDiscoverer):
         groups = self._cluster_fingerprints(fingerprints)
         self._log(f"  [Analyze] 已完成. 发现 {len(fingerprints)} 个链接, 聚类为 {len(groups)} 组.", indent=1)
         self.analysis_cache[url] = (soup, groups)
+
+        # 仅在没有 kwargs 时才写入缓存
+        if not fetcher_kwargs:
+            self.analysis_cache[url] = (soup, groups)
+
         return soup, groups
 
     def _normalize_classes(self, classes: List[str]) -> List[str]:
@@ -1356,8 +1394,12 @@ class ListPageDiscoverer(IDiscoverer):
 
     # --- IDiscoverer Interface Implementation (来自你的代码) ---
 
-    def discover_channels(self, entry_point: Any, start_date: Optional[datetime.datetime] = None,
-                          end_date: Optional[datetime.datetime] = None) -> List[str]:
+    def discover_channels(self,
+                          entry_point: Any,
+                          start_date: Optional[datetime.datetime] = None,
+                          end_date: Optional[datetime.datetime] = None,
+                          fetcher_kwargs: Optional[Dict[str, Any]] = None
+                          ) -> List[str]:
         self.log_messages.clear()
         self._log(f"开始频道发现: {entry_point}")
         if not isinstance(entry_point, str) or not entry_point.startswith(('http://', 'https://')):
@@ -1366,11 +1408,14 @@ class ListPageDiscoverer(IDiscoverer):
         self._log(f"  ListPageDiscoverer 将入口点视为单个频道。", indent=1)
         return [entry_point]
 
-    def get_articles_for_channel(self, channel_url: str) -> List[str]:
+    def get_articles_for_channel(self,
+                                 channel_url: str,
+                                 fetcher_kwargs: Optional[Dict[str, Any]] = None
+                                 ) -> List[str]:
         self.log_messages.clear()
         self._log(f"开始从频道 (列表页) 提取文章: {channel_url}")
 
-        soup, groups = self._analyze_page(channel_url)
+        soup, groups = self._analyze_page(channel_url, fetcher_kwargs=fetcher_kwargs)
         if not soup or not groups:
             self._log(f"  分析失败或未找到链接组。", indent=1)
             return []
