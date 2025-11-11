@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import queue
+import random
+
 import requests
 import threading        # Add threading for PlaywrightFetcher avoiding asyncio conflict with Newspaper3kExtractor
 from typing import Dict, Optional
@@ -517,22 +519,45 @@ class PlaywrightFetcher(Fetcher):
                     self._log(f"[Worker Warning] Timeout or error waiting for selector '{wait_for_selector}': {str(e)}")
                     self._log("[Worker] Proceeding to extract content anyway (best-effort).")
 
-            # --- 5.5. Handle Scrolling (NEW) ---
+            # --- 5.5. Handle Scrolling (健壮且带抖动的版本) ---
             if scroll_pages != 0:
                 scroll_direction = 'down' if scroll_pages > 0 else 'up'
-                self._log(f"[Worker] Scrolling {abs(scroll_pages)} pages {scroll_direction}...")
+                self._log(
+                    f"[Worker] Scrolling {abs(scroll_pages)} pages {scroll_direction} (robust + jitter mode)...")
 
-                # 使用 JS evaluation 来滚动
-                # scroll_pages > 0: 向下滚动 (内容向上翻)
-                # scroll_pages < 0: 向上滚动 (内容向下拉)
                 js_scroll_distance = "window.innerHeight" if scroll_pages > 0 else "-window.innerHeight"
 
-                for i in range(abs(scroll_pages)):
-                    page.evaluate(f"window.scrollBy(0, {js_scroll_distance});")
-                    # 短暂暂停，允许内容开始加载
-                    page.wait_for_timeout(250)
+                # 智能等待（networkidle）的超时时间
+                scroll_network_timeout = 5000
 
-                self._log(f"[Worker] Finished scrolling. Waiting for network idle (max 5s)...")
+                for i in range(abs(scroll_pages)):
+                    # --- 1. 执行滚动 ---
+                    page.evaluate(f"window.scrollBy(0, {js_scroll_distance});")
+                    self._log(f"[Worker] Scroll {i + 1}/{abs(scroll_pages)} executed.")
+
+                    # --- 2. 增加“人性化”时间抖动 ---
+                    # 模拟人类滚动后，视线移动或反应的短暂延迟
+                    # 随机在 300ms 到 1000ms (0.3s到1s) 之间暂停
+                    jitter_ms = random.randint(300, 1000)
+                    self._log(f"[Worker] Pausing for {jitter_ms}ms (human jitter)...")
+                    page.wait_for_timeout(jitter_ms)
+
+                    # --- 3. 智能等待（捕获异常） ---
+                    # 抖动暂停后，我们再开始等待网络加载
+                    # 这是你问题的核心：用 try...except 包裹
+                    self._log(
+                        f"[Worker] Jitter complete. Waiting for network idle (max {scroll_network_timeout}ms)...")
+                    try:
+                        # 尝试等待网络空闲
+                        page.wait_for_load_state('networkidle', timeout=scroll_network_timeout)
+                        self._log(f"[Worker] Scroll {i + 1} network is idle.")
+                    except Exception as e:
+                        # 【关键】如果超时（或其他错误），我们捕获它，打印日志，但不让程序崩溃
+                        # 循环会继续执行下一次滚动
+                        self._log(
+                            f"[Worker Warning] Network not idle after scroll {i + 1} (timeout/error: {e}). Continuing loop.")
+
+                self._log(f"[Worker] Finished all scrolling.")
                 try:
                     # 等待所有懒加载的内容完成
                     page.wait_for_load_state('networkidle', timeout=5000)
