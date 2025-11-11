@@ -118,7 +118,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QSplitter,
     QTextEdit, QStatusBar, QTabWidget, QLabel, QFrame, QComboBox,
     QDateEdit, QCheckBox, QToolBar, QSizePolicy, QSpinBox,
-    QMenu, QAction, QFileDialog, QFormLayout, QGridLayout, QDialogButtonBox, QDialog
+    QMenu, QAction, QFileDialog, QFormLayout, QGridLayout, QDialogButtonBox, QDialog, QListView, QAbstractScrollArea
 )
 from PyQt5.QtCore import (
     Qt, QRunnable, QThreadPool, QObject, pyqtSignal, QTimer, QSettings
@@ -406,6 +406,44 @@ class FetcherConfigWidget(QWidget):
             'wait_for_selector': self.wait_selector_input.text().strip() or None if is_playwright else None,
             'scroll_pages': self.scroll_pages_spin.value() if is_playwright else 0
         }
+
+
+class AdjustableWidthComboBox(QComboBox):
+    """
+    修正版：确保下拉列表宽度不小于 QComboBox 自身宽度，并限制最大宽度。
+    """
+
+    def __init__(self, parent=None, max_dropdown_width=800):
+        super().__init__(parent)
+        self.max_dropdown_width = max_dropdown_width
+
+        list_view = QListView()
+        self.setView(list_view)
+
+        # 启用水平滚动条
+        list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        # 关键设置：限制下拉列表的最大宽度
+        # 这样即使内容超长，列表也不会溢出屏幕
+        list_view.setMaximumWidth(self.max_dropdown_width)
+
+    def showPopup(self):
+        """
+        覆盖 showPopup 方法，在下拉列表弹出前动态设置其最小宽度。
+        """
+        # 1. 获取 QComboBox 自身的当前宽度
+        combobox_width = self.width()
+
+        # 2. 获取下拉列表的视图
+        list_view = self.view()
+
+        # 3. 【关键修正】设置最小宽度：
+        #    确保下拉列表至少和 QComboBox 自身一样宽。
+        #    如果 QComboBox 很长，列表就会跟着长。
+        list_view.setMinimumWidth(combobox_width)
+
+        # 4. 调用基类的 showPopup 方法
+        super().showPopup()
 
 
 class SignatureInspectorDialog(QDialog):
@@ -967,6 +1005,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         self._load_url_history()
 
         settings = QSettings(SETTING_ORG, SETTING_APP)
+        settings.remove("mainWindowGeometry")
         saved_d_proxy = settings.value(self.DISCOVERY_PROXY_KEY, "", type=str)
         saved_a_proxy = settings.value(self.ARTICLE_PROXY_KEY, "", type=str)
 
@@ -1005,6 +1044,10 @@ class CrawlerPlaygroundApp(QMainWindow):
             print(f"Warning: Could not get screen geometry, falling back to fixed size. Error: {e}")
             self.setGeometry(100, 100, 1400, 900)
 
+        default_width = 1200
+        default_height = 800
+        self.resize(default_width, default_height)
+
         self.update_generated_code()  # Show initial code
 
     def init_ui(self):
@@ -1022,8 +1065,9 @@ class CrawlerPlaygroundApp(QMainWindow):
         top_bar_row1_layout = QHBoxLayout()
         top_bar_row1_layout.setSpacing(10)
 
-        self.url_input = QComboBox()
+        self.url_input = AdjustableWidthComboBox(max_dropdown_width=1200)
         self.url_input.setEditable(True)
+        self.url_input.setMaximumWidth(1200)
         self.url_input.setPlaceholderText("Enter website homepage URL (e.g., https://www.example.com)")
         self.url_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.url_input.lineEdit().returnPressed.connect(self.start_channel_discovery)

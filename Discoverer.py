@@ -3,8 +3,10 @@ import json
 import logging
 import datetime
 import traceback
-from abc import ABC, abstractmethod
 import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup, Tag
+from abc import ABC, abstractmethod
+from pydantic import BaseModel, Field
 from usp.tree import sitemap_from_str
 from collections import deque, defaultdict
 from urllib.parse import urlparse, urljoin
@@ -12,16 +14,6 @@ from typing import Set, List, Dict, Any, Optional, Deque, Tuple
 
 # --- RSS/HTML Parsing Imports ---
 import feedparser
-from bs4 import BeautifulSoup, Tag
-from pydantic import BaseModel, Field
-import re
-import json
-import datetime
-from typing import List, Dict, Set, Optional, Tuple, Any
-from collections import defaultdict
-from urllib.parse import urljoin, urlparse
-from bs4 import BeautifulSoup, Tag
-from pydantic import BaseModel, Field
 
 # --- Date Imports (for interface compatibility) ---
 try:
