@@ -1130,24 +1130,79 @@ class ListPageDiscoverer(IDiscoverer):
         return " > ".join(reversed(path))
 
     def _generate_fingerprints(self, soup: BeautifulSoup, base_url: str) -> List[LinkFingerprint]:
+        """
+        [重写] 核心改进：扩大搜索范围，查找所有带有 URL 信息的重复元素，
+        包括 <a href> 和带有 data-* 属性的标签。
+        """
         fingerprints = []
         seen_hrefs = set()
 
-        # 考虑在 'main', 'article' 区域内查找，减少噪音
         main_content = soup.find('main') or soup.find('article') or soup.body
 
         if main_content is None:
             return []
 
+        # 1. 定义我们认为可能包含链接数据的属性
+        #    这是“像”可跳转列表的核心判断依据。
+        LINK_ATTRS = ['href', 'data-link', 'data-url', 'data-href']
+
+        # 2. 查找包含这些属性的标签
+        #    查找所有 <a href> 以及所有带有 data-link/url/href 的标签
+        #    使用 soup.select 是最高效的方法，但为了通用性，我们先用 find_all 遍历。
+
+        # [优化] 针对您的微信场景，我们知道它在 <li> 上，但我们应该保持通用性：
+
+        # 建立一个集合，存储所有匹配的标签，避免重复扫描
+        potential_link_tags: Set[Tag] = set()
+
+        # 查找标准链接
         for a_tag in main_content.find_all('a', href=True):
-            href = a_tag['href'].strip()
-            # 强化过滤
-            if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+            potential_link_tags.add(a_tag)
+
+        # 查找非标准链接（li, div, etc. 带有 data-link 等属性）
+        for attr in LINK_ATTRS[1:]:  # 跳过 'href' (已在上面处理 a[href])
+            # Beautiful Soup 的 find_all(attrs={...}) 更适合查找自定义属性
+            for tag in main_content.find_all(attrs={attr: True}):
+                potential_link_tags.add(tag)
+
+        # 3. 遍历所有潜在的链接标签并生成指纹
+        for item_tag in potential_link_tags:
+            href = ""
+            text = ""
+
+            # 尝试从所有可能的属性中获取 URL
+            for attr in LINK_ATTRS:
+                if item_tag.has_attr(attr):
+                    # 避免在 <a href> 标签上重复获取 data-link
+                    if item_tag.name == 'a' and attr != 'href':
+                        continue
+
+                        # 避免获取不完整的链接（例如：a[data-link] 可能只是一个ID）
+                    potential_href = item_tag[attr].strip()
+                    if potential_href and ('http' in potential_href or potential_href.startswith('/')):
+                        href = potential_href
+                        break  # 找到了一个合理的 URL，停止搜索属性
+
+            if not href:
                 continue
 
-            text = a_tag.get_text(strip=True)
-            # 过滤掉没有文本的链接（例如纯图标链接）
+            # 尝试获取链接文本
+            # 优先使用标签自身的文本
+            text = item_tag.get_text(strip=True)
+
+            # 如果是列表项（如您给的 HTML），可能没有直接文本，文本在子元素中
             if not text:
+                # 尝试从 data-title 获取文本 (如微信列表项)
+                text = item_tag.get('data-title', '').strip()
+
+            # 过滤掉没有文本的链接（例如纯图标链接或空列表项）
+            if not text:
+                continue
+
+            # --- 以下是原有的过滤和处理逻辑 ---
+
+            # 过滤
+            if href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
                 continue
 
             try:
@@ -1155,20 +1210,20 @@ class ListPageDiscoverer(IDiscoverer):
             except Exception:
                 continue
 
-            # 过滤掉重复的 URL
+            # 过滤重复和指向同一页面的链接
             if full_url in seen_hrefs:
                 continue
-
-            # 过滤掉明显指向同一页面的链接
             if urlparse(full_url).path == urlparse(base_url).path:
                 continue
 
             seen_hrefs.add(full_url)
 
-            # [调用新方法]
-            signature = self._get_structural_signature(a_tag)
+            # [调用结构签名] - 关键：对找到的标签本身生成签名
+            signature = self._get_structural_signature(item_tag)
 
             fingerprints.append(LinkFingerprint(href=full_url, text=text, signature=signature))
+
+        self._log(f"  [Analyze] 步骤 1: 已完成. 发现 {len(fingerprints)} 个潜在链接.", indent=1)
         return fingerprints
 
     def _cluster_fingerprints(self, fingerprints: List[LinkFingerprint]) -> List[LinkGroup]:

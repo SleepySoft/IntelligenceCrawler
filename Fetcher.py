@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import queue
 import random
+import re
 
 import requests
 import threading        # Add threading for PlaywrightFetcher avoiding asyncio conflict with Newspaper3kExtractor
@@ -589,6 +590,13 @@ class PlaywrightFetcher(Fetcher):
             else:
                 self._log("[Worker] Getting raw response.body()...")
                 content_bytes = response.body()
+
+            safe_filename = re.sub(r'[^\w\s-]', '', url)[:50]
+            dump_filename = f'dump_{safe_filename}.html'
+
+            self._log(f"[Worker DEBUG] Dumping content to {dump_filename}")
+            with open(dump_filename, 'wb') as f:
+                f.write(content_bytes)
 
             context.close()
             return content_bytes
