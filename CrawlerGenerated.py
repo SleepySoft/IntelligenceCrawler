@@ -4,15 +4,17 @@ from IntelligenceCrawler.CrawlPipeline import *
 
 def run_pipeline():
     # === 1. Initialize Components ===
-    d_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy='http://127.0.0.1:10809', timeout_s=10, stealth=True, pause_browser=False, render_page=False)
+    d_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy=None, timeout_s=20, stealth=True, pause_browser=False, render_page=True)
     e_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy=None, timeout_s=20, stealth=True, pause_browser=False, render_page=True)
-    discoverer = ListPageDiscoverer(fetcher=d_fetcher, verbose=True, manual_specified_signature='div.section-grid > div.section-grid__col.section-grid__col_center > div.news-list > div.news-list__item > a.N.news-preview.news-preview_default')
+    discoverer = ListPageDiscoverer(fetcher=d_fetcher, verbose=True, manual_specified_signature=None)
     extractor = TrafilaturaExtractor(verbose=True)
-    
+
     # === 2. Define Parameters ===
-    entry_point = 'https://tass.com/world'
+    entry_point = 'https://mp.weixin.qq.com/mp/appmsgalbum?__biz=MzA4NDMwNDM3Mg==&action=getalbum&album_id=1614912755034013698&subscene=126&scenenote=https%3A%2F%2Fmp.weixin.qq.com%2Fs%3F__biz%3DMzA4NDMwNDM3Mg%3D%3D%26mid%3D2650283675%26idx%3D1%26sn%3D1971e5394df4098176bb12bf3d80708b%26chksm%3D8665e5a9292e887bbcc82991fa6ff99376e46758f4b1df0b27d4513c4d727119827f1e79db67%26sessionid%3D1762823009%26scene%3D126%26clicktime%3D1762830260%26enterid%3D1762830260%26subscene%3D10000%26ascene%3D3%26fasttmpl_type%3D0%26fasttmpl_fullversion%3D7991199-zh_CN-zip%26fasttmpl_flag%3D0%26realreporttime%3D1762830260900%26devicetype%3Dandroid-31%26version%3D28004050%26nettype%3D3gnet%26abtest_cookie%3DAAACAA%253D%253D%26lang%3Dzh_CN%26session_us%3Dgh_23a44305b0f4%26countrycode%3DCN%26exportkey%3Dn_ChQIAhIQ0qXyKg1XQMwE6TKCHPnazxLkAQIE97dBBAEAAAAAAIiRK6LBmIcAAAAOpnltbLcz9gKNyK89dVj0YiSZ5DVGkgI2KjxDUrYYZdQTBqbUhwT56pwxY0vFXrSZ%252BWgc2wRw%252FFOWshqnJ%252FENHgby2Yo%252Bi7Y%252BY0BBRMBPcFTobDDN4ctdphVG6tQ6B2WCntD9aF%252BJQjWFNYmDFaACWbQyn3oDZ9O14tBhYGLLEZysLQpZrcGwXPCctfI71puYy5hMZZiQsZToyNuO88eGKMXBhSVsbl2fV7jSAEJAGM8X%252BcMakQorji6gj0dKRZxJerwk85Ejq4V2dSSUWw%253D%253D%26pass_ticket%3DkT5S7dUXsz0Eaz1B9PPnBjiF9cTfqx5b%252BVL0rJ9blOfjlariOj%252BPamCLpmb0JI55%26wx_header%3D3&nolastread=1&devicetype=android-31&version=28004050&lang=zh_CN&nettype=3gnet&ascene=78&pass_ticket=n0Ca3Lite7zeueHceva4f1QBOn8hTq8l%2FgYjSdIgXz2CPqx7mh1f7gGjHEnuMfAh&wx_header=3'
     start_date = None
     end_date = None
+    d_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 10}
+    e_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 0}
     extractor_kwargs = {}
     channel_filter_list = []
 
@@ -26,18 +28,21 @@ def run_pipeline():
     )
 
     # Step 1: Discover all channels
-    pipeline.discover_channels(entry_point, start_date, end_date)
+    pipeline.discover_channels(entry_point, start_date, end_date,
+                               fetcher_kwargs=d_fetcher_kwargs)
 
     # Step 2: Discover and fetch articles (populates pipeline.contents)
     pipeline.discover_articles(channel_filter=partial(
-        common_channel_filter, channel_filter_list=channel_filter_list))
+        common_channel_filter, channel_filter_list=channel_filter_list),
+        fetcher_kwargs=d_fetcher_kwargs)
 
     # Step 3: Extract content and run handlers
     pipeline.extract_articles(
         article_filter=lambda url: True,
         content_handler=save_article_to_disk,
         exception_handler=lambda url, exception: None,
-        **extractor_kwargs
+        fetcher_kwargs=e_fetcher_kwargs,
+        extractor_kwargs=extractor_kwargs
     )
 
 

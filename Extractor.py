@@ -329,6 +329,9 @@ class TrafilaturaExtractor(IExtractor):
             kwargs_content.pop('output_format', None)
             kwargs_content.pop('with_metadata', None)  # 确保不请求元数据
 
+            kwargs_content.pop('fetcher_kwargs', None)
+            kwargs_content.pop('extractor_kwargs', None)
+
             markdown = trafilatura.extract(
                 content,
                 url=url,
@@ -343,6 +346,9 @@ class TrafilaturaExtractor(IExtractor):
             kwargs_meta.pop('output_format', None)
             kwargs_meta.pop('include_links', None)
             kwargs_meta.pop('include_tables', None)
+
+            kwargs_meta.pop('fetcher_kwargs', None)
+            kwargs_meta.pop('extractor_kwargs', None)
 
             json_string = trafilatura.extract(
                 content,

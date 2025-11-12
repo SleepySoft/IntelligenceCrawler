@@ -591,12 +591,12 @@ class PlaywrightFetcher(Fetcher):
                 self._log("[Worker] Getting raw response.body()...")
                 content_bytes = response.body()
 
-            safe_filename = re.sub(r'[^\w\s-]', '', url)[:50]
-            dump_filename = f'dump_{safe_filename}.html'
+            # safe_filename = re.sub(r'[^\w\s-]', '', url)[:50]
+            # dump_filename = f'dump_{safe_filename}.html'
 
-            self._log(f"[Worker DEBUG] Dumping content to {dump_filename}")
-            with open(dump_filename, 'wb') as f:
-                f.write(content_bytes)
+            # self._log(f"[Worker DEBUG] Dumping content to {dump_filename}")
+            # with open(dump_filename, 'wb') as f:
+            #     f.write(content_bytes)
 
             context.close()
             return content_bytes

@@ -75,7 +75,8 @@ class CrawlPipeline:
     def discover_channels(self,
                           entry_point: str | List[str],
                           start_date: Optional[datetime.datetime] = None,
-                          end_date: Optional[datetime.datetime] = None) -> List[str]:
+                          end_date: Optional[datetime.datetime] = None,
+                          fetcher_kwargs: Optional[dict] = None) -> List[str]:
         """
         Step 1: Discovers all channels from a list of entry point URLs.
         Clears all internal state.
@@ -92,7 +93,8 @@ class CrawlPipeline:
                 channels_found = self.discoverer.discover_channels(
                     entry_point=url,
                     start_date=start_date,
-                    end_date=end_date
+                    end_date=end_date,
+                    fetcher_kwargs=fetcher_kwargs
                 )
                 channels.extend(channels_found)
                 self.log(f"Found {len(channels_found)} channels from this entry point.")
@@ -105,7 +107,8 @@ class CrawlPipeline:
         return self.channels
 
     def discover_articles(self,
-                          channel_filter: Optional[Callable[[str], bool]] = None) -> List[str]:
+                          channel_filter: Optional[Callable[[str], bool]] = None,
+                          fetcher_kwargs: Optional[dict] = None) -> List[str]:
         """
         Step 2: Discovers article URLs from channels and fetches their content.
         Populates self.contents.
@@ -120,7 +123,7 @@ class CrawlPipeline:
 
             self.log(f"Processing Channel: {channel_url}")
             try:
-                articles_in_channel = self.discoverer.get_articles_for_channel(channel_url)
+                articles_in_channel = self.discoverer.get_articles_for_channel(channel_url, fetcher_kwargs)
                 self.log(f"Found {len(articles_in_channel)} articles in channel.")
                 articles.extend(articles_in_channel)
             except Exception as e:
@@ -237,7 +240,7 @@ def common_channel_filter(channel_url: str, channel_filter_list: List[str]) -> b
 def _slugify_filename(text: str) -> str:
     """
     Sanitize a string to be used as a valid filename.
-    (e.g., "My Post / 1?" -> "my-post-1")
+    (e.g., "My Post / 1? (我的帖子)" -> "my-post-1-我的帖子")
 
     :param text: The string to sanitize.
     :return: A filesystem-safe string.
@@ -245,17 +248,27 @@ def _slugify_filename(text: str) -> str:
     if not text:
         return "untitled"
 
-    # 1. Convert to lowercase
+    # 1. 转换为小写
     text = str(text).lower()
 
-    # 2. Remove special characters (keep alphanumeric, spaces, hyphens)
-    text = re.sub(r'[^\w\s-]', '', text, flags=re.ASCII)
+    # 2. 移除特殊字符 (保留 Unicode 字母数字、空格、横线)
+    # 删除了 flags=re.ASCII，\w 现在会匹配中文字符
+    text = re.sub(r'[^\w\s-]', '', text)
 
-    # 3. Replace whitespace and hyphens with a single hyphen
+    # 3. 将连续的空格、下划线、横线替换为单个横线
     text = re.sub(r'[\s_-]+', '-', text).strip('-')
 
-    # 4. Truncate to a reasonable length (e.g., 100 chars)
-    return text[:100]
+    # 4. 截断到合理长度
+    text = text[:100]
+
+    # 5. 再次清理，防止截断后留下末尾的横线
+    text = text.strip('-')
+
+    # 6. 如果清理后字符串为空，返回一个默认值
+    if not text:
+        return "untitled"
+
+    return text
 
 
 def _get_safe_basename(url: str, metadata: Dict[str, Any]) -> str:
