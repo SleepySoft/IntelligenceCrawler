@@ -665,8 +665,7 @@ class ArticleListWorker(QRunnable):
 
             # 1. Create Fetcher
             if self.render_page:
-                log_callback("[Warning] 'Render Page' is enabled for Article List, " \
-                             "this may fail XML/RSS parsing. Forcing False.")
+                log_callback("[Warning] 'Render Page' is enabled for Article List, this may fail XML/RSS parsing..。")
 
             fetcher = create_fetcher_instance(
                 self.fetcher_name,
@@ -674,7 +673,7 @@ class ArticleListWorker(QRunnable):
                 proxy=self.proxy,
                 timeout=self.timeout,
                 pause_browser=self.pause_browser,
-                render_page=False  # Force False for discovery
+                render_page=self.render_page
             )
 
             # 2. Create Discoverer
@@ -2159,7 +2158,7 @@ class CrawlerPlaygroundApp(QMainWindow):
                 "timeout": d_fetcher_config_dict['timeout'],
                 "stealth": "Stealth" in discovery_fetcher_name,
                 "pause_browser": d_fetcher_config_dict['pause'],
-                "render_page": False  # Hardcoded False for discovery
+                "render_page": d_fetcher_config_dict['render']\
             }
         }
 
