@@ -1,13 +1,10 @@
 # CrawlPipeline.py
 
-import re
 import os
-import json
-import hashlib
 import datetime
 import traceback
 from urllib.parse import urlparse
-from typing import List, Optional, Callable, Any, Tuple, Dict
+from typing import List, Optional, Callable, Any, Tuple
 
 # Import for generated code
 from functools import partial
@@ -16,9 +13,11 @@ from IntelligenceCrawler.Extractor import (
     ExtractionResult, IExtractor, TrafilaturaExtractor, ReadabilityExtractor,
     Newspaper3kExtractor, GenericCSSExtractor, Crawl4AIExtractor)
 from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer, ListPageDiscoverer
-from IntelligenceCrawler.Persistence import save_extraction_result_to_disk
+from IntelligenceCrawler.Persistence import save_extraction_result_as_md, save_extraction_result_as_pdf
+
 
 log_cb = print
+
 
 # --- Configuration ---
 # Define the root directory where all articles will be saved
@@ -236,6 +235,13 @@ def common_channel_filter(channel_url: str, channel_filter_list: List[str]) -> b
     return is_allowed
 
 
-
-def save_article_to_disk(url: str, result: ExtractionResult):
-    save_extraction_result_to_disk(url, result, save_image=True, root_dir=BASE_OUTPUT_DIR)
+def save_article_to_disk(
+        url: str,
+        result: ExtractionResult,
+        in_markdown: bool = True,
+        in_pdf: bool = True
+):
+    if in_markdown:
+        save_extraction_result_as_md(url, result, save_image=True, root_dir=BASE_OUTPUT_DIR)
+    if in_pdf:
+        save_extraction_result_as_pdf(result, root_dir=BASE_OUTPUT_DIR)

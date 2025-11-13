@@ -5,6 +5,8 @@ import os
 import re
 import copy
 import json
+from uuid import uuid4
+
 import requests
 import html2text
 import traceback
@@ -15,6 +17,13 @@ from bs4 import BeautifulSoup, Tag
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import List, Dict, Any, Optional, Literal
+# External dependencies for PDF generation and Markdown processing
+# These need to be installed: pip install reportlab markdown pydantic
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_JUSTIFY
+import markdown
 
 from IntelligenceCrawler.Extractor import ExtractionResult
 
@@ -167,7 +176,27 @@ def _get_safe_basename(url: str, metadata: Dict[str, Any]) -> str:
     return hashlib.md5(url.encode('utf-8')).hexdigest()
 
 
-def save_extraction_result_to_disk(
+def prepare_base_file_path(url: str, metadata: Dict[str, Any], root_dir: str):
+    # Determine Category (Folder) from domain
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc or "unknown_domain"
+    # Sanitize domain to remove ports (e.g., "localhost:8000")
+    domain = domain.split(':', 1)[0]
+
+    # 3. Determine safe filename
+    base_filename = _get_safe_basename(url, metadata)
+
+    # Define full file paths
+    # Structure: CRAWLER_OUTPUT / <domain> / <base_filename>
+    article_dir = os.path.join(root_dir, domain)
+
+    # Create the directory if it doesn't exist
+    os.makedirs(article_dir, exist_ok=True)
+
+    base_file_path = os.path.join(article_dir, f"{base_filename}")
+    return base_file_path
+
+def save_extraction_result_as_md(
         url: str,
         result: ExtractionResult,
         save_image: bool = False,
@@ -188,8 +217,7 @@ def save_extraction_result_to_disk(
     :param save_image: True to download and save image else False.
     :param root_dir: The root dir to save articles.
     """
-
-    # 1. Do not save if extraction failed or content is empty
+    # Do not save if extraction failed or content is empty
     if not result.success:
         logger.error(f"SKIPPING (Failure): {url}. Reason: {result.error}")
         return
@@ -199,37 +227,23 @@ def save_extraction_result_to_disk(
         return
 
     try:
-        # 2. Determine Category (Folder) from domain
-        parsed_url = urlparse(url)
-        domain = parsed_url.netloc or "unknown_domain"
-        # Sanitize domain to remove ports (e.g., "localhost:8000")
-        domain = domain.split(':', 1)[0]
+        base_file_path = prepare_base_file_path(url, result.metadata, root_dir)
 
-        # 3. Determine safe filename
-        base_filename = _get_safe_basename(url, result.metadata)
-
-        # 4. Define full file paths
-        # Structure: CRAWLER_OUTPUT / <domain> / <base_filename>
-        article_dir = os.path.join(root_dir, domain)
-
-        md_filepath = os.path.join(article_dir, f"{base_filename}.md")
-        meta_filepath = os.path.join(article_dir, f"{base_filename}.meta.json")
+        md_filepath = f"{base_file_path}.md"
+        meta_filepath = f"{base_file_path}.meta.json"
         markdown_content = result.markdown_content
 
-        # 5. Create the directory if it doesn't exist
-        os.makedirs(article_dir, exist_ok=True)
-
         if save_image:
-            base_url = result.metadata.get('url')
-            os.makedirs(image_dir := os.path.join(article_dir, f"{base_filename}"))
-            rewritten_markdown, download_success = localize_markdown_image(result.markdown_content, base_url, image_dir)
+            os.makedirs(image_dir := f"{base_file_path}", exist_ok=True)
+            rewritten_markdown, download_success = (
+                localize_markdown_image(result.markdown_content, url, image_dir))
             if download_success:
                 markdown_content = rewritten_markdown
 
-        # 6. Save Markdown content
+        # Save Markdown content
         # We'll add a simple header to the Markdown file
         with open(md_filepath, 'w', encoding='utf-8') as f:
-            f.write(f"# {result.metadata.get('title', base_filename)}\n\n")
+            f.write(f"# {result.metadata.get('title', 'N/A')}\n\n")
             f.write(f"**Source:** <{url}>\n")
 
             pub_date = result.metadata.get('date')
@@ -253,3 +267,101 @@ def save_extraction_result_to_disk(
     except Exception as e:
         logger.error(f"[Handler] CRITICAL ERROR saving {url}: {e}")
         traceback.print_exc()
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# --- PDF Generation Function ---
+
+def save_extraction_result_as_pdf(result: ExtractionResult, root_dir: str) -> bool:
+    """
+    Generates a PDF file from an ExtractionResult object, adding metadata
+    to the document properties instead of the body.
+
+    Args:
+        :param result: The ExtractionResult object containing content and metadata.
+        :param root_dir: The root dir of saving file.
+
+    Returns:
+        True if the PDF was successfully created, False otherwise.
+    """
+    base_file_path = prepare_base_file_path(result.metadata.get('url', str(uuid4())[:8]), result.metadata, root_dir)
+    filename = base_file_path + '.pdf'
+
+    try:
+        # Check if there is content to print
+        if not result.markdown_content:
+            print(f"Warning: No content available in ExtractionResult to save to {filename}")
+            return False
+
+        # --- 1. Setup Document and Metadata ---
+        # Initialize the PDF document template
+        doc = SimpleDocTemplate(
+            filename,
+            pagesize=letter,
+            rightMargin=72,
+            leftMargin=72,
+            topMargin=72,
+            bottomMargin=72
+        )
+
+        # Apply metadata to the PDF document properties (not in the body)
+        doc.title = result.metadata.get('title', os.path.basename(filename))
+        doc.author = result.metadata.get('author', 'Document Extractor')
+        doc.subject = result.metadata.get('description', 'Extracted Content')
+
+        # Use the 'creator' field to store the rest of the metadata as a JSON string
+        try:
+            # Ensure complex types are serialized
+            metadata_str = json.dumps(result.metadata, default=str, ensure_ascii=False)
+            doc.creator = metadata_str
+        except Exception as e:
+            # Fallback if metadata serialization fails
+            doc.creator = "Metadata serialization failed."
+            print(f"Warning: Could not serialize all metadata. Error: {e}")
+
+        Story = []
+        styles = getSampleStyleSheet()
+
+        # Define a base style for the body text
+        styles.add(ParagraphStyle(
+            name='NormalBody',
+            parent=styles['Normal'],
+            fontName='Helvetica',  # Use a standard font for broad compatibility
+            fontSize=12,
+            leading=14,
+            alignment=TA_JUSTIFY,
+            spaceBefore=6,
+            spaceAfter=6,
+        ))
+
+        # --- 2. Content Conversion and Formatting ---
+        content_type = result.metadata.get('content_type', 'markdown').lower()
+        content_to_render = result.markdown_content
+
+        if content_type == 'markdown':
+            # Convert markdown to basic HTML for ReportLab's Paragraph flowables
+            # ReportLab's Paragraph supports a subset of HTML tags (like <b>, <i>, <h1>-<h6>, <br/>)
+            html_content = markdown.markdown(content_to_render)
+            Story.append(Paragraph(html_content, styles['NormalBody']))
+
+        elif content_type == 'raw_html':
+            # Render raw HTML directly
+            Story.append(Paragraph(content_to_render, styles['NormalBody']))
+
+        else:  # Default or unknown type: treat as plain text
+            # Replace newlines with <br/> tags to ensure line breaks are visible in the PDF
+            plain_text_html = content_to_render.replace('\n', '<br/>')
+            Story.append(Paragraph(plain_text_html, styles['NormalBody']))
+
+        # Add a final spacer for good measure
+        Story.append(Spacer(1, 12))
+
+        # --- 3. Build the PDF ---
+        doc.build(Story)
+        print(f"Successfully generated PDF: {filename}")
+        return True
+
+    except Exception as e:
+        # Catch any exception and return False, as required
+        print(f"An error occurred during PDF generation for {filename}: {e}")
+        return False

@@ -295,6 +295,61 @@ class IExtractor(ABC):
 
 
 # =======================================================================
+# == PassThroughExtractor
+# =======================================================================
+
+class PassThroughExtractor(IExtractor):
+    """
+    一个什么都不做 (no-op) 的提取器。
+    它将原始 HTML 内容（作为字符串）直接打包到 ExtractionResult 的
+    markdown_content 字段中，不做任何内容清洗或结构提取。
+    这对于将原始 HTML 传递给后续的管道处理非常有用。
+    """
+
+    def __init__(self, verbose: bool = True):
+        super().__init__(verbose)
+        self.name = "PassThroughExtractor"  # 明确设置名称
+
+    def extract(self, content: bytes, url: str, **kwargs) -> ExtractionResult:
+        """
+        实现 IExtractor.extract 方法。将原始字节解码并直接返回。
+        (Implements IExtractor.extract. Decodes raw bytes and returns them directly.)
+        """
+        self._log(f"[{self.name}] 正在开始直通 (pass-through) 提取，URL: {url}", indent=0)
+        self._log(f"[{self.name}] 原始字节长度: {len(content)}", indent=1)
+
+        # 1. 尝试将字节内容解码为字符串（原始HTML）
+        try:
+            # 假设使用 UTF-8 解码，并忽略无法解码的错误字节。
+            # 这是最安全的方式，因为原始 HTML 的确切编码可能未知。
+            raw_html_content = content.decode('utf-8', errors='ignore')
+            self._log("内容已成功使用 UTF-8 (忽略错误) 解码为字符串。", indent=1)
+        except Exception as e:
+            error_msg = f"无法解码内容: {e}"
+            self._log(error_msg, indent=1)
+            return ExtractionResult(error=error_msg)
+
+        # 2. 准备元数据
+        metadata = {
+            "source_url": url,
+            "extractor_name": self.name,
+            "content_type": "raw_html",  # 明确标记内容类型是原始 HTML
+            "original_byte_length": len(content),
+        }
+
+        # 3. 创建 ExtractionResult
+        result = ExtractionResult(
+            markdown_content=raw_html_content,  # 原始 HTML 赋给 markdown_content 字段
+            metadata=metadata
+        )
+
+        self._log(f"提取完成。内容字符长度: {len(raw_html_content)}", indent=1)
+        self._log(f"返回结果成功状态: {result.success}", indent=1)
+
+        return result
+
+
+# =======================================================================
 # == 3. IMPLEMENTATIONS
 # =======================================================================
 
@@ -307,6 +362,10 @@ class TrafilaturaExtractor(IExtractor):
     supports Markdown output.
     (这是一个高效的算法提取器，原生支持Markdown输出。)
     """
+
+    def __init__(self, verbose: bool = True):
+        super().__init__(verbose)
+        self.name = "TrafilaturaExtractor"
 
     def extract(self, content: bytes, url: str, **kwargs) -> ExtractionResult:
         """
@@ -382,6 +441,8 @@ class TrafilaturaExtractor(IExtractor):
                         'image': data_dict.get('image'),
                         'url': data_dict.get('url'),
                         'hostname': data_dict.get('hostname'),
+                        "extractor": self.name,
+                        "content_type": "markdown",
                     }
                     # 移除值为 None 的键，保持 metadata 字典干净
                     metadata = {k: v for k, v in metadata.items() if v is not None}
@@ -425,6 +486,7 @@ class ReadabilityExtractor(IExtractor):
         self.converter.ignore_links = False
         self.converter.ignore_images = False  # Markdown should include images
         self.converter.body_width = 0  # Don't wrap lines
+        self.name = 'ReadabilityExtractor'
 
     def extract(self, content: bytes, url: str, **kwargs) -> ExtractionResult:
         """
@@ -447,7 +509,12 @@ class ReadabilityExtractor(IExtractor):
             main_content_html = doc.summary()
 
             # Try to get the title from the Document object
-            metadata = {'title': doc.title()}
+            metadata = {
+                "url": url,
+                'title': doc.title(),
+                "extractor": self.name,
+                "content_type": "markdown"
+            }
 
             markdown = self.converter.handle(main_content_html)
             return ExtractionResult(
@@ -485,6 +552,7 @@ class Newspaper3kExtractor(IExtractor):
         self.converter.ignore_links = False
         self.converter.ignore_images = False
         self.converter.body_width = 0
+        self.name = 'Newspaper3kExtractor'
 
     def extract(self, content: bytes, url: str, **kwargs) -> ExtractionResult:
         """
@@ -529,6 +597,9 @@ class Newspaper3kExtractor(IExtractor):
                 'movies': article.movies,
                 'keywords': article.keywords,
                 'summary': article.summary,
+                "url": url,
+                "extractor": self.name,
+                "content_type": "markdown"
             }
 
             return ExtractionResult(
@@ -645,6 +716,7 @@ class Crawl4AIExtractor(IExtractor):
         """
         super().__init__(verbose)
         self.model_name = model_name
+        self.name = 'Crawl4AIExtractor'
 
     def extract(self, content: bytes, url: str, **kwargs) -> ExtractionResult:
         """
@@ -665,18 +737,16 @@ class Crawl4AIExtractor(IExtractor):
         self._log("[Warning] Crawl4AIExtractor ignores pre-fetched content and is re-fetching the URL.")
 
         try:
-            extractor = SmartExtractor(
-                model=self.model_name,
-                **kwargs
-            )
-
+            extractor = SmartExtractor(model=self.model_name, **kwargs)
             crawler = Crawler(extractor=extractor)
             result = crawler.run(url)
 
             if result and (result.markdown or result.structured_data):
                 # crawl4ai returns markdown AND structured_data (which is our metadata)
                 metadata = result.structured_data or {}
-                metadata['source'] = 'Crawl4AI'
+                metadata['url'] = url
+                metadata['extractor'] = self.name
+                metadata['content_type'] = 'markdown'
 
                 return ExtractionResult(
                     markdown_content=sanitize_unicode_string(result.markdown),
@@ -690,388 +760,3 @@ class Crawl4AIExtractor(IExtractor):
             self._log(f"[Error] {error_str}")
             self._log(traceback.format_exc())
             return ExtractionResult(error=error_str)
-
-
-# --- Begin: 链接指纹和聚类的数据模型 ---
-
-class LinkFingerprint(BaseModel):
-    """
-    Represents a single link and its structural context.
-    (代表单个链接及其结构上下文。)
-    """
-    href: str = Field(description="完整的、绝对路径的URL")
-    text: str = Field(description="链接的可见文本")
-    signature: str = Field(description="该链接的结构指纹 (例如 'h2.title.post-title')")
-
-
-class LinkGroup(BaseModel):
-    """
-    Represents a cluster of links sharing the same signature.
-    (代表共享相同指纹的链接聚类。)
-    """
-    signature: str = Field(description="共享的结构指纹")
-    count: int = Field(description="该指纹出现的次数")
-    sample_links: List[LinkFingerprint] = Field(description="该组的链接示例 (最多5个)")
-
-
-# --- End: 数据模型 ---
-
-
-class ArticleListExtractor(IExtractor):
-    """
-    Extractor implementation for discovering and extracting article lists from a webpage.
-    (用于发现和提取网页文章列表的提取器实现。)
-
-    Implements the "link fingerprint" strategy.
-    (实现了“链接指纹”策略。)
-    """
-
-    def __init__(self, verbose: bool = True, min_group_count: int = 3):
-        """
-        初始化列表提取器。
-        :param min_group_count: 启发式猜测时，一个组至少需要多少个链接才被考虑。
-        """
-        super().__init__(verbose)
-        self.min_group_count = min_group_count
-
-    # --- 步骤 1: 生成链接指纹 ---
-
-    def _get_structural_signature(self, tag: Tag) -> str:
-        """
-        Calculates the "structural signature" for an <a> tag based on its parent.
-        (根据 <a> 标签的父节点计算其“结构指纹”。)
-
-        The signature is `tag.class1.class2` of the immediate parent.
-        (指纹是其直接父节点的 `标签名.class1.class2`。)
-        """
-        parent = tag.parent
-        if not parent or parent.name == 'body':
-            return 'body'
-
-        name = parent.name
-        classes = sorted(parent.get('class', []))
-
-        if classes:
-            return f"{name}.{'.'.join(classes)}"
-        return name
-
-    def _generate_fingerprints(self, soup: BeautifulSoup, base_url: str) -> List[LinkFingerprint]:
-        """
-        Step 1: Analyzes the DOM and generates a LinkFingerprint for every valid <a> tag.
-        (步骤 1: 分析DOM，并为每个有效的 <a> 标签生成一个 LinkFingerprint。)
-        """
-        fingerprints = []
-        seen_hrefs = set()
-
-        for a_tag in soup.find_all('a', href=True):
-            href = a_tag['href'].strip()
-
-            # 过滤无效链接
-            if not href or href.startswith('#') or href.startswith('javascript:'):
-                continue
-
-            # 解析为绝对URL
-            try:
-                full_url = urljoin(base_url, href)
-            except Exception:
-                continue  # 忽略格式错误的URL
-
-            # 过滤重复链接
-            if full_url in seen_hrefs:
-                continue
-            seen_hrefs.add(full_url)
-
-            text = a_tag.get_text(strip=True)
-            signature = self._get_structural_signature(a_tag)
-
-            fingerprints.append(LinkFingerprint(
-                href=full_url,
-                text=text,
-                signature=signature
-            ))
-
-        return fingerprints
-
-    # --- 步骤 2: 链接指纹聚类 ---
-
-    def _cluster_fingerprints(self, fingerprints: List[LinkFingerprint]) -> List[LinkGroup]:
-        """
-        Step 2: Groups fingerprints by their signature.
-        (步骤 2: 按指纹对链接进行分组。)
-        """
-        groups_map = defaultdict(list)
-        for fp in fingerprints:
-            groups_map[fp.signature].append(fp)
-
-        link_groups = []
-        for signature, fps_list in groups_map.items():
-            link_groups.append(LinkGroup(
-                signature=signature,
-                count=len(fps_list),
-                sample_links=fps_list[:5]  # 仅存储前5个作为示例
-            ))
-
-        # 按数量降序排序，最重要的组排在最前面
-        link_groups.sort(key=lambda g: g.count, reverse=True)
-        return link_groups
-
-    # --- 步骤 3: 启发式猜测 ---
-
-    def _guess_by_heuristics(self, groups: List[LinkGroup]) -> Optional[LinkGroup]:
-        """
-        Step 3: Guesses the main article list using a scoring-based heuristic.
-        (步骤 3: 使用基于评分的启发式规则猜测主要文章列表。)
-
-        This is the non-AI logic.
-        (这是非AI逻辑。)
-        """
-        self._log("  [Heuristics] 启动启发式评分...", indent=1)
-        best_group = None
-        best_score = -99
-
-        # 定义正面和负面信号词
-        POSITIVE_SIG_KEYWORDS = ['article', 'post', 'item', 'entry', 'headline', 'title', 'feed', 'story']
-        POSITIVE_TAG_KEYWORDS = ['h2', 'h3']
-        NEGATIVE_SIG_KEYWORDS = [
-            'nav', 'menu', 'header', 'head', 'foot', 'copyright', 'legal', 'privacy',
-            'sidebar', 'aside', 'widget', 'ad', 'banner', 'comment', 'meta', 'tag', 'category'
-        ]
-        NEGATIVE_TEXT_KEYWORDS = ['关于我们', '联系我们', '首页', '隐私政策', 'home', 'about', 'contact', 'privacy']
-
-        for group in groups:
-            score = 0
-            sig_lower = group.signature.lower()
-
-            # 规则 1: 数量必须达标
-            if group.count < self.min_group_count:
-                self._log(f"    - [{sig_lower}]: 数量太少 ({group.count}), 跳过。", indent=1)
-                continue
-
-            score += group.count  # 数量越多，分数越高
-
-            # 规则 2: 签名关键词
-            if any(kw in sig_lower for kw in POSITIVE_SIG_KEYWORDS):
-                score += 30
-            if any(kw in sig_lower for kw in POSITIVE_TAG_KEYWORDS):
-                score += 15
-            if any(kw in sig_lower for kw in NEGATIVE_SIG_KEYWORDS):
-                score -= 50
-
-            # 规则 3: 样本链接文本
-            if group.sample_links:
-                avg_text_len = sum(len(fp.text) for fp in group.sample_links) / len(group.sample_links)
-
-                # 标题通常不会太短
-                if avg_text_len > 10:
-                    score += 15
-                if avg_text_len < 5:  # 可能是 "阅读更多" 或 "..."
-                    score -= 10
-
-                # 检查导航/页脚的常见文本
-                sample_texts_lower = [fp.text.lower() for fp in group.sample_links]
-                if any(kw in t for t in sample_texts_lower for kw in NEGATIVE_TEXT_KEYWORDS):
-                    score -= 30
-
-            self._log(f"    - [{sig_lower}]: 最终得分 {score}", indent=1)
-
-            if score > best_score:
-                best_score = score
-                best_group = group
-
-        if best_score <= 0:
-            self._log("  [Heuristics] 启发式猜测失败：没有组的分数 > 0。", indent=1)
-            return None
-
-        self._log(f"  [Heuristics] 获胜者: {best_group.signature} (得分: {best_score})", indent=1)
-        return best_group
-
-    # --- 步骤 4: AI Prompt 准备 ---
-
-    def _prepare_ai_prompt(self, groups: List[LinkGroup], page_title: str, page_url: str) -> str:
-        """
-        Step 4: Prepares the JSON payload and the system prompt for the AI.
-        (步骤 4: 为AI准备JSON负载和系统提示。)
-        """
-
-        # 将Pydantic模型转换为字典
-        groups_data = [g.model_dump() for g in groups]
-
-        payload = {
-            "page_url": page_url,
-            "page_title": page_title,
-            "link_groups": groups_data
-        }
-
-        json_payload = json.dumps(payload, indent=2, ensure_ascii=False)
-
-        system_prompt = """你是一个专业的网页结构分析引擎。你的任务是分析一个JSON输入，该JSON代表了网页上所有链接的分组情况。你需要找出哪一个分组是该页面的**主要文章列表**。
-
-**决策标准:**
-1.  **排除导航和页脚：** 签名（signature）中包含`nav`, `menu`, `footer`, `copyright`的，或者链接文本（text）为“首页”、“关于我们”、“隐私政策”的，**不是**主列表。
-2.  **排除侧边栏和部件：** 签名（signature）中包含`sidebar`, `widget`, `aside`, `ad`的，或者链接文本为“热门文章”、“标签云”的，**不是**主列表。
-3.  **识别文章特征：**
-    * `count`（数量）通常较高（例如 > 5）。
-    * 链接文本（text）看起来像**文章标题**（例如：“xxx的评测”、“xxx宣布了新功能”）。
-    * `href`（链接）看起来像**文章的永久链接**（例如：`/post/slug-name`或`/article/12345.html`），而不是分类链接（`/category/tech`）。
-4.  **识别签名：** 主列表的签名通常是`article`, `post`, `item`, `entry`, `feed`或`h2`, `h3`等。
-
-**任务:**
-分析以下JSON数据，并**仅返回**你认为是**主要文章列表**的那个分组的`signature`字符串。如果找不到，请返回`null`。
-"""
-
-        full_prompt = f"{system_prompt}\n\n**输入数据:**\n```json\n{json_payload}\n```"
-        return full_prompt
-
-    # --- 辅助方法 ---
-
-    def _find_group_by_signature(self, groups: List[LinkGroup], signature: str) -> Optional[LinkGroup]:
-        """按签名查找已聚类的组。"""
-        for group in groups:
-            if group.signature == signature:
-                return group
-        return None
-
-    def _extract_links_by_signature(self, soup: BeautifulSoup, signature: str, base_url: str) -> List[str]:
-        """
-        Using the winning signature, extract all corresponding links.
-        (使用获胜的签名，提取所有对应的链接。)
-        """
-        self._log(f"  正在使用CSS选择器 '{signature}' 提取...", indent=2)
-        parent_elements = soup.select(signature)
-
-        final_links = []
-        seen_hrefs = set()
-
-        for parent in parent_elements:
-            # 在父节点内查找第一个有效链接
-            a_tag = parent.find('a', href=True)
-
-            if a_tag:
-                href = a_tag['href'].strip()
-                if not href or href.startswith('#') or href.startswith('javascript:'):
-                    continue
-
-                try:
-                    full_url = urljoin(base_url, href)
-                    if full_url not in seen_hrefs:
-                        final_links.append(full_url)
-                        seen_hrefs.add(full_url)
-                except Exception:
-                    continue  # 忽略格式错误的URL
-
-        return final_links
-
-    # --- 主提取方法 ---
-
-    def extract(self, content: bytes, url: str, **kwargs) -> ExtractionResult:
-        """
-        Orchestrates the entire list extraction process.
-        (协调整个列表提取过程。)
-
-        :param content: The raw HTML content as bytes. (原始HTML字节)
-        :param url: The original URL. (原始URL)
-        :param kwargs:
-            - use_ai (bool): If True, triggers AI mode. (如果为True，触发AI模式)
-            - ai_signature (str): The response from the AI (the winning signature). (AI的响应，即获胜的签名)
-        :return: An ExtractionResult.
-        """
-        self.log_messages = []  # 重置日志
-        self._log(f"开始列表提取: {url}")
-
-        use_ai = kwargs.get('use_ai', False)
-        ai_signature = kwargs.get('ai_signature', None)
-
-        try:
-            self._log("正在解析HTML (使用 lxml)...")
-            soup = BeautifulSoup(content, 'lxml')
-            page_title = soup.title.string.strip() if soup.title else ""
-
-            # 步骤 1: 生成指纹
-            self._log("步骤 1: 正在生成链接指纹...")
-            fingerprints = self._generate_fingerprints(soup, url)
-            if not fingerprints:
-                return ExtractionResult(error="页面上未找到任何有效链接")
-            self._log(f"  找到 {len(fingerprints)} 个有效链接。", indent=1)
-
-            # 步骤 2: 聚类
-            self._log("步骤 2: 正在聚类指纹...")
-            groups = self._cluster_fingerprints(fingerprints)
-            if not groups:
-                return ExtractionResult(error="无法对链接进行聚类")
-            self._log(f"  聚类为 {len(groups)} 个唯一的签名组。", indent=1)
-
-            # --- 决策阶段 ---
-            winning_group: Optional[LinkGroup] = None
-
-            if use_ai:
-                self._log("步骤 3: [AI 模式] 启动...")
-                if ai_signature:
-                    # AI模式 - 步骤 2: 接收到AI的签名
-                    self._log(f"  接收到AI决策: '{ai_signature}'", indent=1)
-                    winning_group = self._find_group_by_signature(groups, ai_signature)
-                    if not winning_group:
-                        return ExtractionResult(error=f"AI返回的签名 '{ai_signature}' 在聚类组中未找到。")
-                else:
-                    # AI模式 - 步骤 1: 生成Prompt
-                    self._log("  未提供AI签名。正在生成Prompt...", indent=1)
-                    prompt = self._prepare_ai_prompt(groups, page_title, url)
-                    self._log("  已生成Prompt。请使用 metadata.ai_prompt 调用您的AI服务。", indent=1)
-                    # 将groups也返回，以便AI调用失败时回退
-                    groups_data = [g.model_dump() for g in groups]
-                    return ExtractionResult(
-                        markdown_content="# AI Prompt 已生成\n\n请查看 `metadata.ai_prompt` 字段，并使用AI服务获取 `signature`。",
-                        metadata={
-                            "title": "AI Prompt 请求",
-                            "ai_prompt_required": True,
-                            "ai_prompt": prompt,
-                            "link_groups": groups_data
-                        }
-                    )
-            else:
-                # 启发式模式
-                self._log("步骤 3: [启发式模式] 正在猜测主列表...")
-                winning_group = self._guess_by_heuristics(groups)
-                if not winning_group:
-                    debug_info = "\n".join([f"  - {g.signature} (Count: {g.count})" for g in groups[:10]])
-                    return ExtractionResult(error=f"启发式规则未能确定主列表。检测到的顶级组:\n{debug_info}")
-
-            # --- 提取阶段 ---
-            if not winning_group:
-                # 这是一个理论上不应该发生的路径，但作为保险
-                return ExtractionResult(error="未能确定获胜的链接组。")
-
-            self._log(f"步骤 4: 获胜签名 '{winning_group.signature}' (数量: {winning_group.count})")
-            self._log("步骤 5: 正在提取最终链接...")
-            final_links = self._extract_links_by_signature(soup, winning_group.signature, url)
-
-            if not final_links:
-                return ExtractionResult(error=f"获胜签名 '{winning_group.signature}' 未能提取到任何链接。")
-
-            self._log(f"  成功提取 {len(final_links)} 个链接。")
-
-            # 构建 Markdown 输出
-            md_content = f"# 提取的文章列表\n\n源: {url}\n签名: `{winning_group.signature}`\n\n"
-            for link in final_links:
-                # 尝试从指纹中找到原始文本，如果找不到就用URL作为文本
-                link_text = next((fp.text for fp in winning_group.sample_links if fp.href == link), None)
-                if not link_text or len(link_text) < 5:  # 如果文本太短或没有
-                    md_content += f"- {link}\n"
-                else:
-                    md_content += f"- [{link_text}]({link})\n"
-
-            metadata = {
-                "title": f"文章列表: {page_title if page_title else url}",
-                "source_url": url,
-                "winning_signature": winning_group.signature,
-                "extracted_links_count": len(final_links),
-                "extracted_links": final_links,
-                "all_groups": [g.model_dump() for g in groups]  # 包含所有组的调试信息
-            }
-
-            return ExtractionResult(markdown_content=md_content, metadata=metadata)
-
-        except Exception as e:
-            self._log(f"提取过程中发生严重错误: {e}")
-            import traceback
-            self._log(traceback.format_exc())
-            return ExtractionResult(error=f"提取失败: {e}")
