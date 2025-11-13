@@ -4,18 +4,18 @@ from IntelligenceCrawler.CrawlPipeline import *
 
 def run_pipeline():
     # === 1. Initialize Components ===
-    d_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy=None, timeout_s=20, stealth=True, pause_browser=False, render_page=True)
+    d_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy=None, timeout_s=10, stealth=True, pause_browser=False, render_page=False)
     e_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy=None, timeout_s=20, stealth=True, pause_browser=False, render_page=True)
-    discoverer = ListPageDiscoverer(fetcher=d_fetcher, verbose=True, manual_specified_signature=None)
+    discoverer = ListPageDiscoverer(fetcher=d_fetcher, verbose=True, manual_specified_signature='div.section-grid > div.section-grid__col.section-grid__col_center > div.news-list > div.news-list__item > a.N.news-preview.news-preview_default')
     extractor = TrafilaturaExtractor(verbose=True)
 
     # === 2. Define Parameters ===
-    entry_point = 'https://mp.weixin.qq.com/mp/appmsgalbum?action=getalbum&__biz=MzUzNDk1NjcyNg==&scene=1&album_id=3505726637201195014&count=3#wechat_redirect'
+    entry_point = 'https://tass.com/emergencies'
     start_date = None
     end_date = None
-    d_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 10}
+    d_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 10, 'scroll_pages': 10}
     e_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 0}
-    extractor_kwargs = {'include_images': True}
+    extractor_kwargs = {}
     channel_filter_list = []
 
     # === 3. Build pipeline ===
