@@ -21,47 +21,26 @@ try:
 except ImportError:
     print("!!! CRITICAL: Could not import Fetcher classes.")
 
-
     # Mock classes to allow UI to load
-    class Fetcher:
-        pass
-
-
-    class PlaywrightFetcher:
-        pass
-
-
-    class RequestsFetcher:
-        pass
-
+    class Fetcher: pass
+    class PlaywrightFetcher: pass
+    class RequestsFetcher: pass
 try:
     from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer, ListPageDiscoverer
 except ImportError:
     print("!!! CRITICAL: Could not import Discoverer classes.")
-
-
-    class IDiscoverer:
-        pass
-
-
-    class SitemapDiscoverer:
-        pass
-
-
-    class RSSDiscoverer:
-        pass
-
-    class ListPageDiscoverer:
-        pass
-
+    class IDiscoverer: pass
+    class SitemapDiscoverer: pass
+    class RSSDiscoverer: pass
+    class ListPageDiscoverer: pass
 try:
     from IntelligenceCrawler.Extractor import (
-        IExtractor, TrafilaturaExtractor, ReadabilityExtractor,
+        IExtractor, PassThroughExtractor, TrafilaturaExtractor, ReadabilityExtractor,
         Newspaper3kExtractor, GenericCSSExtractor, Crawl4AIExtractor, ExtractionResult
 )
-
     # Store imported classes for factory
     EXTRACTOR_MAP = {
+        "PassThrough": PassThroughExtractor,
         "Trafilatura": TrafilaturaExtractor,
         "Readability": ReadabilityExtractor,
         "Newspaper3k": Newspaper3kExtractor,
@@ -70,11 +49,8 @@ try:
     }
 except ImportError:
     print("!!! CRITICAL: Could not import Extractor classes.")
+    class IExtractor: pass
     EXTRACTOR_MAP = {}
-
-
-    class IExtractor:
-        pass
 
 try:
     from dateutil.parser import parse as date_parse
@@ -2330,6 +2306,10 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         parameters_str = "\n".join(parameters)
 
+        # TODO: Get value from ui
+        in_markdown = True
+        in_pdf = True
+
         # --- 5. Format the final code ---
         code = CODE_TEMPLATE.format(
             code_d_fetcher=code_d_fetcher,
@@ -2337,7 +2317,9 @@ class CrawlerPlaygroundApp(QMainWindow):
             code_discoverer=code_discoverer,
             code_extractor=code_extractor,
             parameters=parameters_str,
-            channel_filter_list=channel_list_code
+            channel_filter_list=channel_list_code,
+            in_markdown=in_markdown,
+            in_pdf=in_pdf
         )
 
         return code

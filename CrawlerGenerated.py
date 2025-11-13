@@ -15,7 +15,7 @@ def run_pipeline():
     end_date = None
     d_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 10}
     e_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 0}
-    extractor_kwargs = {}
+    extractor_kwargs = {'include_images': True}
     channel_filter_list = []
 
     # === 3. Build pipeline ===

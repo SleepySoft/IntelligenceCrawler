@@ -10,8 +10,8 @@ from typing import List, Optional, Callable, Any, Tuple
 from functools import partial
 from IntelligenceCrawler.Fetcher import Fetcher, RequestsFetcher, PlaywrightFetcher
 from IntelligenceCrawler.Extractor import (
-    ExtractionResult, IExtractor, TrafilaturaExtractor, ReadabilityExtractor,
-    Newspaper3kExtractor, GenericCSSExtractor, Crawl4AIExtractor)
+    ExtractionResult, IExtractor, PassThroughExtractor, TrafilaturaExtractor,
+    ReadabilityExtractor, Newspaper3kExtractor, GenericCSSExtractor, Crawl4AIExtractor)
 from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer, ListPageDiscoverer
 from IntelligenceCrawler.Persistence import save_extraction_result_as_md, save_extraction_result_as_pdf
 
@@ -139,11 +139,17 @@ class CrawlPipeline:
                          article_filter: Optional[Callable[[str], bool]] = None,
                          content_handler: Optional[Callable[[str, ExtractionResult], None]] = None,
                          exception_handler: Optional[Callable[[str, Exception], None]] = None,
-                         **extractor_kwargs: Any) -> List[Tuple[str, ExtractionResult]]:
+                         fetcher_kwargs: Optional[dict] = None,
+                         extractor_kwargs: Optional[dict] = None) -> List[Tuple[str, ExtractionResult]]:
         """
         Step 3: Extracts content from all fetched articles.
         Populates self.articles and calls optional handlers.
         """
+        if fetcher_kwargs is None:
+            fetcher_kwargs = {}
+        if extractor_kwargs is None:
+            extractor_kwargs = {}
+
         self.log(f"--- 3. Fetching & Extracting {len(self.articles)} Articles ---")
 
         contents = []
@@ -155,7 +161,7 @@ class CrawlPipeline:
             self.log(f"Processing: {article_url}")
 
             try:
-                content = self.e_fetcher.get_content(article_url)
+                content = self.e_fetcher.get_content(article_url, **fetcher_kwargs)
                 if not content:
                     self.log(f"Skipped (no content): {article_url}")
                     continue
@@ -243,5 +249,6 @@ def save_article_to_disk(
 ):
     if in_markdown:
         save_extraction_result_as_md(url, result, save_image=True, root_dir=BASE_OUTPUT_DIR)
-    if in_pdf:
-        save_extraction_result_as_pdf(result, root_dir=BASE_OUTPUT_DIR)
+    # PDF export has issue. Do not use.
+    # if in_pdf:
+    #     save_extraction_result_as_pdf(result, root_dir=BASE_OUTPUT_DIR)

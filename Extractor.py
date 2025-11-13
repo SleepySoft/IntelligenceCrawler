@@ -95,10 +95,15 @@ class ExtractionResult(BaseModel):
     Standardized return object for all IExtractor implementations.
     (所有 IExtractor 实现的标准返回对象。)
     """
+    raw_content: bytes = Field(
+        default=bytes(),
+        description="The raw data of web page.",
+        repr=False  # 不在 __repr__ 中显示完整内容，避免刷屏
+    )
     markdown_content: str = Field(
         default="",
         description="The main content in Markdown format.",
-        repr=False  # 1. 不在 __repr__ 中显示完整内容，避免刷屏
+        repr=False  # 不在 __repr__ 中显示完整内容，避免刷屏
     )
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
@@ -339,6 +344,7 @@ class PassThroughExtractor(IExtractor):
 
         # 3. 创建 ExtractionResult
         result = ExtractionResult(
+            raw_content = content,
             markdown_content=raw_html_content,  # 原始 HTML 赋给 markdown_content 字段
             metadata=metadata
         )
@@ -457,6 +463,7 @@ class TrafilaturaExtractor(IExtractor):
                 return ExtractionResult(error="Trafilatura failed to extract content.")
 
             return ExtractionResult(
+                raw_content = content,
                 markdown_content=sanitize_unicode_string(markdown or ""),
                 metadata=metadata  # 这是干净的 metadata 字典
             )
@@ -518,6 +525,7 @@ class ReadabilityExtractor(IExtractor):
 
             markdown = self.converter.handle(main_content_html)
             return ExtractionResult(
+                raw_content = content,
                 markdown_content=sanitize_unicode_string(markdown),
                 metadata=metadata
             )
@@ -603,6 +611,7 @@ class Newspaper3kExtractor(IExtractor):
             }
 
             return ExtractionResult(
+                raw_content = content,
                 markdown_content=sanitize_unicode_string(markdown),
                 metadata=metadata
             )
@@ -687,6 +696,7 @@ class GenericCSSExtractor(IExtractor):
             full_markdown = '\n\n'.join(markdown_parts)
 
             return ExtractionResult(
+                raw_content = content,
                 markdown_content=sanitize_unicode_string(full_markdown),
                 metadata={'source': 'Generic CSS Selector'}
             )
@@ -749,6 +759,7 @@ class Crawl4AIExtractor(IExtractor):
                 metadata['content_type'] = 'markdown'
 
                 return ExtractionResult(
+                    raw_content = content,
                     markdown_content=sanitize_unicode_string(result.markdown),
                     metadata=metadata
                 )

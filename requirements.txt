@@ -25,6 +25,15 @@ newspaper3k             # For extracting articles, metadata, and authors from ne
 crawl4ai                # AI-based extractor for smart content extraction.
 html2text               # For converting the final extracted HTML into clean Markdown.
 
+# weasyprint            # Export as PDF
+                        # WeasyPrint could not import some external libraries. Please carefully follow the installation steps before reporting an issue:
+                        # https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#installation
+                        # https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#troubleshooting
+                        #
+                        # 1 - Download https://www.msys2.org/#installation
+                        # 2 - pacman -S mingw-w64-x86_64-pango
+                        # 3 - python3 -m pip install weasyprint
+
 # -----------------------------------------------------------------
 # Utilities & Data Validation
 # (Helper libraries for data, dates, and compatibility)
