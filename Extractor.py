@@ -9,9 +9,8 @@ for extracting main content from HTML and converting it to Markdown.
 import re
 import copy
 import json
-import traceback
-
 import html2text
+import traceback
 import lxml.etree
 import unicodedata
 from urllib.parse import urljoin
@@ -88,6 +87,8 @@ except ImportError:
     def Field(default=None, **kwargs):
         return default
 
+
+# ----------------------------------------------------------------------------------------------------------------------
 
 class ExtractionResult(BaseModel):
     """
@@ -317,11 +318,19 @@ class TrafilaturaExtractor(IExtractor):
         :param kwargs: Passed to `trafilatura.extract()`.
         :return: ExtractionResult
         """
-        self._log(f"Extracting with TrafilaturaExtractor from {url}")
+        if include_images := kwargs.pop('include_images', False):
+            self._log(f"Extracting with TrafilaturaExtractor (Markdown + Images) from {url}")
+        else:
+            self._log(f"Extracting with TrafilaturaExtractor from {url}")
+
         if not trafilatura:
             error_str = "[Error] Trafilatura library not found."
             self._log(error_str)
             return ExtractionResult(error=error_str)
+
+        # Remove fetcher parameters
+        kwargs.pop('fetcher_kwargs', None)
+        kwargs.pop('extractor_kwargs', None)
 
         try:
             # --- 1. 第一次调用：只获取干净的 Markdown 内容 ---
@@ -329,14 +338,12 @@ class TrafilaturaExtractor(IExtractor):
             kwargs_content.pop('output_format', None)
             kwargs_content.pop('with_metadata', None)  # 确保不请求元数据
 
-            kwargs_content.pop('fetcher_kwargs', None)
-            kwargs_content.pop('extractor_kwargs', None)
-
             markdown = trafilatura.extract(
                 content,
                 url=url,
-                output_format='markdown',  # 显式获取 Markdown
-                include_links=True,  # 只保留内容相关的参数
+                output_format='markdown',
+                include_links=True,
+                include_images=include_images,
                 **kwargs_content
             )
 
@@ -347,14 +354,11 @@ class TrafilaturaExtractor(IExtractor):
             kwargs_meta.pop('include_links', None)
             kwargs_meta.pop('include_tables', None)
 
-            kwargs_meta.pop('fetcher_kwargs', None)
-            kwargs_meta.pop('extractor_kwargs', None)
-
             json_string = trafilatura.extract(
                 content,
                 url=url,
-                output_format='json',  # 请求 JSON
-                with_metadata=True,  # <--- 使用正确的参数请求元数据
+                output_format='json',
+                with_metadata=True,
                 **kwargs_meta
             )
 
