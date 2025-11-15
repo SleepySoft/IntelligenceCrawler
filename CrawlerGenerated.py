@@ -2,18 +2,23 @@
 
 from IntelligenceCrawler.CrawlPipeline import *
 
-def run_pipeline():
+
+def run_pipeline(
+        article_filter = lambda url: True,
+        content_handler = save_article_to_disk,
+        exception_handler = lambda url, exception: None
+):
     # === 1. Initialize Components ===
-    d_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy=None, timeout_s=10, stealth=True, pause_browser=False, render_page=False)
-    e_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy=None, timeout_s=20, stealth=True, pause_browser=False, render_page=True)
-    discoverer = ListPageDiscoverer(fetcher=d_fetcher, verbose=True, manual_specified_signature='div.section-grid > div.section-grid__col.section-grid__col_center > div.news-list > div.news-list__item > a.N.news-preview.news-preview_default')
+    d_fetcher = RequestsFetcher(log_callback=log_cb, proxy=None, timeout_s=10)
+    e_fetcher = PlaywrightFetcher(log_callback=log_cb, proxy=None, timeout_s=20, stealth=False, pause_browser=False, render_page=True)
+    discoverer = RSSDiscoverer(fetcher=d_fetcher, verbose=True)
     extractor = TrafilaturaExtractor(verbose=True)
 
     # === 2. Define Parameters ===
-    entry_point = 'https://tass.com/emergencies'
+    entry_point = ['https://www.nhk.or.jp/rss/news/cat1.xml', 'https://www.nhk.or.jp/rss/news/cat4.xml', 'https://www.nhk.or.jp/rss/news/cat5.xml', 'https://www.nhk.or.jp/rss/news/cat6.xml']
     start_date = None
     end_date = None
-    d_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 10, 'scroll_pages': 10}
+    d_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 10, 'scroll_pages': 0}
     e_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 0}
     extractor_kwargs = {}
     channel_filter_list = []
@@ -38,9 +43,9 @@ def run_pipeline():
 
     # Step 3: Extract content and run handlers
     pipeline.extract_articles(
-        article_filter=lambda url: True,
-        content_handler=save_article_to_disk,
-        exception_handler=lambda url, exception: None,
+        article_filter=article_filter,
+        content_handler=content_handler,
+        exception_handler=exception_handler,
         fetcher_kwargs=e_fetcher_kwargs,
         extractor_kwargs=extractor_kwargs
     )
@@ -52,3 +57,36 @@ if __name__ == "__main__":
     except Exception as e:
         print(str(e))
         print(traceback.format_exc())
+
+
+# -------------------------------------------- Manual Code Start --------------------------------------------
+
+from ServiceEngine import ServiceContext
+from MyPythonUtility.easy_config import EasyConfig
+from Workflow.CommonFlowUtility import CrawlContext
+from Workflow.CommonFeedsCrawFlow import build_crawl_ctx_by_config
+from Workflow.IntelligenceCrawlFlow import (
+    intelligence_crawler_result_handler,
+    intelligence_crawler_fileter, \
+    intelligence_crawler_exception_handler)
+
+NAME = 'nhk'
+config: EasyConfig | None = None
+crawl_context: CrawlContext | None = None
+
+
+def module_init(service_context: ServiceContext):
+    global config
+    global crawl_context
+    config = service_context.config
+    crawl_context = build_crawl_ctx_by_config(NAME, config)
+
+
+def start_task(stop_event):
+    run_pipeline(
+        article_filter=partial(intelligence_crawler_fileter, context=crawl_context, levels=[NAME]),
+        content_handler=partial(intelligence_crawler_result_handler, context=crawl_context, levels=[NAME]),
+        exception_handler=partial(intelligence_crawler_exception_handler, context=crawl_context, levels=[NAME])
+    )
+
+# --------------------------------------------- Manual Code End ---------------------------------------------
