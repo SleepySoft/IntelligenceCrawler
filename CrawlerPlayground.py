@@ -1090,7 +1090,8 @@ class CrawlerCodeGenerator:
             e_fetcher_init_param['proxy'] = e_fetcher_params.get('proxy')
             e_fetcher_init_param['timeout_s'] = e_fetcher_params.get('timeout')
 
-        return repr(d_fetcher_init_param), repr(e_fetcher_init_param)
+        return (self._dict_to_dict_str(d_fetcher_init_param),
+                self._dict_to_dict_str(e_fetcher_init_param))
 
     def _generate_channel_filter_list_code(self, filter_config: dict) -> str:
         """
@@ -1125,6 +1126,25 @@ class CrawlerCodeGenerator:
                 # 使用 repr() 确保正确引用字符串和布尔值
                 arg_list.append(f"{key}={repr(value)}")
         return ", ".join(arg_list)
+
+    @staticmethod
+    def _dict_to_dict_str(param_dict: dict) -> str:
+        """Converts a parameter dict to a string representing a Python dict literal."""
+        item_list = []
+        for key, value in param_dict.items():
+            # 键必须是字符串，用 repr() 确保正确引用
+            key_str = repr(key)
+
+            if key == 'log_callback':
+                # 特殊处理 log_callback，值是 log_cb (不带引号)
+                value_str = 'log_cb'
+            else:
+                # 使用 repr() 确保其他值的正确引用 (字符串带引号，数字/布尔不带)
+                value_str = repr(value)
+
+            item_list.append(f"{key_str}: {value_str}")
+
+        return "{" + ", ".join(item_list) + "}"
 
 
 # --- REQ 4: New Name ---

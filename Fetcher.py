@@ -6,7 +6,7 @@ import re
 
 import requests
 import threading        # Add threading for PlaywrightFetcher avoiding asyncio conflict with Newspaper3kExtractor
-from typing import Dict, Optional
+from typing import Dict, Optional, Callable
 from urllib.parse import urlparse
 from abc import ABC, abstractmethod
 
@@ -397,6 +397,7 @@ class PlaywrightFetcher(Fetcher):
                     > 0: Scroll down (content moves up).
                     < 0: Scroll up (content moves down).
                     0: No scrolling (default).
+                post_extra_action (Callable[[Page], None]): The extra action after page loaded and scrolled.
 
         Returns:
             Optional[bytes]: The fetched page content (HTML or raw bytes).
@@ -417,6 +418,7 @@ class PlaywrightFetcher(Fetcher):
         wait_for_selector_val = kwargs.get('wait_for_selector', None)
         wait_for_timeout_s_val = kwargs.get('wait_for_timeout_s', None)
         scroll_pages_val = kwargs.get('scroll_pages', 0)
+        post_extra_action = kwargs.get('post_extra_action', None)
 
         # --- Create the job payload with all wait parameters ---
         job_payload = {
@@ -424,7 +426,8 @@ class PlaywrightFetcher(Fetcher):
             'wait_until': wait_until_val,
             'wait_for_selector': wait_for_selector_val,
             'wait_for_timeout_ms': (wait_for_timeout_s_val * 1000) if wait_for_timeout_s_val is not None else None,
-            'scroll_pages': scroll_pages_val
+            'scroll_pages': scroll_pages_val,
+            'post_extra_action': post_extra_action
         }
 
         # 添加任何其他传入的 kwargs (未来扩展性)
@@ -472,6 +475,7 @@ class PlaywrightFetcher(Fetcher):
         wait_until = job_payload.get('wait_until', 'load')
         wait_for_selector = job_payload.get('wait_for_selector')
         scroll_pages = job_payload.get('scroll_pages', 0)
+        post_extra_action = job_payload.get('post_extra_action', None)
 
         # Use specific selector timeout, or fall back to the main timeout
         selector_timeout_ms = job_payload.get('wait_for_timeout_ms') or self.timeout_ms
@@ -579,6 +583,9 @@ class PlaywrightFetcher(Fetcher):
                 except Exception:
                     self._log(
                         "[Worker Warning] Network did not become idle after scrolling (5s timeout). Proceeding anyway.")
+
+            if post_extra_action:
+                post_extra_action(page)
 
             # --- 6. Extract Content ---
             # This code is now reached even if the selector times out.

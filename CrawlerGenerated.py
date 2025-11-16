@@ -4,10 +4,10 @@ from IntelligenceCrawler.CrawlPipeline import *
 
 # === Fetcher init parameters ===
 d_fetcher_init_param = {'log_callback': 'log_cb', 'proxy': None, 'timeout_s': 10}
-e_fetcher_init_param = {'log_callback': 'log_cb', 'proxy': None, 'timeout_s': 20, 'stealth': True, 'pause_browser': False, 'render_page': True}
+e_fetcher_init_param = {'log_callback': 'log_cb', 'proxy': None, 'timeout_s': 20, 'stealth': True, 'pause_browser': False, 'render_page': False}
 
 # === Crawl parameters ===
-entry_point = None
+entry_point = ['https://www.nhk.or.jp/rss/news/cat1.xml', 'https://www.nhk.or.jp/rss/news/cat4.xml', 'https://www.nhk.or.jp/rss/news/cat5.xml', 'https://www.nhk.or.jp/rss/news/cat6.xml']
 start_date = None
 end_date = None
 d_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 10, 'scroll_pages': 0}
@@ -23,7 +23,7 @@ def run_pipeline(
     # === 1. Initialize Components ===
     d_fetcher = RequestsFetcher(**d_fetcher_init_param)
     e_fetcher = PlaywrightFetcher(**e_fetcher_init_param)
-    discoverer = SitemapDiscoverer(fetcher=d_fetcher, verbose=True)
+    discoverer = RSSDiscoverer(fetcher=d_fetcher, verbose=True)
     extractor = TrafilaturaExtractor(verbose=True)
 
     # === 2. Build pipeline ===
