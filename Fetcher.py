@@ -589,14 +589,18 @@ class PlaywrightFetcher(Fetcher):
 
             # --- 6. Extract Content ---
             # This code is now reached even if the selector times out.
-            content_bytes: Optional[bytes]
-            if self.render_page:
-                self._log("[Worker] Rendering page.content()...")
-                content_str = page.content()
-                content_bytes = content_str.encode('utf-8')
+            content_bytes: Optional[bytes] = None
+            # Maybe there's re-direction after scrolling or post extra actions.
+            if 200 <= response.status < 300:
+                if self.render_page:
+                    self._log("[Worker] Rendering page.content()...")
+                    content_str = page.content()
+                    content_bytes = content_str.encode('utf-8')
+                else:
+                    self._log("[Worker] Getting raw response.body()...")
+                    content_bytes = response.body()
             else:
-                self._log("[Worker] Getting raw response.body()...")
-                content_bytes = response.body()
+                self._log('[Worker] Detect error response when getting content.')
 
             # safe_filename = re.sub(r'[^\w\s-]', '', url)[:50]
             # dump_filename = f'dump_{safe_filename}.html'
