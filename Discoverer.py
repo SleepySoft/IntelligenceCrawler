@@ -357,6 +357,8 @@ class SitemapDiscoverer(IDiscoverer):
         :param fetcher_kwargs: (Optional) A dictionary of keyword arguments
                                to pass to the fetcher's get_content() method.
         """
+        if entry_point and isinstance(entry_point, (list, tuple, set)):
+            entry_point = entry_point[0]
         if not isinstance(entry_point, str):
             self._log(f"[Error] SitemapDiscoverer requires a string URL as an entry_point. Got {type(entry_point)}.")
             return []
@@ -755,7 +757,6 @@ class RSSDiscoverer(IDiscoverer):
         self._log(f"\nStage 1 Complete: Confirmed {len(found_feeds_set)} direct RSS channels.")
         return list(found_feeds_set)
 
-    # --- [NEW] (Logic moved from old discover_channels) ---
     def _handle_single_url(self,
                            entry_point_url: str,
                            start_date: Optional[datetime.datetime] = None,
@@ -1439,21 +1440,14 @@ class ListPageDiscoverer(IDiscoverer):
         self._log(f"    [Extract] 成功提取 {len(final_links)} 个链接。", indent=1)
         return final_links
 
-    # --- IDiscoverer Interface Implementation (来自你的代码) ---
-
     def discover_channels(self,
                           entry_point: Any,
                           start_date: Optional[datetime.datetime] = None,
                           end_date: Optional[datetime.datetime] = None,
                           fetcher_kwargs: Optional[Dict[str, Any]] = None
                           ) -> List[str]:
-        self.log_messages.clear()
-        self._log(f"开始频道发现: {entry_point}")
-        if not isinstance(entry_point, str) or not entry_point.startswith(('http://', 'https://')):
-            self._log(f"  错误: 入口点必须是有效的 URL 字符串。", indent=1)
-            return []
-        self._log(f"  ListPageDiscoverer 将入口点视为单个频道。", indent=1)
-        return [entry_point]
+        # List Page Discoverer does not discover channels.
+        return list(entry_point) if isinstance(entry_point, (list, tuple, set)) else str(entry_point)
 
     def get_articles_for_channel(self,
                                  channel_url: str,

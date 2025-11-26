@@ -1640,85 +1640,28 @@ class CrawlerPlaygroundApp(QMainWindow):
         if self.log_history_view:
             self.log_history_view.append(message)
 
-    # --- Threaded Action Starters ---
     def start_channel_discovery(self):
-        """Slot for 'Discover Channels' button. (Refactored for Unified Flow)"""
+        """Slot for 'Discover Channels' button. (Refactored: Uniform List Input)"""
 
-        # 1. 获取 UI 值
-        url_input_text = self.url_input.currentText().strip()
-        self.discoverer_name = self.discoverer_combo.currentText()  # 存储选择
+        # 1. 获取 UI 输入
+        raw_text = self.url_input.currentText().strip()
+        self.discoverer_name = self.discoverer_combo.currentText()
 
-        if not url_input_text:
+        if not raw_text:
             self.status_bar.showMessage("Error: Please enter a URL or list of URLs.")
             return
 
-        # 2. 解析输入文本
-        potential_urls = url_input_text.split()
-        http_urls = [u for u in potential_urls if u.startswith("http")]
+        # 2. 统一接口：永远传递 List[str]
+        # 不再进行 http 检查，不再自动补全 https，也不再根据 Discoverer 类型做 if/else 判断
+        entry_point_urls = raw_text.split()
 
-        # 3. [核心] 决定要传递给 Worker 的 entry_point 是什么类型
-        entry_point_for_worker: Any = None
+        self.append_log_history(f"[Info] Dispatching {len(entry_point_urls)} URL(s) to {self.discoverer_name}...")
 
-        # 你的 "on_url_input_changed" 辅助函数（如果已添加）
-        # 会确保多行粘贴在此时已经是空格分隔的字符串
-
-        if self.discoverer_name == "RSS":
-            # RSS 模式：可以处理 List[str] 或 str
-            if len(http_urls) > 1:
-                # 情况 A: RSS + 多个 URL -> 传递 List[str]
-                entry_point_for_worker = http_urls
-                self.append_log_history(f"[Info] RSS mode: Passing {len(http_urls)} URLs list to worker.")
-
-            elif len(http_urls) == 1:
-                # 情况 B: RSS + 单个 URL -> 传递 str
-                entry_point_for_worker = http_urls[0]
-                if http_urls[0] != url_input_text:
-                    self.url_input.setCurrentText(http_urls[0])  # 清理 UI
-
-            else:
-                # 情况 C: RSS + 非 http 字符串 (如 example.com 或单个 feed) -> 传递 str
-                # 我们假设 RSS 的 _handle_single_url 可以处理 'example.com' (如果不能，就添加 https://)
-                # 为了安全起见，我们添加 https://
-                entry_point_for_worker = "https://" + url_input_text
-                self.url_input.setCurrentText(entry_point_for_worker)
-                self.append_log_history("[Info] Non-http string detected, adding 'https://'.")
-
-        elif self.discoverer_name == "Sitemap":
-            # Sitemap 模式：必须是单个 str
-            if len(http_urls) > 1:
-                # 情况 D: Sitemap + 多个 URL -> 错误
-                self.status_bar.showMessage("Error: Sitemap mode only supports a *single* homepage URL.")
-                self.append_log_history("[Error] SitemapDiscoverer requires a single string URL. Input has multiple.")
-                return  # 停止执行
-
-            elif len(http_urls) == 1:
-                # 情况 E: Sitemap + 单个 URL -> 传递 str
-                entry_point_for_worker = http_urls[0]
-                if http_urls[0] != url_input_text:
-                    self.url_input.setCurrentText(http_urls[0])  # 清理 UI
-
-            else:
-                # 情况 F: Sitemap + 非 http 字符串 (example.com) -> 传递 str
-                entry_point_for_worker = "https://" + url_input_text
-                self.url_input.setCurrentText(entry_point_for_worker)
-                self.append_log_history("[Info] Non-http string detected, adding 'https://'.")
-
-        else:
-            # 其他 (未来的) Discoverer，我们假定它们使用单个 str
-            self.append_log_history(
-                f"[Warning] Unknown discoverer '{self.discoverer_name}'. Defaulting to single URL logic.")
-            if len(http_urls) > 1:
-                self.append_log_history(f"  > Using *first* URL only: {http_urls[0]}")
-
-            entry_point_for_worker = http_urls[0] if http_urls else "https://" + url_input_text
-            if entry_point_for_worker != self.url_input.currentText():
-                self.url_input.setCurrentText(entry_point_for_worker)
-
-        # 4. 清理并准备 Worker
+        # 3. 清理 UI 和保存历史
         self.clear_all_controls()
-        self._save_url_history(self.url_input.currentText())
+        self._save_url_history(raw_text)
 
-        # --- (获取日期过滤器设置 - 这部分逻辑不变) ---
+        # 4. 准备日期过滤器 (保持原有逻辑)
         start_date: Optional[datetime.datetime] = None
         end_date: Optional[datetime.datetime] = None
 
@@ -1726,13 +1669,10 @@ class CrawlerPlaygroundApp(QMainWindow):
             days_ago = self.date_filter_days_spin.value()
             end_date = datetime.datetime.now()
             start_date = end_date - datetime.timedelta(days=days_ago)
-            self.append_log_history(f"Applying date filter: Last {days_ago} days "
-                                    f"(since {start_date.strftime('%Y-%m-%d')})")
-        # --- (日期设置结束) ---
+            self.append_log_history(f"Applying date filter: Last {days_ago} days.")
 
-        # 存储策略
+        # 5. 准备 Fetcher 配置 (保持原有逻辑)
         fetcher_config = self.discovery_fetcher_widget.get_config()
-
         fetcher_kwargs = {
             'wait_until': fetcher_config.get('wait_until'),
             'wait_for_selector': fetcher_config.get('wait_for_selector'),
@@ -1741,18 +1681,20 @@ class CrawlerPlaygroundApp(QMainWindow):
         }
 
         self.set_loading_state(True, f"Discovering {self.discoverer_name} channels...")
-        self.update_generated_code()  # 更新代码片段
+        self.update_generated_code()
 
-        manual_specified_signature_str = self.manual_specified_signature_input.text().strip() or None
-        if self.discoverer_name != "Smart Analysis":
-            manual_specified_signature_str = None  # 确保只在 Smart Analysis 时传递
+        # 处理 Smart Analysis 的特殊参数
+        manual_signature = None
+        if self.discoverer_name == "Smart Analysis":
+            manual_signature = self.manual_specified_signature_input.text().strip() or None
 
-        self.last_used_entry_point = entry_point_for_worker
-
+        # 6. 启动 Worker
+        # 注意：这里的 entry_point 现在始终是 List[str]
+        # 请确保你的 ChannelDiscoveryWorker 及其下游逻辑已经适配了接收列表
         worker = ChannelDiscoveryWorker(
             discoverer_name=self.discoverer_name,
             fetcher_name=fetcher_config['fetcher_name'],
-            entry_point=entry_point_for_worker,
+            entry_point=entry_point_urls,  # <--- 统一传入列表
             start_date=start_date,
             end_date=end_date,
             proxy=fetcher_config['proxy'],
@@ -1760,7 +1702,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             pause_browser=fetcher_config['pause'],
             render_page=fetcher_config['render'],
             fetcher_kwargs=fetcher_kwargs,
-            manual_specified_signature=manual_specified_signature_str
+            manual_specified_signature=manual_signature
         )
 
         worker.signals.result.connect(self.on_channel_discovery_result)
