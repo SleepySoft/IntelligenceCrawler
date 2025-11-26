@@ -3,14 +3,14 @@
 from IntelligenceCrawler.CrawlPipeline import *
 
 # === Fetcher init parameters ===
-d_fetcher_init_param = {'log_callback': 'log_cb', 'proxy': None, 'timeout_s': 10}
-e_fetcher_init_param = {'log_callback': 'log_cb', 'proxy': None, 'timeout_s': 20, 'stealth': True, 'pause_browser': False, 'render_page': False}
+d_fetcher_init_param = {'log_callback': log_cb, 'proxy': None, 'timeout_s': 10, 'stealth': True, 'pause_browser': False, 'render_page': False}
+e_fetcher_init_param = {'log_callback': log_cb, 'proxy': None, 'timeout_s': 20, 'stealth': True, 'pause_browser': False, 'render_page': True}
 
 # === Crawl parameters ===
-entry_point = ['https://www.nhk.or.jp/rss/news/cat1.xml', 'https://www.nhk.or.jp/rss/news/cat4.xml', 'https://www.nhk.or.jp/rss/news/cat5.xml', 'https://www.nhk.or.jp/rss/news/cat6.xml']
+entry_point = ['https://tass.com/world', 'https://tass.com/emergencies', 'https://tass.com/politics', 'https://tass.com/economy', 'https://tass.com/defense', 'https://tass.com/society']
 start_date = None
 end_date = None
-d_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 10, 'scroll_pages': 0}
+d_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 10, 'scroll_pages': 5}
 e_fetcher_kwargs = {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 0}
 extractor_kwargs = {}
 channel_filter_list = []
@@ -21,9 +21,9 @@ def run_pipeline(
         exception_handler = lambda url, exception: None
 ):
     # === 1. Initialize Components ===
-    d_fetcher = RequestsFetcher(**d_fetcher_init_param)
+    d_fetcher = PlaywrightFetcher(**d_fetcher_init_param)
     e_fetcher = PlaywrightFetcher(**e_fetcher_init_param)
-    discoverer = RSSDiscoverer(fetcher=d_fetcher, verbose=True)
+    discoverer = ListPageDiscoverer(fetcher=d_fetcher, verbose=True, manual_specified_signature=None)
     extractor = TrafilaturaExtractor(verbose=True)
 
     # === 2. Build pipeline ===

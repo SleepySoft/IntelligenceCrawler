@@ -1885,6 +1885,7 @@ class CrawlerPlaygroundApp(QMainWindow):
 
     def on_channel_discovery_result(self, channel_list: List[str]):
         """Slot for ChannelDiscoveryWorker 'result' signal."""
+        self.last_used_entry_point = channel_list
         if not channel_list:
             self.status_bar.showMessage("No channels found.")
             return

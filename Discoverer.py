@@ -1447,7 +1447,7 @@ class ListPageDiscoverer(IDiscoverer):
                           fetcher_kwargs: Optional[Dict[str, Any]] = None
                           ) -> List[str]:
         # List Page Discoverer does not discover channels.
-        return list(entry_point) if isinstance(entry_point, (list, tuple, set)) else str(entry_point)
+        return list(entry_point) if isinstance(entry_point, (list, tuple, set)) else [str(entry_point)]
 
     def get_articles_for_channel(self,
                                  channel_url: str,
