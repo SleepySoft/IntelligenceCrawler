@@ -901,8 +901,8 @@ def run_pipeline(
         exception_handler = lambda url, exception: None
 ):
     # === 1. Initialize Components ===
-    d_fetcher = RequestsFetcher(**d_fetcher_init_param)
-    e_fetcher = PlaywrightFetcher(**e_fetcher_init_param)
+    d_fetcher = {d_fetcher_class}(**d_fetcher_init_param)
+    e_fetcher = {e_fetcher_class}(**e_fetcher_init_param)
     {code_discoverer}
     {code_extractor}
 
@@ -1043,6 +1043,8 @@ class CrawlerCodeGenerator:
 
         # --- 5. Format the final code ---
         code = CODE_TEMPLATE.format(
+            d_fetcher_class=d_fetcher_class_name,
+            e_fetcher_class=e_fetcher_class_name,
             d_fetcher_init_param_code=d_fetcher_init_param_code,
             e_fetcher_init_param_code=e_fetcher_init_param_code,
             code_discoverer=code_discoverer,
@@ -1392,10 +1394,18 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.generated_code_text.setReadOnly(True)
         self.generated_code_text.setFont(QFont("Courier", 9))
         code_layout.addWidget(self.generated_code_text)
-        # --- NEW: Save Code Button ---
+
+        code_layout_button_line = QHBoxLayout()
+
+        self.refresh_code_button = QPushButton("Refresh")
+        self.refresh_code_button.setToolTip("Re-generated code based on current configuration.")
+        code_layout_button_line.addWidget(self.refresh_code_button, 1)
+
         self.save_code_button = QPushButton(QIcon.fromTheme("document-save"), "Save Code to File...")
         self.save_code_button.setToolTip("Save the generated code above to a Python file (e.g., CrawlerGenerated.py)")
-        code_layout.addWidget(self.save_code_button)
+        code_layout_button_line.addWidget(self.save_code_button, 99)
+
+        code_layout.addLayout(code_layout_button_line)
         bottom_splitter.addWidget(code_box)
 
         # --- 3b. Bottom-Right: Log History ---
@@ -1565,6 +1575,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.tree_widget.itemChanged.connect(self.update_generated_code_from_tree)
 
         self.save_code_button.clicked.connect(self._save_generated_code)
+        self.refresh_code_button.clicked.connect(self._re_generated_code)
 
     def set_loading_state(self, is_loading: bool, message: str = ""):
         """Enable/Disable UI controls during threaded operations."""
@@ -2434,6 +2445,9 @@ class CrawlerPlaygroundApp(QMainWindow):
             except Exception as e:
                 self.status_bar.showMessage(f"Error saving file: {e}", 5000)
                 self.append_log_history(f"[Error] Failed to save code: {e}")
+
+    def _re_generated_code(self):
+        self.update_generated_code()
 
     # --- [NEW] UI Helper Functions (for dynamic widgets) ---
 
