@@ -609,7 +609,6 @@ class PlaywrightFetcher(Fetcher):
             # with open(dump_filename, 'wb') as f:
             #     f.write(content_bytes)
 
-            context.close()
             return content_bytes
 
         except PlaywrightTimeoutError:
@@ -636,9 +635,15 @@ class PlaywrightFetcher(Fetcher):
             # This outer catch block handles hard failures (like page.goto)
             # or failures during page.content()
             self._log(f"[Worker Error] _fetch_page_content failed for {url}: {e}")
-            if context:
-                context.close()
             raise e  # Re-raise to send back to main thread
+
+        finally:
+            if context:
+                try:
+                    self._log("[Worker Debug] Closing context in finally block.")
+                    context.close()
+                except Exception as e:
+                    self._log(f"[Worker Warning] Error closing context: {e}")
 
     def close(self):
         """
