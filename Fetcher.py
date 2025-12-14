@@ -10,6 +10,7 @@ from typing import Dict, Optional, Callable
 from urllib.parse import urlparse
 from abc import ABC, abstractmethod
 
+from IntelligenceCrawler.BrowserMonitor import AutoTrackedBrowser
 
 try:
     from dateutil.parser import parse as date_parse
@@ -318,7 +319,8 @@ class PlaywrightFetcher(Fetcher):
         headless_mode = not self.pause_browser
 
         self.playwright: "Playwright" = sync_playwright().start()
-        self.browser: "Browser" = self.playwright.chromium.launch(headless=headless_mode)
+        real_browser = self.playwright.chromium.launch(headless=headless_mode)
+        self.browser: "Browser" = AutoTrackedBrowser(real_browser)
 
         # TODO: Debug to find leaked headless_shell.
         # launch_args = [
