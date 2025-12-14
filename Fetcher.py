@@ -267,18 +267,30 @@ class PlaywrightFetcher(Fetcher):
         if self.stealth_mode and (not sync_stealth and not Stealth):
             raise ImportError("Playwright-Stealth (v1 or v2) is not installed. Please install 'playwright-stealth'.")
 
-        # --- 2. Parse Proxy Configuration ---
+        # --- 2. Parse Proxy Configuration (Robust Version) ---
         if proxy:
             try:
+                if "://" not in proxy:
+                    self._log(f"[Proxy Warning] No scheme found in proxy '{proxy}'. Defaulting to http://")
+                    proxy = f"http://{proxy}"
+
                 parsed_proxy = urlparse(proxy)
-                if not all([parsed_proxy.scheme, parsed_proxy.hostname, parsed_proxy.port]):
-                    raise ValueError("Proxy string must include scheme, host, and port.")
+
+                # 2. 确保主机名和端口解析成功
+                if not parsed_proxy.hostname or not parsed_proxy.port:
+                    raise ValueError("Could not parse hostname or port from proxy string.")
+
                 self.proxy_config = {
                     "server": f"{parsed_proxy.scheme}://{parsed_proxy.hostname}:{parsed_proxy.port}"
                 }
-                if parsed_proxy.username: self.proxy_config["username"] = parsed_proxy.username
-                if parsed_proxy.password: self.proxy_config["password"] = parsed_proxy.password
-                self._log(f"Playwright proxy configured for server: {self.proxy_config['server']}")
+
+                if parsed_proxy.username:
+                    self.proxy_config["username"] = parsed_proxy.username
+                if parsed_proxy.password:
+                    self.proxy_config["password"] = parsed_proxy.password
+
+                self._log(f"Playwright proxy configured: {self.proxy_config['server']}")
+
             except Exception as e:
                 self._log(f"!!! WARNING: Invalid proxy format '{proxy}'. Ignoring proxy. Error: {e}")
                 self.proxy_config = None
@@ -307,6 +319,16 @@ class PlaywrightFetcher(Fetcher):
 
         self.playwright: "Playwright" = sync_playwright().start()
         self.browser: "Browser" = self.playwright.chromium.launch(headless=headless_mode)
+
+        # TODO: Debug to find leaked headless_shell.
+        # launch_args = [
+        #     '--disable-gpu',  # 关键：禁用 GPU 硬件加速
+        #     '--disable-software-rasterizer',
+        #     '--no-sandbox',  # 关键：避免沙箱权限问题
+        #     '--disable-dev-shm-usage'  # 避免共享内存不足
+        # ]
+        # self.browser: "Browser" = self.playwright.chromium.launch(
+        #     headless=False, args=launch_args)
 
         log_msg = "[Worker] Headless browser started." if headless_mode \
             else "[Worker] Headful browser started (pause_browser=True)."
@@ -492,6 +514,11 @@ class PlaywrightFetcher(Fetcher):
 
             context = self.browser.new_context(**context_options)
             page = context.new_page()
+
+            # TODO: Debug
+            # page.on("request", lambda request: print(f">> Request: {request.url}"))
+            # page.on("requestfailed", lambda request: print(f"!! Failed: {request.url} - {request.failure}"))
+            # page.on("response", lambda response: print(f"<< Response: {response.status} {response.url}"))
 
             # --- 3. Apply Stealth (if enabled) ---
             if self.stealth_mode:
