@@ -313,91 +313,149 @@ class PlaywrightFetcher(Fetcher):
             raise TimeoutError("Playwright worker thread failed to start in time.")
 
     def _start_playwright(self):
-        """[Worker Thread] Initializes Playwright and launches the browser."""
-        mode = "Stealth" if self.stealth_mode else "Standard"
-        self._log(f"[Worker] Starting Playwright ({mode}, Headless: {not self.pause_browser})...")
-        headless_mode = not self.pause_browser
+        """
+        [Worker Thread] Initializes Playwright and launches the browser.
+        Returns:
+            bool: True if started successfully, False otherwise.
+        """
+        try:
+            mode = "Stealth" if self.stealth_mode else "Standard"
+            self._log(f"[Worker] Starting Playwright ({mode}, Headless: {not self.pause_browser})...")
 
-        self.playwright: "Playwright" = sync_playwright().start()
-        real_browser = self.playwright.chromium.launch(headless=headless_mode)
-        self.browser: "Browser" = AutoTrackedBrowser(real_browser)
+            self.playwright = sync_playwright().start()
 
-        # TODO: Debug to find leaked headless_shell.
-        # launch_args = [
-        #     '--disable-gpu',  # 关键：禁用 GPU 硬件加速
-        #     '--disable-software-rasterizer',
-        #     '--no-sandbox',  # 关键：避免沙箱权限问题
-        #     '--disable-dev-shm-usage'  # 避免共享内存不足
-        # ]
-        # self.browser: "Browser" = self.playwright.chromium.launch(
-        #     headless=False, args=launch_args)
+            headless_mode = not self.pause_browser
+            # Use strict args to prevent zombie processes and memory issues
+            launch_args = [
+                '--disable-gpu',
+                '--no-sandbox',
+                '--disable-dev-shm-usage'
+            ]
 
-        log_msg = "[Worker] Headless browser started." if headless_mode \
-            else "[Worker] Headful browser started (pause_browser=True)."
-        self._log(log_msg)
+            real_browser = self.playwright.chromium.launch(
+                headless=headless_mode,
+                args=launch_args
+            )
+
+            # Use the user's custom wrapper
+            self.browser = AutoTrackedBrowser(real_browser)
+
+            self._log("[Worker] Browser instance created successfully.")
+            return True
+        except Exception as e:
+            self._log(f"[Worker Error] Failed to start Playwright: {e}")
+            self._stop_playwright()  # Cleanup if partial failure
+            return False
 
     def _stop_playwright(self):
-        """[Worker Thread] Shuts down the Playwright browser and process."""
-        self._log("[Worker] Stopping Playwright browser...")
+        """[Worker Thread] Safely shuts down the Playwright browser and process."""
+        self._log("[Worker] Stopping Playwright browser/context...")
+
+        # 1. Close Browser
         if hasattr(self, 'browser') and self.browser:
             try:
                 self.browser.close()
+                self._log("[Worker] Browser closed.")
             except Exception as e:
                 self._log(f"[Worker Warning] Error closing browser: {e}")
+            finally:
+                self.browser = None
+
+        # 2. Stop Playwright Driver
         if hasattr(self, 'playwright') and self.playwright:
             try:
                 self.playwright.stop()
+                self._log("[Worker] Playwright driver stopped.")
             except Exception as e:
                 self._log(f"[Worker Warning] Error stopping playwright: {e}")
-        self._log("[Worker] Playwright stopped.")
+            finally:
+                self.playwright = None
 
     def _worker_loop(self):
         """
-        [Worker Thread] This is the main loop for the dedicated Playwright thread.
-        It initializes Playwright and then waits for jobs.
+        [Worker Thread] Main loop with Robust Lifecycle Management.
+        Implements a "Restart Periodically" strategy to prevent memory leaks.
         """
-        try:
-            self._start_playwright()
-            self.startup_queue.put(True)  # Signal success to __init__
-        except Exception as e:
-            self._log(f"[Worker Error] Failed to start Playwright: {e}")
-            self.startup_queue.put(e)  # Signal failure to __init__
-            return  # Exit thread
 
-        # --- Main Job Loop ---
-        while True:
+        # Configuration: Restart browser after N requests to clear memory leaks
+        MAX_REQUESTS_PER_BROWSER = 50
+
+        # Signal successful thread start (initial only)
+        # We try to start it once to check dependencies.
+        if self._start_playwright():
+            self.startup_queue.put(True)
+            self._stop_playwright()  # Stop immediately, let the loop handle lifecycle
+        else:
+            self.startup_queue.put(RuntimeError("Worker failed to verify Playwright startup."))
+            return
+
+        shutdown_requested = False
+
+        # --- OUTER LOOP: Manages Browser Lifecycle (Restart Logic) ---
+        while not shutdown_requested:
             try:
-                # Wait for a job from the main thread
-                job_data = self.job_queue.get()
-                if not job_data:
+                # 1. Start Browser Session
+                if not self._start_playwright():
+                    # If browser fails to start, wait a bit and retry (prevent tight loop spin)
+                    self._log("[Worker Error] Browser failed to start. Retrying in 5s...")
+                    threading.Event().wait(5)
                     continue
 
-                job_type, data, result_queue = job_data
+                request_count = 0
 
-                if job_type == 'shutdown':
-                    self._log("[Worker] Shutdown signal received.")
-                    result_queue.put(True)  # Acknowledge shutdown
-                    break  # Exit loop
+                # --- INNER LOOP: Manages Job Processing ---
+                while not shutdown_requested:
+                    # Check restart criteria (Leak Prevention)
+                    if request_count >= MAX_REQUESTS_PER_BROWSER:
+                        self._log(
+                            f"[Worker] Reached limit ({MAX_REQUESTS_PER_BROWSER} jobs). Restarting browser to free memory...")
+                        break  # Break inner loop -> trigger finally -> restart outer loop
 
-                if job_type == 'get_content':
-                    # 'data' is now a job_payload dictionary
-                    job_payload = data
-                    url = job_payload['url']
-                    self._log(f"[Worker] Starting job for: {url}")
                     try:
-                        # Call the *actual* fetching logic
-                        content = self._fetch_page_content(job_payload)
-                        result_queue.put(content)  # Send content back
-                    except Exception as e:
-                        self._log(f"[Worker Error] Job failed for {url}: {e}")
-                        result_queue.put(e)  # Send exception back
+                        # Wait for job
+                        job_data = self.job_queue.get(
+                            timeout=1.0)  # Use timeout to check for shutdown/restart regularly
+                    except queue.Empty:
+                        continue  # Loop back to check shutdown_requested
+
+                    if not job_data: continue
+
+                    job_type, data, result_queue = job_data
+
+                    # Handle Shutdown Signal
+                    if job_type == 'shutdown':
+                        self._log("[Worker] Shutdown signal received.")
+                        result_queue.put(True)
+                        shutdown_requested = True
+                        break  # Break inner loop
+
+                    # Handle Fetch Job
+                    if job_type == 'get_content':
+                        try:
+                            content = self._fetch_page_content(data)
+                            result_queue.put(content)
+                        except Exception as e:
+                            self._log(f"[Worker Error] Job failed: {e}")
+                            result_queue.put(e)
+                        finally:
+                            request_count += 1
+                            # Optional: Force garbage collection after heavy jobs
+                            # import gc; gc.collect()
 
             except Exception as e:
-                self._log(f"[Worker Error] Unhandled error in worker loop: {e}")
+                self._log(f"[Worker Critical Error] Unhandled exception in worker loop: {e}")
+                # Wait before restart to prevent rapid error looping
+                threading.Event().wait(2)
 
-        # --- Cleanup ---
-        self._stop_playwright()
-        self._log("[Worker] Thread exiting.")
+            finally:
+                # --- CLEANUP: Ensures Browser is destroyed before restart or exit ---
+                # This runs when:
+                # 1. Inner loop breaks (Periodic Restart)
+                # 2. Inner loop breaks (Shutdown)
+                # 3. Exception occurs
+                self._stop_playwright()
+
+        self._log("[Worker] Thread exiting cleanly.")
 
     def get_content(self, url: str, **kwargs) -> Optional[bytes]:
         """
@@ -584,8 +642,8 @@ class PlaywrightFetcher(Fetcher):
 
                     # --- 2. 增加“人性化”时间抖动 ---
                     # 模拟人类滚动后，视线移动或反应的短暂延迟
-                    # 随机在 300ms 到 1000ms (0.3s到1s) 之间暂停
-                    jitter_ms = random.randint(300, 1000)
+                    # 随机在 300ms 到 1000ms 之间暂停
+                    jitter_ms = random.randint(1000, 3000)
                     self._log(f"[Worker] Pausing for {jitter_ms}ms (human jitter)...")
                     page.wait_for_timeout(jitter_ms)
 
