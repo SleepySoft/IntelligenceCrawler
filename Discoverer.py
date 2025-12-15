@@ -1020,10 +1020,12 @@ class ListPageDiscoverer(IDiscoverer):
                  fetcher: "Fetcher",
                  verbose: bool = True,
                  min_group_count: int = 5,
+                 scope_selector: Optional[str] = None,
                  manual_specified_signature: Optional[str] = None):
         super().__init__(fetcher, verbose)
         self.log_messages: List[str] = []
         self.min_group_count = min_group_count
+        self.scope_selector = scope_selector
         self.manual_specified_signature = manual_specified_signature
         self.analysis_cache: Dict[str, Tuple[BeautifulSoup, List[LinkGroup]]] = {}
 
@@ -1078,9 +1080,16 @@ class ListPageDiscoverer(IDiscoverer):
             if RE_UTILITY_CLASS.match(c_lower):
                 continue
 
-            # 泛化所有数字
+            # [修复] 移除纯数字或以数字开头的 class (例如 '987789', '2xl:text')
+            # 这些类既会导致 CSS 选择器非法，也会导致聚类碎片化
+            if c_lower[0].isdigit():
+                continue
+
+            # 泛化包含数字的类 (item-123 -> item-N)
+            # 假设 RE_NUMERIC_CLASS = re.compile(r'\d+')
             c_normalized = RE_NUMERIC_CLASS.sub('N', c_lower)
             normalized.add(c_normalized)
+
         return sorted(list(normalized))
 
     def _get_structural_signature(self, tag: Tag, max_depth: int = 5) -> str:
@@ -1138,14 +1147,29 @@ class ListPageDiscoverer(IDiscoverer):
         fingerprints = []
         seen_hrefs = set()
 
-        main_content = soup.find('main') or soup.find('article') or soup.body
+        # 1. 如果用户指定了范围，优先使用
+        if self.scope_selector:
+            self._log(f"  [Scope] 用户指定了搜索范围: '{self.scope_selector}'", indent=1)
+            try:
+                main_content = soup.select_one(self.scope_selector)
+            except Exception as e:
+                self._log(f"  [Scope] Error: 选择器语法错误: {e}", indent=2)
+                return []
+
+            if not main_content:
+                self._log(f"  [Scope] Warning: 在页面中未找到符合 '{self.scope_selector}' 的元素。停止扫描。", indent=2)
+                return []  # 指定了范围但没找到，直接返回空，避免抓取到错误数据
+
+        # 2. 如果没指定，使用默认策略
+        else:
+            main_content = soup.find('main') or soup.find('article') or soup.body
 
         if main_content is None:
             return []
 
-        # 1. 定义我们认为可能包含链接数据的属性
-        #    这是“像”可跳转列表的核心判断依据。
-        LINK_ATTRS = ['href', 'data-link', 'data-url', 'data-href']
+        # 添加常见的前端框架路由属性
+        # ng-href (Angular), :href (Vue bind - 虽然后端渲染通常看不到 :href 但以防万一)
+        LINK_ATTRS = ['href', 'data-link', 'data-url', 'data-href', 'ng-href', 'data-ng-href']
 
         # 2. 查找包含这些属性的标签
         #    查找所有 <a href> 以及所有带有 data-link/url/href 的标签
@@ -1157,12 +1181,12 @@ class ListPageDiscoverer(IDiscoverer):
         potential_link_tags: Set[Tag] = set()
 
         # 查找标准链接
-        for a_tag in main_content.find_all('a', href=True):
+        for a_tag in main_content.find_all('a'):  # 移除 href=True 限制，先都抓进来
             potential_link_tags.add(a_tag)
 
-        # 查找非标准链接（li, div, etc. 带有 data-link 等属性）
-        for attr in LINK_ATTRS[1:]:  # 跳过 'href' (已在上面处理 a[href])
-            # Beautiful Soup 的 find_all(attrs={...}) 更适合查找自定义属性
+        # 查找非标准链接
+        for attr in LINK_ATTRS:
+            if attr == 'href': continue
             for tag in main_content.find_all(attrs={attr: True}):
                 potential_link_tags.add(tag)
 

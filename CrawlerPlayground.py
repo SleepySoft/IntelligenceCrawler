@@ -171,7 +171,10 @@ def create_discoverer_instance(discoverer_name: str, fetcher: Fetcher, log_callb
         if 'ListPageDiscoverer' not in globals(): raise ImportError("ListPageDiscoverer not found.")
         # 从 kwargs 获取 manual_specified_signature
         ai_sig = kwargs.get('manual_specified_signature', None)
-        return ListPageDiscoverer(fetcher, verbose=True, manual_specified_signature=ai_sig)
+        scope_sel = kwargs.get('scope_selector', None)
+        return ListPageDiscoverer(fetcher, verbose=True,
+                                  manual_specified_signature=ai_sig,
+                                  scope_selector=scope_sel)
     else:
         raise ValueError(f"Unknown discoverer_name: {discoverer_name}")
 
@@ -548,6 +551,7 @@ class ChannelDiscoveryWorker(QRunnable):
                  pause_browser: bool,
                  render_page: bool,
                  fetcher_kwargs: Dict[str, Any],
+                 scope_selector: Optional[str] = None,
                  manual_specified_signature: Optional[str] = None):
         super(ChannelDiscoveryWorker, self).__init__()
         self.discoverer_name = discoverer_name
@@ -558,6 +562,7 @@ class ChannelDiscoveryWorker(QRunnable):
         self.proxy = proxy
         self.timeout = timeout
         self.pause_browser = pause_browser
+        self.scope_selector = scope_selector
         self.manual_specified_signature = manual_specified_signature
         self.render_page = render_page  # Note: This is for XML, may break parsing
         self.fetcher_kwargs = fetcher_kwargs
@@ -589,6 +594,7 @@ class ChannelDiscoveryWorker(QRunnable):
                 self.discoverer_name,
                 fetcher,
                 log_callback,
+                scope_selector=self.scope_selector,
                 manual_specified_signature=self.manual_specified_signature
             )
 
@@ -621,7 +627,9 @@ class ArticleListWorker(QRunnable):
                  timeout: int,
                  pause_browser: bool,
                  render_page: bool,
-                 fetcher_kwargs: Dict[str, Any]
+                 fetcher_kwargs: Dict[str, Any],
+                 scope_selector: Optional[str] = None,
+                 manual_specified_signature: Optional[str] = None
                  ):
         super(ArticleListWorker, self).__init__()
         self.discoverer_name = discoverer_name
@@ -632,6 +640,8 @@ class ArticleListWorker(QRunnable):
         self.pause_browser = pause_browser
         self.render_page = render_page
         self.fetcher_kwargs = fetcher_kwargs
+        self.scope_selector = scope_selector
+        self.manual_specified_signature = manual_specified_signature
         self.signals = WorkerSignals()
 
     def run(self):
@@ -653,7 +663,13 @@ class ArticleListWorker(QRunnable):
             )
 
             # 2. Create Discoverer
-            discoverer = create_discoverer_instance(self.discoverer_name, fetcher, log_callback)
+            discoverer = create_discoverer_instance(
+                self.discoverer_name,
+                fetcher,
+                log_callback,
+                scope_selector=self.scope_selector,
+                manual_specified_signature=self.manual_specified_signature
+            )
 
             # 3. Do the work
             article_list = discoverer.get_articles_for_channel(
@@ -820,10 +836,12 @@ class SignatureAnalysisWorker(QRunnable):
 
     def __init__(self,
                  fetcher_config: dict,
-                 url_to_analyze: str):
+                 url_to_analyze: str,
+                 scope_selector: Optional[str] = None):
         super(SignatureAnalysisWorker, self).__init__()
         self.fetcher_config = fetcher_config
         self.url_to_analyze = url_to_analyze
+        self.scope_selector = scope_selector
         self.signals = WorkerSignals()
 
     def run(self):
@@ -849,7 +867,7 @@ class SignatureAnalysisWorker(QRunnable):
             if 'ListPageDiscoverer' not in globals():
                 raise ImportError("ListPageDiscoverer class not found.")
 
-            discoverer = ListPageDiscoverer(fetcher, verbose=True)
+            discoverer = ListPageDiscoverer(fetcher, verbose=True, scope_selector=self.scope_selector)
 
             fetcher_kwargs = {
                 'wait_until': self.fetcher_config.get('wait_until', 'networkidle'),
@@ -1011,7 +1029,12 @@ class CrawlerCodeGenerator:
 
         if d_class_name == "ListPageDiscoverer":
             ai_sig_val = d_config['args'].get('manual_specified_signature')
-            code_discoverer = f"discoverer = {d_class_name}(fetcher=d_fetcher, verbose=True, manual_specified_signature={repr(ai_sig_val)})"
+            scope_sel_val = d_config['args'].get('scope_selector')
+            code_discoverer = (
+                f"discoverer = {d_class_name}(fetcher=d_fetcher, verbose=True, "
+                f"manual_specified_signature={repr(ai_sig_val)}, "
+                f"scope_selector={repr(scope_sel_val)})"
+            )
         else:
             # Default for Sitemap, RSS, etc.
             code_discoverer = f"discoverer = {d_class_name}(fetcher=d_fetcher, verbose=True)"
@@ -1165,12 +1188,13 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.discovery_fetcher_widget: Optional[FetcherConfigWidget] = None
         self.article_fetcher_widget: Optional[FetcherConfigWidget] = None
 
-        # --- [NEW] UI attribute placeholders ---
         self.manual_specified_signature_label: Optional[QLabel] = None
         self.manual_specified_signature_input: Optional[QLineEdit] = None
+        self.scope_selector_label: Optional[QLabel] = None
+        self.scope_selector_input: Optional[QLineEdit] = None
+
         self.css_selector_label: Optional[QLabel] = None
         self.css_selector_input: Optional[QLineEdit] = None
-        # --- [END NEW] ---
 
         # Cache for the *actual* entry_point (str or List[str])
         # used in the last discovery run.
@@ -1287,7 +1311,16 @@ class CrawlerPlaygroundApp(QMainWindow):
         top_bar_row1_layout.addWidget(self.manual_specified_signature_label)
         top_bar_row1_layout.addWidget(self.manual_specified_signature_input, 1)  # Give it stretch
 
-        # --- [NEW] 'Inspect Signatures' Button ---
+        self.scope_selector_label = QLabel("Scope:")
+        self.scope_selector_input = QLineEdit()
+        self.scope_selector_input.setPlaceholderText("e.g., '#main-content'")
+        self.scope_selector_input.setToolTip("Limit discovery to this CSS selector (e.g., div.news-list).")
+        # 让它稍微短一点，stretch factor 设为 0 或者 1，视情况而定
+        self.scope_selector_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+
+        top_bar_row1_layout.addWidget(self.scope_selector_label)
+        top_bar_row1_layout.addWidget(self.scope_selector_input, 1)
+
         self.inspect_signature_button = QPushButton("Inspect...")
         self.inspect_signature_button.setToolTip(
             "Analyze the entry URL to find all possible link signatures.\n"
@@ -1685,8 +1718,13 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         # 处理 Smart Analysis 的特殊参数
         manual_signature = None
+        scope_selector = None
+
         if self.discoverer_name == "Smart Analysis":
             manual_signature = self.manual_specified_signature_input.text().strip() or None
+            scope_selector = self.scope_selector_input.text().strip() or None
+            if scope_selector:
+                self.append_log_history(f"[Config] Limiting scope to: {scope_selector}")
 
         # 6. 启动 Worker
         # 注意：这里的 entry_point 现在始终是 List[str]
@@ -1702,6 +1740,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             pause_browser=fetcher_config['pause'],
             render_page=fetcher_config['render'],
             fetcher_kwargs=fetcher_kwargs,
+            scope_selector=scope_selector,
             manual_specified_signature=manual_signature
         )
 
@@ -1730,6 +1769,19 @@ class CrawlerPlaygroundApp(QMainWindow):
             'scroll_pages': fetcher_config.get('scroll_pages', 0)
         }
 
+        manual_signature = None
+        scope_selector = None
+
+        # 只有在 Smart Analysis 模式下才读取这些输入
+        # 注意：这里我们假设用户想用当前顶栏里的设置来解析这个频道
+        if self.discoverer_name == "Smart Analysis":
+            if self.manual_specified_signature_input:
+                manual_signature = self.manual_specified_signature_input.text().strip() or None
+            if self.scope_selector_input:
+                scope_selector = self.scope_selector_input.text().strip() or None
+                if scope_selector:
+                    self.append_log_history(f"[Config] Loading articles with scope: {scope_selector}")
+
         worker = ArticleListWorker(
             discoverer_name=self.discoverer_name,
             fetcher_name=fetcher_config['fetcher_name'],
@@ -1738,7 +1790,9 @@ class CrawlerPlaygroundApp(QMainWindow):
             timeout=fetcher_config['timeout'],
             pause_browser=fetcher_config['pause'],
             render_page=fetcher_config['render'],
-            fetcher_kwargs=fetcher_kwargs
+            fetcher_kwargs=fetcher_kwargs,
+            scope_selector=scope_selector,
+            manual_specified_signature=manual_signature
         )
 
         worker.signals.result.connect(self.on_article_list_result)
@@ -1838,9 +1892,12 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         self.set_loading_state(True, f"Inspecting signatures for {url}...")
 
+        scope_selector = self.scope_selector_input.text().strip() or None
+
         worker = SignatureAnalysisWorker(
             fetcher_config=fetcher_config,
-            url_to_analyze=url
+            url_to_analyze=url,
+            scope_selector=scope_selector
         )
 
         # [关键] 将结果连接到新的 dialog-showing slot
@@ -2299,6 +2356,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             # --- MODIFICATION: Store new date filter state ---
             "date_filter_enabled": self.date_filter_check.isChecked(),
             "date_filter_days": self.date_filter_days_spin.value(),
+            "scope_selector": self.scope_selector_input.text().strip() or None,
             "manual_specified_signature": self.manual_specified_signature_input.text().strip() or None
         }
 
@@ -2401,6 +2459,10 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.manual_specified_signature_label.setVisible(is_smart)
         if self.manual_specified_signature_input:
             self.manual_specified_signature_input.setVisible(is_smart)
+        if self.scope_selector_label:
+            self.scope_selector_label.setVisible(is_smart)
+        if self.scope_selector_input:
+            self.scope_selector_input.setVisible(is_smart)
         if hasattr(self, 'inspect_signature_button'):
             self.inspect_signature_button.setVisible(is_smart)
 
