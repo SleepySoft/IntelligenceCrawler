@@ -3,8 +3,9 @@
 import os
 import datetime
 import traceback
+import tldextract
 from urllib.parse import urlparse
-from typing import List, Optional, Callable, Any, Tuple
+from typing import List, Optional, Callable, Any, Tuple, Dict
 
 # Import for generated code
 from functools import partial
@@ -24,6 +25,43 @@ log_cb = print
 # --- Configuration ---
 # Define the root directory where all articles will be saved
 BASE_OUTPUT_DIR = "CRAWLER_OUTPUT"
+
+
+def smart_shorten_urls(url_list):
+    # 1. 分组数据结构: { 'nhk': {'domain': 'nhk', 'paths': [...]}, ... }
+    groups = {}
+
+    for url in url_list:
+        # 使用 tldextract 提取精准的 domain (如 'nhk')
+        extracted = tldextract.extract(url)
+        domain_label = extracted.domain  # 这里只取 'nhk'，丢弃 .or.jp
+
+        parsed_path = urlparse(url).path
+
+        if domain_label not in groups:
+            groups[domain_label] = []
+        groups[domain_label].append(parsed_path)
+
+    final_list = []
+
+    # 2. 处理公共路径
+    for domain, paths in groups.items():
+        # 技巧：使用 os.path.commonprefix 找出最长公共路径
+        if len(paths) > 1:
+            common = os.path.commonprefix(paths)
+            # 回退到最后一个 '/'，防止切割单词 (比如 /new 和 /news 可能会被切成 /new)
+            if '/' in common:
+                common = common[:common.rfind('/') + 1]
+        else:
+            # 如果只有一个链接，我们假设只保留所在文件夹作为上下文，或者不去除
+            common = os.path.dirname(paths[0]) + '/'
+
+        for path in paths:
+            # 替换掉公共部分
+            short_path = path.replace(common, "", 1).lstrip('/')
+            final_list.append(f"{domain}/{short_path}")
+
+    return final_list
 
 
 class CrawlPipeline:
@@ -112,33 +150,44 @@ class CrawlPipeline:
 
     def discover_articles(self,
                           channel_filter: Optional[Callable[[str], bool]] = None,
-                          fetcher_kwargs: Optional[dict] = None) -> List[str]:
+                          fetcher_kwargs: Optional[dict] = None) -> List[Tuple[str, str]]:
         """
         Step 2: Discovers article URLs from channels and fetches their content.
         Populates self.contents.
         """
         self.log(f"--- 2. Discovering & Articles from {len(self.channels)} Channels ---")
 
-        articles = []
-        for channel_url in self.channels:
-            if self.crawler_governor:
-                self.crawler_governor.register_group_metadata()
+        seen_articles = set()
+        discovered_results = []
+        group_by_channels = smart_shorten_urls(self.channels)
 
+        for channel_url, channel_group in zip(self.channels, group_by_channels):
             if channel_filter and not channel_filter(channel_url):
                 self.log(f"Skipping channel (filtered): {channel_url}")
                 continue
 
-            self.log(f"Processing Channel: {channel_url}")
-            try:
-                articles_in_channel = self.discoverer.get_articles_for_channel(channel_url, fetcher_kwargs)
-                self.log(f"Found {len(articles_in_channel)} articles in channel.")
-                articles.extend(articles_in_channel)
-            except Exception as e:
-                self.log(f"[Error] Failed to process channel {channel_url}: {e}\n{traceback.format_exc()}")
+            if self.crawler_governor:
+                self.crawler_governor.register_group_metadata(channel_group, channel_url)
 
-        self.articles = list(dict.fromkeys(articles))
-        # [FIX] This log message was incorrect, moved log to extract_articles
-        # self.log(f"Fetched {len(self.articles)} article contents.")
+            self.log(f"Processing Channel: {channel_url}")
+            with self.crawler_governor.transaction(channel_url, channel_group) as task:
+                try:
+                    count_new = 0
+                    articles_in_channel = self.discoverer.get_articles_for_channel(channel_url, fetcher_kwargs)
+
+                    for article in articles_in_channel:
+                        if article not in seen_articles:
+                            seen_articles.add(article)
+                            discovered_results.append((article, channel_group))
+                            count_new += 1
+
+                    task.success()
+                    self.log(f"Found {count_new} articles in channel.")
+                except Exception as e:
+                    task.fail_temp(state_msg=f"Fail by exception: {str(e)}")
+                    self.log(f"[Error] Failed to process channel {channel_url}: {e}\n{traceback.format_exc()}")
+
+        self.articles = discovered_results
         self.log(f"Discovered {len(self.articles)} unique articles.")
         return self.articles
 
@@ -160,29 +209,33 @@ class CrawlPipeline:
         self.log(f"--- 3. Fetching & Extracting {len(self.articles)} Articles ---")
 
         contents = []
-        for article_url in self.articles:
+        for article_url, channel_group in self.articles:
             if article_filter and not article_filter(article_url):
                 self.log(f"Skipping article (filtered): {article_url}")
                 continue
 
             self.log(f"Processing: {article_url}")
 
-            try:
-                content = self.e_fetcher.get_content(article_url, **fetcher_kwargs)
-                if not content:
-                    self.log(f"Skipped (no content): {article_url}")
-                    continue
+            with self.crawler_governor.transaction(article_url, channel_group) as task:
+                try:
+                    content = self.e_fetcher.get_content(article_url, **fetcher_kwargs)
+                    if not content:
+                        task.skip(state_msg='Empty content')
+                        self.log(f"Skipped (no content): {article_url}")
+                        continue
 
-                self.log(f"  -> Fetched {len(content)} bytes. Extracting...")
-                result = self.extractor.extract(content, article_url, **extractor_kwargs)
-                contents.append((article_url, result))  # Store the final result
+                    self.log(f"  -> Fetched {len(content)} bytes. Extracting...")
+                    result = self.extractor.extract(content, article_url, **extractor_kwargs)
+                    contents.append((article_url, result))  # Store the final result
 
-                if content_handler:
-                    content_handler(article_url, result)  # Pass full result to handler
-            except Exception as e:
-                self.log(f"[Error] Failed to extract {article_url}: {e}")
-                if exception_handler:
-                    exception_handler(article_url, e)  # Pass URL and exception
+                    if content_handler:
+                        content_handler(article_url, result)  # Pass full result to handler
+                    task.success()
+                except Exception as e:
+                    self.log(f"[Error] Failed to extract {article_url}: {e}")
+                    if exception_handler:
+                        exception_handler(article_url, e)  # Pass URL and exception
+                    task.fail_temp(state_msg=f"Fail by exception: {str(e)}")
 
         self.contents = contents
         self.log(f"Extracted {len(self.contents)} articles successfully.")
