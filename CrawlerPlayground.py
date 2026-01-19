@@ -916,7 +916,8 @@ e_fetcher_init_param = {e_fetcher_init_param_code}
 def run_pipeline(
         article_filter = lambda url: True, 
         content_handler = save_article_to_disk, 
-        exception_handler = lambda url, exception: None
+        exception_handler = lambda url, exception: None,
+        crawler_governor: Optional[GovernanceManager] = None
 ):
     # === 1. Initialize Components ===
     d_fetcher = {d_fetcher_class}(**d_fetcher_init_param)
@@ -930,7 +931,8 @@ def run_pipeline(
         discoverer=discoverer,
         e_fetcher=e_fetcher,
         extractor=extractor,
-        log_callback=log_cb
+        log_callback=log_cb,
+        crawler_governor=crawler_governor
     )
 
     # Step 1: Discover all channels

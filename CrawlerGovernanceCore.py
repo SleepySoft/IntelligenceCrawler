@@ -364,6 +364,18 @@ class GovernanceManager:
         self._control_signal = self.db.get_control_signal(key='global')
         self._signal_lock = threading.RLock()
 
+        self.stats_lock = threading.RLock()
+        self.session_start_time = time.time()
+        self.known_anchors = set()
+
+        self._reset_memory_stats()
+
+        # Preload anchors from DB to allow tracking immediately after restart
+        rows = self.db.fetch_all("SELECT list_url FROM task_groups WHERE list_url IS NOT NULL")
+        with self.stats_lock:
+            for r in rows:
+                self.known_anchors.add(r['list_url'])
+
         logger.info(f"Governance Manager initialized. Signal: {self._control_signal}")
 
     # --- Helper: Path Normalization & Name Extraction ---
@@ -401,6 +413,10 @@ class GovernanceManager:
                     VALUES (?, ?, ?, ?, ?)
                 """, (list_url, self._hash(list_url), norm_group_path, spider_name, Status.PENDING))
 
+            if list_url:
+                with self.stats_lock:
+                    self.known_anchors.add(list_url)
+
         except Exception as e:
             logger.error(f"Failed to register group {norm_group_path}: {e}")
 
@@ -408,49 +424,106 @@ class GovernanceManager:
 
     def should_crawl(self, url: str, max_retries: int = 3) -> bool:
         """
-        Determines if a URL should be crawled based on `crawl_status`.
-        Handles both recurring Lists (via next_run_at) and one-off Articles (via status).
+        Determines whether the given URL is eligible for crawling based on its current state,
+        scheduling constraints, and role (Recurrent List vs. One-off Article).
+
+        The decision logic follows this order of precedence:
+
+        1. **New URL**: If the URL is not found in the registry, return True.
+        2. **Concurrency**: If the status is RUNNING, return False to prevent duplicate processing.
+        3. **Scheduling**: If a `next_run_at` timestamp is set:
+           - Return True if current time >= `next_run_at` (Scheduled runs override SUCCESS status).
+           - Return False if the scheduled time has not yet arrived.
+        4. **Seed/List Logic**: If the URL is registered as a group entry point (is_seed):
+           - Return True. (Seeds are recurrent by definition; a previous SUCCESS status should not prevent future crawls).
+        5. **Article/One-off Logic**:
+           - Return False if status is SUCCESS (task completed), PERM_FAIL, SKIPPED, or STOPPED.
+           - If status is TEMP_FAIL, return True only if `retry_count` < `max_retries`.
+
+        Args:
+            url (str): The target URL to check.
+            max_retries (int): The maximum number of retries allowed for temporary failures. Defaults to 3.
+
+        Returns:
+            bool: True if the URL should be processed, False otherwise.
         """
+        # 我们通过 LEFT JOIN 检查这个 URL 是否是某个组的 list_url
+        # 结果集多了一列 is_seed (1 or 0)
         row = self.db.fetch_one("""
-            SELECT status, retry_count, next_run_at 
-            FROM crawl_status 
-            WHERE url = ?
+            SELECT 
+                s.status, 
+                s.retry_count, 
+                s.next_run_at,
+                CASE WHEN g.list_url IS NOT NULL THEN 1 ELSE 0 END as is_seed
+            FROM crawl_status s
+            LEFT JOIN task_groups g ON s.url = g.list_url
+            WHERE s.url = ?
         """, (url,))
 
-        # Case 1: New URL
+        # 1. New URL (Never seen) -> Crawl it
         if not row:
             return True
 
         status = row['status']
         retry_count = row['retry_count']
         next_run_at = row['next_run_at']
+        is_seed = bool(row['is_seed'])
 
-        # Case 2: Currently Running (Concurrency check)
+        # 2. Running State: Always protect against concurrency
         if status == Status.RUNNING:
             return False
 
-        # Case 3: Recurring Task (List/RSS)
-        # If next_run_at is set, we strictly follow the schedule
+        # 3. Schedule Check (Time-based Priority)
+        # 无论是列表还是文章，只要设定了 next_run_at，就必须遵循时间调度
         if next_run_at:
             if isinstance(next_run_at, str):
-                target_ts = datetime.datetime.fromisoformat(next_run_at)
+                # Handle varying SQLite timestamp formats
+                try:
+                    target_ts = datetime.datetime.fromisoformat(next_run_at)
+                except ValueError:
+                    # Fallback for simple space-separated DB timestamps if any
+                    target_ts = datetime.datetime.strptime(next_run_at, "%Y-%m-%d %H:%M:%S.%f")
             else:
                 target_ts = next_run_at
 
-            # Allow crawl if current time is past the scheduled time
-            return datetime.datetime.now() >= target_ts
+            now = datetime.datetime.now()
 
-        # Case 4: One-off Task (Articles)
+            # 如果时间没到，坚决不抓
+            if now < target_ts:
+                return False
+
+            # 如果时间到了，允许抓取 (return True)
+            # 注意：这里我们隐式允许了即便 status=SUCCESS 也可以抓，只要时间到了
+            return True
+
+        # 4. Logic for "Seed/List" URLs (Recurrent)
+        # 如果它是种子，且没有设定 next_run_at (可能是初次运行或逻辑疏忽)
+        # 我们不能因为它 SUCCESS 了就停止抓取。
+        if is_seed:
+            # 种子页只有在 "RUNNING" 时才不抓 (上面已处理)
+            # 其他状态 (SUCCESS, FAIL) 都应该允许重试或下一轮
+            # 但为了防止死循环狂抓，建议业务逻辑必须设置 next_run_at。
+            # 这里作为兜底，允许抓取。
+            return True
+
+        # 5. Logic for "Article/One-off" URLs
+        # 普通文章，一旦成功，就永久停止
         if status == Status.SUCCESS:
-            return False  # Already done
+            return False
 
+            # Dead End States
         if status in [Status.PERM_FAIL, Status.SKIPPED, Status.STOPPED]:
-            return False  # Dead end
+            return False
 
+        # Retry Logic for Temp Fails
         if status == Status.TEMP_FAIL:
-            return retry_count < max_retries  # Retry if limit not reached
+            if retry_count < max_retries:
+                return True
+            else:
+                return False
 
-        return True  # Default (e.g., PENDING)
+        # Default (e.g. PENDING)
+        return True
 
     # --- 3. Session Factory ---
 
@@ -492,6 +565,14 @@ class GovernanceManager:
                 last_run_at = CURRENT_TIMESTAMP
         """, (url, url_hash, group, spider, Status.RUNNING, Status.RUNNING, spider))
 
+        # 2. 内存统计更新 (Running +1)
+        with self.stats_lock:
+            self.global_stats['running'] += 1
+
+            if group not in self.group_stats:
+                self.group_stats[group] = {'total': 0, 'success': 0, 'failed': 0, 'running': 0}
+            self.group_stats[group]['running'] += 1
+
         return log_id
 
     def _handle_task_finish(self, log_id, url, spider, group_path, status, duration, http_code, state_msg, file_path):
@@ -532,11 +613,54 @@ class GovernanceManager:
             WHERE url = ?
         """, (status, duration, http_code, state_msg, file_path, spider, retry_inc, url))
 
-        # FIXED: Use group_path in logs
+        # 2. 内存统计更新
+        with self.stats_lock:
+            # Running -1
+            self.global_stats['running'] = max(0, self.global_stats['running'] - 1)
+            if group_path not in self.group_stats:
+                self.group_stats[group_path] = {'total': 0, 'success': 0, 'failed': 0, 'running': 0}
+            self.group_stats[group_path]['running'] = max(0, self.group_stats[group_path]['running'] - 1)
+
+            # Counters +1
+            self.global_stats['total'] += 1
+            self.group_stats[group_path]['total'] += 1
+
+            if status == Status.SUCCESS:
+                self.global_stats['success'] += 1
+                self.group_stats[group_path]['success'] += 1
+            elif status in [Status.TEMP_FAIL, Status.PERM_FAIL]:
+                self.global_stats['failed'] += 1
+                self.group_stats[group_path]['failed'] += 1
+
+            # 2. 如果是 Anchor URL，更新 Anchor 专属统计
+            if url in self.known_anchors:
+                if url not in self.anchor_stats:
+                    self.anchor_stats[url] = {'total': 0, 'success': 0, 'failed': 0}
+
+                stats = self.anchor_stats[url]
+                stats['total'] += 1
+                if status == Status.SUCCESS:
+                    stats['success'] += 1
+                elif status in [Status.TEMP_FAIL, Status.PERM_FAIL]:
+                    stats['failed'] += 1
+
         if status == Status.SUCCESS:
             logger.info(f"[{group_path}] SUCCESS: {url}")
         elif status != Status.SKIPPED:
             logger.warning(f"[{group_path}] FAIL({status.name}): {url}")
+
+    def reset_statistics(self):
+        logger.info("Session statistics reset by user.")
+        self._reset_memory_stats()
+
+    def _reset_memory_stats(self):
+        with self.stats_lock:
+            self.session_start_time = time.time()
+            self.global_stats = {'total': 0, 'success': 0, 'failed': 0, 'running': 0}
+            self.group_stats = {}
+            # 专门统计 Anchor 的内存计数器
+            # Key: URL, Value: {total, success, failed}
+            self.anchor_stats = {}
 
     # --- 5. Flow Control & Signals ---
 
@@ -591,40 +715,13 @@ class GovernanceManager:
 
     def get_dashboard_summary(self, spider_filter: str = None) -> List[Dict]:
         """
-        Aggregates data for UI.
-        OPTIMIZED: Uses 2 queries instead of N+1 queries.
+        Merge DB Metadata (Structure) + Memory Stats (Counters)
         """
-        # 1. Get All Groups Metadata
-        groups_sql = "SELECT group_path, list_url, name FROM task_groups"
-        groups = self.db.fetch_all(groups_sql)
+        # 1. 从 DB 获取结构 (Groups & Anchor URLs)
+        # 这保证了即使 reset 了统计，组的列表依然存在，只是数字变 0
+        groups = self.db.fetch_all("SELECT group_path, list_url, name FROM task_groups")
 
-        # 2. Get All Stats Aggregated by Group (Single Query)
-        # This prevents running a SELECT COUNT(*) inside the loop
-        stats_sql = """
-            SELECT 
-                group_path,
-                COUNT(*) as total,
-                SUM(CASE WHEN status = 2 THEN 1 ELSE 0 END) as success,
-                SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) as running,
-                SUM(CASE WHEN status IN (3,4) THEN 1 ELSE 0 END) as failed,
-                SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END) as pending
-            FROM crawl_status 
-            GROUP BY group_path
-        """
-        all_stats = self.db.fetch_all(stats_sql)
-
-        # Convert stats list to a dict for O(1) lookup
-        # key: group_path, value: dict row
-        stats_map = {row['group_path']: dict(row) for row in all_stats}
-
-        # 3. Get All List URLs Status (Single Query optimization is harder here,
-        # but we can filter distinct urls first or just query crawl_status for urls IN (...))
-        # For simplicity, let's just pre-fetch distinct seed URLs status if optimization needed.
-        # But usually list_urls are few. Let's keep it simple or optimize if specific bottleneck.
-        # Micro-optimization: We can query the seed statuses individually or in batch.
-        # Given list_urls are usually few (tens), individual queries are acceptable
-        # IF stats are batched. But let's batch them for perfection.
-
+        # 2. 从 DB 获取 Anchor 状态 (Anchor 状态是持久的，不应随 Session 重置而消失)
         list_urls = [g['list_url'] for g in groups if g['list_url']]
         list_url_map = {}
         if list_urls:
@@ -635,27 +732,45 @@ class GovernanceManager:
             """, tuple(list_urls))
             list_url_map = {row['url']: dict(row) for row in url_rows}
 
-        # 4. Assemble
+        # 3. 组装 (使用内存中的 group_stats)
         result = []
-        for g in groups:
-            g_path = g['group_path']
+        with self.stats_lock: # Read lock
+            for g in groups:
+                g_path = g['group_path']
+                if spider_filter and not g_path.startswith(spider_filter): continue
 
-            if spider_filter and not g_path.startswith(spider_filter):
-                continue
+                # 注入 Anchor 的内存统计数据
+                # 这样前端既有持久化的 l_status (State)，也有内存的 session_stats (Counters)
+                mem_stats = self.group_stats.get(g_path, {'total':0, 'success':0, 'running':0, 'failed':0})
 
-            # Lookup stats from map (No DB hit)
-            s_row = stats_map.get(g_path, {})
+                l_url = g['list_url']
+                l_status = list_url_map.get(l_url)
 
-            # Lookup anchor status from map (No DB hit)
-            l_url = g['list_url']
-            l_status = list_url_map.get(l_url) if l_url else None
-            if l_status: l_status['url'] = l_url
+                anchor_session_stats = self.anchor_stats.get(
+                    l_url, {'total': 0, 'success': 0, 'failed': 0}) if l_url else None
+                if l_status:
+                    l_status['url'] = l_url
+                    l_status['session_stats'] = anchor_session_stats
 
-            result.append({
-                'group_path': g_path,
-                'name': g['name'],
-                'stats': s_row or {'total': 0, 'success': 0, 'running': 0, 'failed': 0, 'pending': 0},
-                'list_url_status': l_status
-            })
+                result.append({
+                    'group_path': g_path,
+                    'name': g['name'],
+                    'stats': mem_stats,         # <--- Memory Data
+                    'list_url_status': l_status # <--- DB Data (Persistent State)
+                })
 
         return result
+
+    def get_session_stats(self):
+        with self.stats_lock:
+            # 计算简单的成功率
+            total = self.global_stats['total']
+            rate = 0
+            if total > 0:
+                rate = round((self.global_stats['success'] / total) * 100, 1)
+
+            return {
+                **self.global_stats,
+                'success_rate': rate,
+                'session_start': self.session_start_time
+            }

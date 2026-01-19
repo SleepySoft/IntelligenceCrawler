@@ -127,6 +127,8 @@ class CrawlerGovernanceBackend:
         # --- System Control Endpoints ---
         self.app.add_url_rule(build_url('/api/control/<action>'), 'system_control',
                               maybe_wrap(self.system_control), methods=['POST'])
+        self.app.add_url_rule(build_url('/api/control/reset_stats'), 'reset_stats',
+                              maybe_wrap(self.reset_stats), methods=['POST'])
 
         # --- RPC Endpoints (For External Scripts) ---
         self.app.add_url_rule(build_url('/rpc/register_group'), 'rpc_register_group',
@@ -143,39 +145,33 @@ class CrawlerGovernanceBackend:
         return render_template("crawler_governance_frontend.html")
 
     def get_dashboard_stats(self):
-        """Aggregates stats using the new schema (crawl_status)."""
+        """
+        Now returns In-Memory Session Stats.
+        """
         if not self.governor:
-            return jsonify({"error": "GovernanceManager not initialized"}), 500
+            return jsonify({}), 500
 
-        db = self.governor.db
+        # 1. Memory Stats
+        session_stats = self.governor.get_session_stats()
 
-        # 1. Active Spiders (Count distinct spiders in status table)
-        spiders = db.fetch_one("SELECT count(DISTINCT spider_name) as cnt FROM crawl_status")
-
-        # 2. Global Success Rate (From Log history, last 1000)
-        success = db.fetch_one("""
-            SELECT 
-                avg(CASE WHEN status=2 THEN 1 ELSE 0 END) as rate, -- Status.SUCCESS=2
-                count(*) as total
-            FROM crawl_log ORDER BY id DESC LIMIT 1000
-        """)
-
-        # 3. Network Errors Today (Temp Fail = 3)
-        net_errors = db.fetch_one("""
-            SELECT count(*) as cnt FROM crawl_log 
-            WHERE status=3 AND created_at > date('now')
-        """)
-
-        # 4. Current Queue (Pending=0)
-        pending = db.fetch_one("SELECT count(*) as cnt FROM crawl_status WHERE status=0")
+        # 2. Some DB stats are still useful (e.g., Total Pending in Queue)
+        # Queue size is a "Current State", not a "History Counter", so DB is fine.
+        pending = self.governor.db.fetch_one("SELECT count(*) as cnt FROM crawl_status WHERE status=0")
 
         return jsonify({
-            "active_spiders": spiders['cnt'],
-            "success_rate": round((success['rate'] or 0) * 100, 1),
-            "total_requests": success['total'],
-            "network_errors": net_errors['cnt'],
-            "pending_count": pending['cnt']
+            "active_spiders": 0,  # Can be calculated from group_stats keys length
+            "success_rate": session_stats['success_rate'],
+            "total_requests": session_stats['total'],
+            "network_errors": session_stats['failed'],
+            "pending_count": pending['cnt'],
+            "session_start": session_stats['session_start']  # 传给前端用于画分隔线
         })
+
+    # 新增 reset_stats
+    def reset_stats(self):
+        if self.governor:
+            self.governor.reset_statistics()
+        return jsonify({"status": "reset"})
 
     def get_groups(self):
         """

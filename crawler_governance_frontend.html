@@ -33,6 +33,8 @@
             content: ''; position: absolute; left: 10px; top: 0; bottom: 0;
             width: 1px; background-color: #374151; opacity: 0.3;
         }
+        <div class="..."
+            :class="{ 'opacity-50 grayscale': !row.is_current_session }">
     </style>
 </head>
 <body class="bg-gray-950 text-gray-300 h-screen overflow-hidden flex flex-col font-sans" x-data="dashboard()">
@@ -40,8 +42,19 @@
     <header class="bg-gray-900 border-b border-gray-800 h-12 flex items-center px-4 justify-between shrink-0 z-20 shadow-md">
         <div class="flex items-center gap-4">
             <h1 class="font-bold text-lg tracking-wider text-emerald-500">
-                CGS <span class="text-gray-500 font-normal text-xs align-middle">Tree View</span>
+                CGS <span class="text-gray-500 font-normal text-xs align-middle">Monitor</span>
             </h1>
+
+            <div class="flex items-center gap-2 border-l border-gray-700 pl-4 ml-2">
+                <div class="flex flex-col">
+                    <span class="text-[9px] text-gray-500 uppercase">Session Start</span>
+                    <span class="text-xs font-mono text-gray-400" x-text="formatTimeOnly(stats.session_start)"></span>
+                </div>
+                <button @click="resetStats()" title="Clear counters (Memory only)"
+                        class="text-xs bg-gray-800 hover:bg-red-900/50 hover:text-red-300 text-gray-500 px-2 py-1 rounded border border-gray-700 transition flex gap-1 items-center">
+                    <span>🗑</span> Reset
+                </button>
+            </div>
 
             <div class="flex bg-gray-800 rounded p-0.5 border border-gray-700 ml-4">
                 <button @click="controlSystem('RESUME')"
@@ -55,22 +68,14 @@
                     Paused
                 </button>
             </div>
-            <button @click="controlSystem('IMMEDIATE')"
-                    class="text-xs bg-gray-800 hover:bg-blue-600 hover:text-white text-blue-400 px-3 py-1 rounded border border-gray-700 transition">
-                ⚡ Pulse
-            </button>
         </div>
 
         <div class="flex gap-4 text-xs">
-            <div class="flex items-center gap-2">
-                <span class="text-gray-500 uppercase text-[10px]">Active</span>
-                <span class="font-mono font-bold text-gray-200" x-text="stats.active_spiders || 0"></span>
+            <div class="flex items-center gap-2" title="Total requests in this session">
+                <span class="text-gray-500 uppercase text-[10px]">Session Total</span>
+                <span class="font-mono font-bold text-gray-200" x-text="stats.total_requests || 0"></span>
             </div>
-            <div class="flex items-center gap-2">
-                <span class="text-gray-500 uppercase text-[10px]">Queue</span>
-                <span class="font-mono font-bold text-gray-200" x-text="stats.pending_count || 0"></span>
             </div>
-        </div>
     </header>
 
     <main class="flex-1 flex overflow-hidden">
@@ -150,7 +155,8 @@
                     <button @click="selectedGroup = null; currentGroupData = null; refreshData()" class="text-xs text-gray-500 hover:text-white px-2 py-1 rounded hover:bg-gray-700">✕ Close Group</button>
                 </div>
 
-                <div class="p-4 flex items-start gap-4">
+<div class="p-4 flex items-start gap-4">
+
                     <div class="flex-1 bg-gray-800/50 border border-gray-700 rounded p-3 flex gap-3">
                         <div class="shrink-0 pt-1">
                             <div class="w-3 h-3 rounded-full shadow-[0_0_10px_rgba(0,0,0,0.5)]"
@@ -158,53 +164,61 @@
                                  :class="anchorStatus?.status === 1 ? 'animate-pulse' : ''"></div>
                         </div>
 
-                        <div class="flex-1 min-w-0">
-                            <div class="flex justify-between items-center mb-1">
-                                <span class="text-xs font-bold text-gray-400 uppercase tracking-wider">Anchor List URL</span>
-                                <span class="text-[10px] font-mono px-1.5 py-0.5 rounded border"
-                                      :class="anchorStatus?.http_code >= 400 ? 'bg-red-900/30 text-red-300 border-red-800' : (anchorStatus?.http_code ? 'bg-emerald-900/30 text-emerald-300 border-emerald-800' : 'bg-gray-700 text-gray-400 border-gray-600')"
-                                      x-text="anchorStatus?.http_code ? 'HTTP ' + anchorStatus.http_code : 'NO DATA'"></span>
+                        <div class="flex-1 min-w-0 flex flex-col justify-between">
+                            <div>
+                                <div class="flex justify-between items-center mb-1">
+                                    <span class="text-xs font-bold text-gray-400 uppercase tracking-wider">Anchor List URL</span>
+                                    <span class="text-[10px] font-mono px-1.5 py-0.5 rounded border"
+                                          :class="anchorStatus?.http_code >= 400 ? 'bg-red-900/30 text-red-300 border-red-800' : (anchorStatus?.http_code ? 'bg-emerald-900/30 text-emerald-300 border-emerald-800' : 'bg-gray-700 text-gray-400 border-gray-600')"
+                                          x-text="anchorStatus?.http_code ? 'HTTP ' + anchorStatus.http_code : 'NO DATA'"></span>
+                                </div>
+
+                                <div class="text-sm font-mono text-white truncate mb-2"
+                                     :title="anchorStatus?.url"
+                                     x-text="anchorStatus?.url || 'No List URL Configured'"></div>
                             </div>
 
-                            <div class="text-sm font-mono text-white truncate mb-2"
-                                 :title="anchorStatus?.url"
-                                 x-text="anchorStatus?.url || 'No List URL Configured'"></div>
-
-                            <div class="flex gap-6 text-xs text-gray-500 font-mono border-t border-gray-700/50 pt-2">
-                                <div class="flex gap-2">
-                                    <span>Last Check:</span>
-                                    <span class="text-gray-300" x-text="formatTimeAgo(anchorStatus?.last_run_at)"></span>
+                            <div class="flex items-center gap-4 text-xs bg-gray-900/50 p-1.5 rounded border border-gray-700/50">
+                                <span class="text-[10px] text-gray-500 uppercase">Session:</span>
+                                <div class="flex gap-2 font-mono">
+                                    <span title="Total Runs">Run:<span class="text-white" x-text="anchorStatus?.session_stats?.total || 0"></span></span>
+                                    <span title="Success">OK:<span class="text-emerald-400" x-text="anchorStatus?.session_stats?.success || 0"></span></span>
+                                    <span title="Failed">Err:<span class="text-red-400" x-text="anchorStatus?.session_stats?.failed || 0"></span></span>
                                 </div>
-                                <div class="flex gap-2">
-                                    <span>Next Run:</span>
-                                    <span class="text-blue-300" x-text="formatNextRun(anchorStatus?.next_run_at)"></span>
+                                <div class="flex-1 text-right">
+                                    <button @click="filterLogsByUrl(anchorStatus?.url)"
+                                            class="text-[10px] bg-blue-900/30 text-blue-300 border border-blue-800 hover:bg-blue-800 px-2 py-0.5 rounded transition">
+                                        🔍 Show Logs
+                                    </button>
                                 </div>
                             </div>
-
-                            <div x-show="anchorStatus?.state_msg && anchorStatus.status > 2"
-                                 class="mt-2 text-xs text-red-400 bg-red-900/10 p-1 rounded border border-red-900/30"
-                                 x-text="anchorStatus?.state_msg"></div>
                         </div>
                     </div>
 
-                    <div class="w-48 shrink-0 bg-gray-800/50 border border-gray-700 rounded p-3 flex flex-col justify-center">
-                        <div class="text-[10px] font-bold text-gray-500 uppercase mb-3 border-b border-gray-700 pb-1">Group Activity</div>
+                    <div class="w-40 shrink-0 bg-gray-800/50 border border-gray-700 rounded p-3 flex flex-col justify-center">
+                        <div class="text-[10px] font-bold text-gray-500 uppercase mb-3 border-b border-gray-700 pb-1">Schedule</div>
+                        <div class="space-y-2">
+                             <div>
+                                <div class="text-[10px] text-gray-500 uppercase">Last Check</div>
+                                <div class="text-xs font-mono text-gray-300" x-text="formatTimeAgo(anchorStatus?.last_run_at)"></div>
+                            </div>
+                            <div>
+                                <div class="text-[10px] text-gray-500 uppercase">Next Run</div>
+                                <div class="text-xs font-mono text-blue-300" x-text="formatNextRun(anchorStatus?.next_run_at)"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="w-32 shrink-0 bg-gray-800/50 border border-gray-700 rounded p-3 flex flex-col justify-center">
+                        <div class="text-[10px] font-bold text-gray-500 uppercase mb-3 border-b border-gray-700 pb-1">Articles</div>
                         <div class="grid grid-cols-2 gap-y-3 text-xs">
                             <div>
                                 <div class="text-gray-500 text-[9px] uppercase">Total</div>
-                                <div class="font-mono text-white text-sm" x-text="currentGroupData?.stats.total || 0"></div>
+                                <div class="font-mono text-white" x-text="currentGroupData?.stats.total || 0"></div>
                             </div>
                             <div>
-                                <div class="text-gray-500 text-[9px] uppercase">Success</div>
-                                <div class="font-mono text-emerald-400 text-sm" x-text="currentGroupData?.stats.success || 0"></div>
-                            </div>
-                            <div>
-                                <div class="text-gray-500 text-[9px] uppercase">Running</div>
-                                <div class="font-mono text-blue-400 text-sm" x-text="currentGroupData?.stats.running || 0"></div>
-                            </div>
-                            <div>
-                                <div class="text-gray-500 text-[9px] uppercase">Errors</div>
-                                <div class="font-mono text-red-400 text-sm" x-text="currentGroupData?.stats.failed || 0"></div>
+                                <div class="text-gray-500 text-[9px] uppercase">OK</div>
+                                <div class="font-mono text-emerald-400" x-text="currentGroupData?.stats.success || 0"></div>
                             </div>
                         </div>
                     </div>
@@ -339,6 +353,69 @@
                     setInterval(() => this.refreshData(), 3000);
                 },
 
+                // --- Data Processing Helper (防弹版) ---
+                processRows(rows) {
+                    if (!Array.isArray(rows)) return [];
+
+                    return rows.map((r, index) => {
+                        let uniqueKey;
+
+                        // 1. 安全的 ID 生成策略 (Bulletproof Key Generation)
+                        // 我们使用 Base64 编码 URL/ID，避免特殊字符搞崩 DOM
+                        // 并且加上 index 后缀，彻底根治 Duplicate Key 错误
+
+                        try {
+                            if (this.viewMode === 'LATEST') {
+                                // 尝试使用 url_hash，如果没有，则对 URL 进行简单编码
+                                let safeId = r.url_hash;
+                                if (!safeId && r.url) {
+                                    // 简单的字符串哈希替代方案 (防止 btoa 处理中文报错)
+                                    safeId = r.url.split('').reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a }, 0);
+                                }
+                                uniqueKey = 'lat_' + (safeId || 'unk') + '_' + index;
+                            } else {
+                                // History 模式
+                                uniqueKey = 'hist_' + (r.id || 'unk') + '_' + index;
+                            }
+                        } catch (e) {
+                            // 终极兜底：如果上面的逻辑都挂了，用纯随机数保证不崩
+                            uniqueKey = 'fallback_' + index + '_' + Math.random();
+                        }
+
+                        // 2. 统一时间字段
+                        const timeRaw = (this.viewMode === 'LATEST' ? r.last_run_at : r.created_at) || '';
+
+                        return {
+                            ...r,
+                            // 强制转换为字符串
+                            id_key: String(uniqueKey),
+
+                            display_time: timeRaw,
+                            retry_count: r.retry_count || 0,
+                            duration: r.duration || 0,
+                            http_code: r.http_code || 0,
+                            status: r.status !== undefined ? r.status : 0,
+                            group_path: r.group_path || ''
+                        };
+                    });
+                },
+
+                async resetStats() {
+                    if(!confirm("Clear all session statistics? (Logs will remain)")) return;
+                    await fetch('/api/control/reset_stats', {method: 'POST'});
+                    this.refreshData();
+                },
+
+                // 专门用于精确过滤某个 URL 的日志
+                specificUrlFilter: null,
+
+                filterLogsByUrl(url) {
+                    if (!url) return;
+                    this.viewMode = 'HISTORY'; // 强制切换到历史模式
+                    this.specificUrlFilter = url; // 设置特殊过滤器
+                    this.refreshData(); // 刷新
+                },
+
                 async refreshData() {
                     try {
                         const [sRes, gRes] = await Promise.all([
@@ -357,34 +434,47 @@
                         let endpoint = this.viewMode === 'LATEST' ? '/api/status/recent' : '/api/logs';
                         let query = `${endpoint}?limit=100`;
 
-                        if (this.selectedGroup) {
+                        // 优先级：如果有 specificUrlFilter，则忽略 Group 和 Status 筛选，直接查这个 URL
+                        // 注意：这需要后端支持 url 参数，或者我们在前端过滤
+                        // 为了演示简单，我们在前端过滤 (Backend 暂无 url 参数)
+
+                        if (this.selectedGroup && !this.specificUrlFilter) {
                             const spider = this.selectedGroup.split('/')[0];
                             query += `&spider=${encodeURIComponent(spider)}`;
                         }
-                        if (this.logFilter !== 'ALL') query += `&status=${this.logFilter}`;
+                        if (this.logFilter !== 'ALL' && !this.specificUrlFilter) {
+                            query += `&status=${this.logFilter}`;
+                        }
 
                         const res = await fetch(query);
                         let rawRows = await res.json();
 
-                        // Client-side precise filtering
-                        if (this.selectedGroup) {
+                        // Client-side Filtering
+                        if (this.specificUrlFilter) {
+                            // 精确匹配 URL
+                            rawRows = rawRows.filter(r => r.url === this.specificUrlFilter);
+                        } else if (this.selectedGroup) {
+                            // Group 匹配
                             rawRows = rawRows.filter(r => r.group_path === this.selectedGroup);
                         }
 
-                        // --- NORMALIZE DATA (修复点：确保字段不为 undefined) ---
-                        this.listData = rawRows.map(r => ({
-                            ...r,
-                            // 如果是 LATEST 模式，用 URL 做 Key；如果是 HISTORY，用 ID 做 Key
-                            // 加上 || Math.random() 防止极个别情况 Key 重复导致渲染错误
-                            id_key: this.viewMode === 'LATEST' ? (r.url || 'u_'+Math.random()) : (r.id || 'i_'+Math.random()),
+                        // 修改 listData 的处理逻辑，增加 "is_new_session" 标记
+                        // 在 refreshData 函数的 NORMALIZE DATA 部分：
 
-                            // 核心修复：如果没有 last_run_at，给一个空字符串，防止 formatter 报错
-                            display_time: (this.viewMode === 'LATEST' ? r.last_run_at : r.created_at) || '',
-
-                            retry_count: r.retry_count || 0
-                        }));
+                        this.listData = this.processRows(rawRows);
 
                     } catch (e) { console.error("Data Fetch Error:", e); }
+                },
+
+                // 当切换 Group 或点击 Close 时，记得清空 specificUrlFilter
+                selectGroup(group) {
+                    // 同样需要重置过滤器
+                    this.specificUrlFilter = null;
+
+                    this.selectedGroup = group ? group.group_path : null;
+                    this.currentGroupData = group;
+                    this.listData = []; // UX优化
+                    this.refreshData();
                 },
 
                 // --- Tree Logic ---
@@ -458,27 +548,27 @@
                         }
 
                         // 复用数据清洗逻辑
-                        this.listData = rawRows.map(r => ({
-                            ...r,
-                            id_key: this.viewMode === 'LATEST' ? (r.url || 'u_'+Math.random()) : (r.id || 'i_'+Math.random()),
-                            display_time: (this.viewMode === 'LATEST' ? r.last_run_at : r.created_at) || '',
-                            retry_count: r.retry_count || 0
-                        }));
+                        this.listData = this.processRows(rawRows);
+
                     } catch(e) { console.error(e); }
                 },
 
                 handleNodeClick(node) {
                     if (node.isRealGroup) {
-                        // 1. 立即更新 UI 状态 (Instant Feedback)
+                        // 1. [核心修复] 重置所有临时过滤器
+                        this.specificUrlFilter = null;
+
+                        // 2. 更新选中状态
                         this.selectedGroup = node.path;
                         this.currentGroupData = node.data;
 
-                        // 2. 清空现有列表，给用户“正在加载”的感觉，或者保留旧的直到新的回来
-                        // this.listData = [];
+                        // 3. [UX优化] 立即清空当前列表，防止显示上一组的残影，给用户明确的"加载中"反馈
+                        this.listData = [];
 
-                        // 3. 只去请求日志，不再全量刷新整个 Dashboard (Metadata)
+                        // 4. 发起请求
                         this.fetchLogsOnly();
                     } else {
+                        // 如果是文件夹，则折叠/展开
                         this.toggleNode(node.path);
                     }
                 },
