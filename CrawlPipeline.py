@@ -8,6 +8,8 @@ from typing import List, Optional, Callable, Any, Tuple
 
 # Import for generated code
 from functools import partial
+
+from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager
 from IntelligenceCrawler.Fetcher import Fetcher, RequestsFetcher, PlaywrightFetcher
 from IntelligenceCrawler.Extractor import (
     ExtractionResult, IExtractor, PassThroughExtractor, TrafilaturaExtractor,
@@ -35,7 +37,8 @@ class CrawlPipeline:
                  discoverer: IDiscoverer,
                  e_fetcher: Fetcher,
                  extractor: IExtractor,
-                 log_callback: Callable[..., None] = print):
+                 log_callback: Callable[..., None] = print,
+                 crawler_governor: Optional[GovernanceManager] = None):
         """
         Initializes the pipeline with all required components.
 
@@ -51,8 +54,9 @@ class CrawlPipeline:
         self.e_fetcher = e_fetcher
         self.extractor = extractor
         self.log = log_callback
+        self.crawler_governor = crawler_governor
 
-        # --- State Properties ---
+            # --- State Properties ---
         self.channels: List[str] = []
         self.articles: List[str] = []
         self.contents: List[Tuple[str, ExtractionResult]] = []
@@ -117,6 +121,9 @@ class CrawlPipeline:
 
         articles = []
         for channel_url in self.channels:
+            if self.crawler_governor:
+                self.crawler_governor.register_group_metadata()
+
             if channel_filter and not channel_filter(channel_url):
                 self.log(f"Skipping channel (filtered): {channel_url}")
                 continue
