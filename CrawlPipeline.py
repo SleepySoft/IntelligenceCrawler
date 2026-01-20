@@ -10,7 +10,7 @@ from typing import List, Optional, Callable, Any, Tuple, Dict
 # Import for generated code
 from functools import partial
 
-from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager
+from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager, CrawlSession
 from IntelligenceCrawler.Fetcher import Fetcher, RequestsFetcher, PlaywrightFetcher
 from IntelligenceCrawler.Extractor import (
     ExtractionResult, IExtractor, PassThroughExtractor, TrafilaturaExtractor,
@@ -192,7 +192,7 @@ class CrawlPipeline:
         return self.articles
 
     def extract_articles(self,
-                         article_filter: Optional[Callable[[str], bool]] = None,
+                         article_filter: Optional[Callable[[str, str], bool]] = None,
                          content_handler: Optional[Callable[[str, ExtractionResult], None]] = None,
                          exception_handler: Optional[Callable[[str, Exception], None]] = None,
                          fetcher_kwargs: Optional[dict] = None,
@@ -210,7 +210,7 @@ class CrawlPipeline:
 
         contents = []
         for article_url, channel_group in self.articles:
-            if article_filter and not article_filter(article_url):
+            if article_filter and not article_filter(article_url, channel_group):
                 self.log(f"Skipping article (filtered): {article_url}")
                 continue
 
@@ -230,11 +230,13 @@ class CrawlPipeline:
 
                     if content_handler:
                         content_handler(article_url, result)  # Pass full result to handler
+
+                    task.save_file(result.markdown_content, result.metadata.get('title', 'NoTitle'))
                     task.success()
                 except Exception as e:
                     self.log(f"[Error] Failed to extract {article_url}: {e}")
                     if exception_handler:
-                        exception_handler(article_url, e)  # Pass URL and exception
+                        exception_handler(article_url, e)        # Pass URL and exception
                     task.fail_temp(state_msg=f"Fail by exception: {str(e)}")
 
         self.contents = contents
