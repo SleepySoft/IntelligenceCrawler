@@ -386,16 +386,14 @@ class GovernanceManager:
         # This allows O(1) retrieval to update status from RUNNING -> SUCCESS/FAIL.
         self.active_events_map: Dict[int, dict] = {}
 
+        # 3. Runtime Group Registry
+        # Stores metadata for groups seen IN THIS SESSION.
+        # Key: normalized_group_path (str)
+        # Value: {'list_url': str, 'name': str}
+        # Replaces the behavior of loading all groups from DB at startup.
+        self.runtime_groups: Dict[str, Dict] = {}
+
         self.known_anchors = set()
-
-        # Preload anchors from DB (Structure only, not stats)
-        rows = self.db.fetch_all("SELECT list_url FROM task_groups WHERE list_url IS NOT NULL")
-        with self.stats_lock:
-            for r in rows:
-                self.known_anchors.add(r['list_url'])
-
-        # Ensure DB has index for time-based queries
-        self.db.execute("CREATE INDEX IF NOT EXISTS idx_log_created ON crawl_log(created_at)")
 
         logger.info(f"Governance Manager initialized. Signal: {self._control_signal}")
 
@@ -417,26 +415,37 @@ class GovernanceManager:
         norm_group_path = _normalize_group_path(group_path)
         spider_name = _extract_spider_name(norm_group_path)
 
-        try:
-            # 1. Update Metadata Registry
-            self.db.execute("""
-                INSERT INTO task_groups (group_path, list_url, name)
-                VALUES (?, ?, ?)
-                ON CONFLICT(group_path) DO UPDATE SET
-                list_url = excluded.list_url,
-                name = excluded.name
-            """, (norm_group_path, list_url, friendly_name))
+        # Default name if missing
+        if not friendly_name:
+            friendly_name = norm_group_path.split('/')[-1].capitalize()
 
-            # 2. Ensure the List URL exists in Status table (for visibility)
+        try:
+            # 1. Update DB (Persistent Record)
+            self.db.execute("""
+                        INSERT INTO task_groups (group_path, list_url, name)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(group_path) DO UPDATE SET
+                        list_url = excluded.list_url,
+                        name = excluded.name
+                    """, (norm_group_path, list_url, friendly_name))
+
+            # 2. Update Runtime Registry (UI Visibility) <--- KEY CHANGE
+            with self.stats_lock:
+                self.runtime_groups[norm_group_path] = {
+                    'list_url': list_url,
+                    'name': friendly_name,
+                    'spider': spider_name
+                }
+
+                if list_url:
+                    self.known_anchors.add(list_url)
+
+            # 3. Ensure Status Entry in DB
             if list_url:
                 self.db.execute("""
-                    INSERT OR IGNORE INTO crawl_status (url, url_hash, group_path, spider_name, status)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (list_url, self._hash(list_url), norm_group_path, spider_name, Status.PENDING))
-
-            if list_url:
-                with self.stats_lock:
-                    self.known_anchors.add(list_url)
+                            INSERT OR IGNORE INTO crawl_status (url, url_hash, group_path, spider_name, status)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (list_url, self._hash(list_url), norm_group_path, spider_name, Status.PENDING))
 
         except Exception as e:
             logger.error(f"Failed to register group {norm_group_path}: {e}")
@@ -800,23 +809,31 @@ class GovernanceManager:
 
     def get_dashboard_summary(self, spider_filter: str = None, since_time: datetime.datetime = None) -> List[Dict]:
         """
-        Constructs the full dashboard view for the Frontend.
-
-        Components:
-        1. Metadata: Static group structure (always from DB task_groups).
-        2. Stats: Dynamic counters (from Memory or DB, depending on time).
-        3. Anchor Status: Persistent state of the Seed/List URL (from DB crawl_status).
+        Constructs the dashboard view.
+        Source of 'groups' is now self.runtime_groups (Memory), not DB.
         """
 
-        # 1. Fetch Structure (Task Groups)
-        groups = self.db.fetch_all("SELECT group_path, list_url, name FROM task_groups")
+        # 1. Fetch Structure (FROM MEMORY) <--- CHANGED
+        # Only groups explicitly registered in this session appear.
+        with self.stats_lock:
+            # Sort by path for consistent UI
+            sorted_paths = sorted(self.runtime_groups.keys())
+            active_groups = [
+                {'group_path': p, **self.runtime_groups[p]}
+                for p in sorted_paths
+            ]
 
-        # 2. Get Dynamic Statistics (Smart Cache Logic)
+        # If no groups registered yet, return empty list immediately
+        if not active_groups:
+            return []
+
+        # 2. Get Dynamic Statistics
+        # This returns stats for ALL groups found in logs/buffer.
+        # We will map them to our active_groups.
         stats_map = self._get_aggregated_stats(since_time)
 
         # 3. Fetch Anchor/List URL Status
-        # We need the current state (e.g., Next Run Time) of the entry points.
-        list_urls = [g['list_url'] for g in groups if g['list_url']]
+        list_urls = [g['list_url'] for g in active_groups if g['list_url']]
         list_url_map = {}
 
         if list_urls:
@@ -829,8 +846,6 @@ class GovernanceManager:
                 WHERE url IN ({})
             """
 
-            # If viewing a specific time window, we filter anchors that haven't run recently.
-            # This helps the UI highlight only active groups.
             if since_time:
                 sql += " AND last_run_at > ?"
                 params.append(since_time)
@@ -840,19 +855,18 @@ class GovernanceManager:
 
         # 4. Assemble Final Result
         result = []
-        for g in groups:
+        for g in active_groups:
             g_path = g['group_path']
 
-            # Apply optional spider filter (e.g., 'spider/news')
             if spider_filter and not g_path.startswith(spider_filter):
                 continue
 
-            # Retrieve stats (Default to zero if no activity found)
+            # Retrieve stats
+            # Note: Even if stats_map has data for old groups, we only grab the ones for active_groups
             current_stats = stats_map.get(g_path, {'total': 0, 'success': 0, 'failed': 0, 'running': 0})
 
-            # Retrieve Anchor Status
             l_url = g['list_url']
-            l_status = list_url_map.get(l_url)  # Will be None if filtered by time
+            l_status = list_url_map.get(l_url)
 
             result.append({
                 'group_path': g_path,
