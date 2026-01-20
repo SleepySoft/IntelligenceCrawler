@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import datetime
 
 from typing import Optional
 from urllib.parse import urljoin
@@ -8,28 +9,24 @@ from urllib.parse import urljoin
 from flask_cors import CORS
 from flask import Flask, jsonify, request, send_file, render_template
 
-# Import the core logic from the previous step
-from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager, Status
+# Import the core logic (Assuming relative import or package structure)
+# from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager, Status
+# For context compatibility, we assume GovernanceManager and Status are available.
 
 self_path = os.path.dirname(os.path.abspath(__file__))
 
 
 class CrawlerGovernanceBackend:
     def __init__(self,
-                 governor: GovernanceManager,
+                 governor,  # Type: GovernanceManager
                  host: Optional[str] = "0.0.0.0",
                  port: Optional[int] = 8002,
                  app: Optional[Flask] = None,
                  base_url: Optional[str] = ''
                  ):
         """
-        Initialize the Governance Backend Service
-
-        Args:
-            governor: Instance of GovernanceManager
-            host: Host address for the web service
-            port: Port for the web service
-            base_url: The prefix of URL
+        Initialize the Governance Backend Service.
+        Decoupled from DB. Relies entirely on GovernanceManager interfaces.
         """
         self.governor = governor
         self.host = host
@@ -40,252 +37,175 @@ class CrawlerGovernanceBackend:
         self.own_app = not app
         self.flask_thread = None
 
-        # Last validation time for health checks
-        self.last_validation_time = time.time()
-
     def start_service(self, blocking: bool = False):
-        """
-        Start the Flask web service either in blocking mode or in a background thread.
-
-        Args:
-            blocking: If True, runs in foreground and blocks execution;
-                     if False, runs in background thread
-        """
+        """Start the Flask web service."""
         if not self.app:
             self.app = Flask(__name__)
-            self.app.secret_key = os.urandom(24)  # Secret key for session management
+            self.app.secret_key = os.urandom(24)
             CORS(self.app)
 
         self._register_routes(wrapper=None)
-
-        # Set up template and static file serving
         self.app.template_folder = self_path
+
+        print(f"Starting Governance API Server on http://{self.host}:{self.port}")
 
         if self.own_app:
             if blocking:
-                # Run in foreground (blocking)
-                print(f"Starting Governance API Server on http://{self.host}:{self.port}")
                 self.app.run(debug=True, host=self.host, port=self.port, use_reloader=False, threaded=True)
             else:
-                # Run in background thread (non-blocking)
                 def run_flask():
-                    """Run Flask app in a separate thread"""
-                    print(f"Starting Governance API Server on http://{self.host}:{self.port}")
-                    self.app.run(
-                        debug=True,
-                        host=self.host,
-                        port=self.port,
-                        use_reloader=False,
-                        threaded=True
-                    )
+                    self.app.run(debug=True, host=self.host, port=self.port, use_reloader=False, threaded=True)
 
-                # Create and start daemon thread
-                self.flask_thread = threading.Thread(
-                    target=run_flask,
-                    daemon=True
-                )
+                self.flask_thread = threading.Thread(target=run_flask, daemon=True)
                 self.flask_thread.start()
-
-                # Wait briefly for server initialization
                 time.sleep(1)
-                print(f"Flask server running in background on http://{self.host}:{self.port}")
+                print(f"Flask server running in background.")
 
     def _register_routes(self, wrapper):
-        """
-        Register all governance routes to the Flask application
+        def maybe_wrap(fn): return wrapper(fn) if wrapper else fn
 
-        Args:
-            wrapper: Optional wrapper function for routes
-        """
+        def build_url(endpoint: str) -> str: return urljoin(self.base_url, endpoint)
 
-        def maybe_wrap(fn):
-            return wrapper(fn) if wrapper else fn
-
-        def build_url(endpoint: str) -> str:
-            return urljoin(self.base_url, endpoint)
-
-        # Dashboard and monitoring endpoints
+        # UI
         self.app.add_url_rule(build_url('/'), 'read_root', maybe_wrap(self.read_root))
 
+        # Data APIs (GET)
         self.app.add_url_rule(build_url('/api/dashboard/stats'), 'get_dashboard_stats',
                               maybe_wrap(self.get_dashboard_stats), methods=['GET'])
-
-        # 'get_tasks' now reflects the Group/List hierarchy
-        self.app.add_url_rule(build_url('/api/groups'), 'get_groups',
-                              maybe_wrap(self.get_groups), methods=['GET'])
-
-        self.app.add_url_rule(build_url('/api/logs'), 'get_logs',
-                              maybe_wrap(self.get_logs), methods=['GET'])
-
-        # Lookup file by URL Hash (since we store paths now)
-        self.app.add_url_rule(build_url('/api/snapshot/<url_hash>'), 'get_snapshot',
-                              maybe_wrap(self.get_snapshot), methods=['GET'])
-
+        self.app.add_url_rule(build_url('/api/groups'), 'get_groups', maybe_wrap(self.get_groups), methods=['GET'])
+        self.app.add_url_rule(build_url('/api/logs'), 'get_logs', maybe_wrap(self.get_logs), methods=['GET'])
         self.app.add_url_rule(build_url('/api/status/recent'), 'get_recent_statuses',
                               maybe_wrap(self.get_recent_statuses), methods=['GET'])
+        self.app.add_url_rule(build_url('/api/snapshot/<url_hash>'), 'get_snapshot', maybe_wrap(self.get_snapshot),
+                              methods=['GET'])
 
-        # --- System Control Endpoints ---
-        self.app.add_url_rule(build_url('/api/control/<action>'), 'system_control',
-                              maybe_wrap(self.system_control), methods=['POST'])
-        self.app.add_url_rule(build_url('/api/control/reset_stats'), 'reset_stats',
-                              maybe_wrap(self.reset_stats), methods=['POST'])
+        # Control APIs (POST)
+        self.app.add_url_rule(build_url('/api/control/<action>'), 'system_control', maybe_wrap(self.system_control),
+                              methods=['POST'])
+        self.app.add_url_rule(build_url('/api/control/reset_stats'), 'reset_stats', maybe_wrap(self.reset_stats),
+                              methods=['POST'])
 
-        # --- RPC Endpoints (For External Scripts) ---
+        # RPC APIs (POST)
         self.app.add_url_rule(build_url('/rpc/register_group'), 'rpc_register_group',
                               maybe_wrap(self.rpc_register_group), methods=['POST'])
-        self.app.add_url_rule(build_url('/rpc/should_crawl'), 'rpc_should_crawl',
-                              maybe_wrap(self.rpc_should_crawl), methods=['POST'])
-        self.app.add_url_rule(build_url('/rpc/report_result'), 'rpc_report_result',
-                              maybe_wrap(self.rpc_report_result), methods=['POST'])
+        self.app.add_url_rule(build_url('/rpc/should_crawl'), 'rpc_should_crawl', maybe_wrap(self.rpc_should_crawl),
+                              methods=['POST'])
+        self.app.add_url_rule(build_url('/rpc/report_result'), 'rpc_report_result', maybe_wrap(self.rpc_report_result),
+                              methods=['POST'])
 
-    # ------------------------------------------ Web Service Methods ------------------------------------------
+    # --- Helper: Time Parsing ---
+
+    def _get_since_time(self) -> Optional[datetime.datetime]:
+        """Parses 'since' query parameter (timestamp float)."""
+        ts = request.args.get('since', type=float)
+        if ts:
+            try:
+                return datetime.datetime.fromtimestamp(ts)
+            except (ValueError, OSError):
+                return None
+        return None
+
+    # --- Web Service Methods ---
 
     def read_root(self):
-        """Render the main dashboard page"""
         return render_template("crawler_governance_frontend.html")
 
     def get_dashboard_stats(self):
         """
-        Now returns In-Memory Session Stats.
+        Aggregated Global Statistics.
         """
-        if not self.governor:
-            return jsonify({}), 500
+        if not self.governor: return jsonify({}), 500
 
-        # 1. Memory Stats
-        session_stats = self.governor.get_session_stats()
+        since_time = self._get_since_time()
 
-        # 2. Some DB stats are still useful (e.g., Total Pending in Queue)
-        # Queue size is a "Current State", not a "History Counter", so DB is fine.
-        pending = self.governor.db.fetch_one("SELECT count(*) as cnt FROM crawl_status WHERE status=0")
+        # 1. Session Stats (Memory or DB Aggregation via Governor)
+        session_stats = self.governor.get_session_stats(since_time=since_time)
+
+        # 2. Pending Count (Persistent State via Governor Interface)
+        pending_count = self.governor.get_pending_count()
 
         return jsonify({
-            "active_spiders": 0,  # Can be calculated from group_stats keys length
+            "active_spiders": 0,  # Placeholder, or use len(governor.group_stats)
             "success_rate": session_stats['success_rate'],
             "total_requests": session_stats['total'],
             "network_errors": session_stats['failed'],
-            "pending_count": pending['cnt'],
-            "session_start": session_stats['session_start']  # 传给前端用于画分隔线
+            "running_count": session_stats.get('running', 0),  # Added running count
+            "pending_count": pending_count,
+            "session_start": session_stats['session_start']
         })
 
-    # 新增 reset_stats
+    def get_groups(self):
+        """
+        Group Hierarchy & Statistics.
+        """
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+
+        spider_filter = request.args.get('spider')
+        since_time = self._get_since_time()
+
+        # Delegate to Governor's smart aggregation
+        summary = self.governor.get_dashboard_summary(spider_filter=spider_filter, since_time=since_time)
+        return jsonify(summary)
+
+    def get_logs(self):
+        """
+        Streaming Logs.
+        """
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+
+        limit = request.args.get('limit', 100, type=int)
+        status = request.args.get('status', type=int)
+        spider = request.args.get('spider')
+        since_time = self._get_since_time()
+
+        # Delegate to Governor
+        logs = self.governor.get_logs(limit=limit, status=status, spider=spider, since_time=since_time)
+        return jsonify(logs)
+
+        # Inside CrawlerGovernanceBackend class...
+
+    def get_recent_statuses(self):
+        """
+        Latest URL Statuses (Live Memory View).
+        Fetch the latest activity directly from memory.
+        """
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+
+        limit = request.args.get('limit', 100, type=int)
+        spider = request.args.get('spider')
+        status = request.args.get('status', type=int)
+
+        # Removed 'since_time' logic as this is a memory snapshot
+
+        # Delegate to Governor (Memory Only)
+        statuses = self.governor.get_recent_statuses(limit=limit, spider=spider, status=status)
+        return jsonify(statuses)
+
+    def get_snapshot(self, url_hash: str):
+        """
+        Serve file content.
+        """
+        if not url_hash.isalnum(): return jsonify({"error": "Invalid hash"}), 400
+
+        # Delegate path lookup to Governor
+        file_path = self.governor.get_snapshot_path(url_hash)
+
+        if not file_path:
+            return jsonify({"error": "Snapshot not found"}), 404
+
+        if not os.path.exists(file_path):
+            return jsonify({"error": "File on disk missing"}), 404
+
+        return send_file(file_path)
+
     def reset_stats(self):
         if self.governor:
             self.governor.reset_statistics()
         return jsonify({"status": "reset"})
 
-    def get_groups(self):
-        """
-        UPDATED: Fetches the dashboard summary using the Governor's logic.
-        Replaces the old 'get_tasks'.
-        """
-        if not self.governor:
-            return jsonify({"error": "GovernanceManager not initialized"}), 500
-
-        spider_filter = request.args.get('spider')
-
-        # Leverage the robust aggregation logic in the core
-        summary = self.governor.get_dashboard_summary(spider_filter)
-        return jsonify(summary)
-
-    def get_logs(self):
-        """Fetch streaming logs"""
-        if not self.governor:
-            return jsonify({"error": "GovernanceManager not initialized"}), 500
-
-        limit = request.args.get('limit', 100, type=int)
-        status = request.args.get('status', type=int)
-        spider = request.args.get('spider')
-
-        query = "SELECT * FROM crawl_log"
-        params = []
-        conditions = []
-
-        if status is not None:
-            conditions.append("status = ?")
-            params.append(status)
-
-        if spider:
-            conditions.append("spider_name = ?")
-            params.append(spider)
-
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-
-        query += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
-
-        rows = self.governor.db.fetch_all(query, tuple(params))
-        return jsonify([dict(row) for row in rows])
-
-    def get_snapshot(self, url_hash: str):
-        """
-        UPDATED: Look up file path from DB using url_hash.
-        """
-        if not url_hash.isalnum():
-            return jsonify({"error": "Invalid hash"}), 400
-
-        # Query DB for the file path associated with this URL hash
-        row = self.governor.db.fetch_one("SELECT file_path FROM crawl_status WHERE url_hash = ?", (url_hash,))
-
-        if not row or not row['file_path']:
-            return jsonify({"error": "Snapshot not found in registry"}), 404
-
-        file_path = row['file_path']
-
-        if not os.path.exists(file_path):
-            return jsonify({"error": "File deleted or moved"}), 404
-
-        return send_file(file_path)
-
-    def get_recent_statuses(self):
-        """
-        [NEW] Fetch the latest status of unique URLs, sorted by activity time.
-        This provides the "State View" where each URL appears only once.
-        """
-        if not self.governor:
-            return jsonify({"error": "GovernanceManager not initialized"}), 500
-
-        limit = request.args.get('limit', 100, type=int)
-        spider = request.args.get('spider')
-        status = request.args.get('status', type=int)
-
-        query = "SELECT * FROM crawl_status"
-        conditions = []
-        params = []
-
-        # Filter Logic
-        if spider:
-            conditions.append("spider_name = ?")
-            params.append(spider)
-
-        if status is not None:
-            conditions.append("status = ?")
-            params.append(status)
-
-        # Optional: Hide 'PENDING' (0) records in this view if they haven't run yet?
-        # usually user cares about what JUST happened.
-        # Let's keep them but maybe filter by 'last_run_at IS NOT NULL'
-        conditions.append("last_run_at IS NOT NULL")
-
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-
-        # KEY CHANGE: Sort by last_run_at DESC
-        query += " ORDER BY last_run_at DESC LIMIT ?"
-        params.append(limit)
-
-        rows = self.governor.db.fetch_all(query, tuple(params))
-        return jsonify([dict(row) for row in rows])
-
     def system_control(self, action: str):
-        """
-        NEW: Handle PAUSE, RESUME, IMMEDIATE signals.
-        """
-        if not self.governor:
-            return jsonify({"error": "GovernanceManager not initialized"}), 500
-
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
         action = action.upper()
-
         if action == "PAUSE":
             self.governor.pause()
         elif action == "RESUME":
@@ -294,96 +214,50 @@ class CrawlerGovernanceBackend:
             self.governor.trigger_immediate()
         else:
             return jsonify({"error": "Unknown action"}), 400
-
         return jsonify({"status": "ok", "action": action})
 
-    # ------------------------------------------ RPC Endpoints ------------------------------------------
-    # These endpoints allow external python scripts to use the governance logic
-    # without touching the DB file directly.
+    # --- RPC Methods (Unchanged logic, just clean) ---
 
     def rpc_register_group(self):
-        """
-        Maps to register_group_metadata.
-        Replaces rpc_register_task.
-        """
-        if not self.governor:
-            return jsonify({"error": "GovernanceManager not initialized"}), 500
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+        data = request.get_json() or {}
 
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No JSON data"}), 400
+        group = data.get('group_path') or data.get('group')
+        if not group: return jsonify({"error": "Missing group"}), 400
 
-        # Expects: group_path (or group), list_url (optional), name (optional)
-        group_path = data.get('group_path') or data.get('group')  # Compatibility
-        if not group_path:
-            return jsonify({"error": "Missing group_path"}), 400
-
-        list_url = data.get('list_url') or data.get('url')  # Compatibility
-        friendly_name = data.get('name')
-
-        self.governor.register_group_metadata(group_path, list_url, friendly_name)
+        self.governor.register_group_metadata(
+            group_path=group,
+            list_url=data.get('list_url') or data.get('url'),
+            friendly_name=data.get('name')
+        )
         return jsonify({"status": "registered"})
 
     def rpc_should_crawl(self):
-        """
-        Unified check logic. No more TaskType distinction needed in arguments.
-        """
-        if not self.governor:
-            return jsonify({"error": "GovernanceManager not initialized"}), 500
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+        data = request.get_json() or {}
+        if 'url' not in data: return jsonify({"error": "Missing url"}), 400
 
-        data = request.get_json()
-        if not data or 'url' not in data:
-            return jsonify({"error": "Missing url"}), 400
-
-        # Max retries can be passed, or default to 3
-        max_retries = data.get('max_retries', 3)
-
-        result = self.governor.should_crawl(data['url'], max_retries)
-        return jsonify({"should_crawl": result})
+        should = self.governor.should_crawl(data['url'], data.get('max_retries', 3))
+        return jsonify({"should_crawl": should})
 
     def rpc_report_result(self):
-        """
-        Maps to _handle_task_finish using Fallback Mode (log_id=None).
-        Stateless reporting for external scripts.
-        """
-        if not self.governor:
-            return jsonify({"error": "GovernanceManager not initialized"}), 500
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+        data = request.get_json() or {}
+        if not all(k in data for k in ['url', 'group_path', 'status']):
+            return jsonify({"error": "Missing fields"}), 400
 
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No JSON data"}), 400
+        spider = data.get('spider') or self.governor._extract_spider_name(data['group_path'])
 
-        required = ['url', 'group_path', 'status']
-        for f in required:
-            if f not in data:
-                return jsonify({"error": f"Missing {f}"}), 400
-
-        # Auto-extract spider name if not provided (Governor handles it, but we can pass explicit)
-        spider_name = data.get('spider')
-        if not spider_name:
-            # Let Governor extract from group_path
-            spider_name = self.governor._extract_spider_name(data['group_path'])
-
-        # Stateless call: We don't have a log_id from a previous session,
-        # so we pass None. Governor will create a new log entry + update status.
+        # Stateless call (log_id=None)
         self.governor._handle_task_finish(
             log_id=None,
             url=data['url'],
-            spider=spider_name,
+            spider=spider,
             group_path=data['group_path'],
-            status=Status(data['status']),
+            status=int(data['status']),  # Ensure int
             duration=data.get('duration', 0.0),
             http_code=data.get('http_code', 0),
             state_msg=data.get('error_msg') or data.get('state_msg'),
             file_path=data.get('file_path')
         )
         return jsonify({"status": "acked"})
-
-
-# ----------------------------------------------------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    # Example usage
-    gov = GovernanceManager()
-    backend = CrawlerGovernanceBackend(gov, host="0.0.0.0", port=8002)
-    backend.start_service(blocking=True)

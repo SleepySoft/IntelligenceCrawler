@@ -3,9 +3,10 @@ import time
 import json
 import logging
 import sqlite3
+import hashlib
 import datetime
 import threading
-import hashlib
+import collections
 from pathlib import Path
 from enum import IntEnum, Enum
 from typing import Optional, Union, List, Dict
@@ -37,6 +38,7 @@ class ControlSignal(Enum):
 
 DEFAULT_DB_PATH = "data/db/governance.db"
 DEFAULT_FILES_PATH = "data/files"
+MAX_MEMORY_EVENTS = 10000
 
 
 def _normalize_group_path(raw_input: Union[str, List[str], None]) -> str:
@@ -354,6 +356,11 @@ class GovernanceManager:
     """
     Central Controller for Spider Governance.
     Manages State, Storage, and Flow Control.
+
+    Refactored Logic:
+    - Uses a Ring Buffer (deque) to cache the latest N task events in memory.
+    - Queries use Memory if the time range is covered by the buffer.
+    - Falls back to DB if the time range exceeds memory history.
     """
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH, files_path: str = DEFAULT_FILES_PATH):
@@ -366,15 +373,29 @@ class GovernanceManager:
 
         self.stats_lock = threading.RLock()
         self.session_start_time = time.time()
+
+        # --- Memory Cache (The "Hot" Subset of DB) ---
+
+        # 1. Event Ring Buffer
+        # Stores event dictionaries. This mirrors the 'crawl_log' table.
+        # Contains BOTH Running and Finished events.
+        self.event_buffer = collections.deque(maxlen=MAX_MEMORY_EVENTS)
+
+        # 2. Active Event Lookup
+        # Key: log_id (int) -> Value: Reference to the dict object inside self.event_buffer
+        # This allows O(1) retrieval to update status from RUNNING -> SUCCESS/FAIL.
+        self.active_events_map: Dict[int, dict] = {}
+
         self.known_anchors = set()
 
-        self._reset_memory_stats()
-
-        # Preload anchors from DB to allow tracking immediately after restart
+        # Preload anchors from DB (Structure only, not stats)
         rows = self.db.fetch_all("SELECT list_url FROM task_groups WHERE list_url IS NOT NULL")
         with self.stats_lock:
             for r in rows:
                 self.known_anchors.add(r['list_url'])
+
+        # Ensure DB has index for time-based queries
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_log_created ON crawl_log(created_at)")
 
         logger.info(f"Governance Manager initialized. Signal: {self._control_signal}")
 
@@ -543,124 +564,101 @@ class GovernanceManager:
     def _handle_task_start(self, url: str, spider: str, group: str) -> int:
         """
         Called when transaction starts.
-        1. Insert into Log (Created State), return Log ID.
-        2. Update Status to RUNNING.
+        Updated: Now stores 'url' and 'spider' in memory for rich monitoring.
         """
-        url_hash = self._hash(url)
-
-        # 1. Insert Log (Audit Trail)
+        # 1. DB Insert (Log)
         cursor = self.db.execute("""
             INSERT INTO crawl_log (url, group_path, spider_name, status, created_at)
             VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
         """, (url, group, spider, Status.RUNNING))
         log_id = cursor.lastrowid
 
-        # 2. Update Status (Dashboard)
+        # 2. DB Upsert (Status)
         self.db.execute("""
             INSERT INTO crawl_status (url, url_hash, group_path, spider_name, status, last_run_at)
             VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(url) DO UPDATE SET
-                status = ?,
-                spider_name = ?,
-                last_run_at = CURRENT_TIMESTAMP
-        """, (url, url_hash, group, spider, Status.RUNNING, Status.RUNNING, spider))
+                status = ?, spider_name = ?, last_run_at = CURRENT_TIMESTAMP
+        """, (url, self._hash(url), group, spider, Status.RUNNING, Status.RUNNING, spider))
 
-        # 2. 内存统计更新 (Running +1)
+        # 3. Memory Update (Rich Object)
         with self.stats_lock:
-            self.global_stats['running'] += 1
+            event_obj = {
+                'id': log_id,  # Track ID
+                'ts': time.time(),
+                'url': url,  # <--- Added for display
+                'spider': spider,  # <--- Added for filtering
+                'group_path': group,
+                'status': int(Status.RUNNING),
+                'duration': 0.0,  # Placeholder
+                'is_anchor': url in self.known_anchors
+            }
 
-            if group not in self.group_stats:
-                self.group_stats[group] = {'total': 0, 'success': 0, 'failed': 0, 'running': 0}
-            self.group_stats[group]['running'] += 1
+            self.event_buffer.append(event_obj)
+            self.active_events_map[log_id] = event_obj
 
         return log_id
 
     def _handle_task_finish(self, log_id, url, spider, group_path, status, duration, http_code, state_msg, file_path):
         """
         Called when transaction ends.
-        1. Update Log entry.
-        2. Update Status table (handle retries).
+        1. Update DB.
+        2. Retrieve event from Memory Map and perform In-Place Update.
+        3. Clean up Map to prevent leaks.
         """
-        # 1. Close Log Entry
+        # 1. DB Update
         if log_id:
-            self.db.execute("""
-                UPDATE crawl_log 
-                SET status = ?, duration = ?, http_code = ? 
-                WHERE id = ?
-            """, (status, duration, http_code, log_id))
+            self.db.execute("UPDATE crawl_log SET status=?, duration=?, http_code=? WHERE id=?",
+                            (status, duration, http_code, log_id))
         else:
-            # Fallback if log_id missing
-            self.db.execute("""
-                INSERT INTO crawl_log (url, group_path, spider_name, status, http_code, duration)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (url, group_path, spider, status, http_code, duration))
+            self.db.execute(
+                "INSERT INTO crawl_log (url, group_path, spider_name, status, http_code, duration) VALUES (?,?,?,?,?,?)",
+                (url, group_path, spider, status, http_code, duration))
 
-        # 2. Update Current Status
-        # Increment retry if TEMP_FAIL, else reset retry count
+        # 2. Update crawl_status...
         retry_inc = 1 if status == Status.TEMP_FAIL else 0
-        retry_reset_clause = "retry_count = 0," if status != Status.TEMP_FAIL else ""
+        retry_reset = "retry_count = 0," if status != Status.TEMP_FAIL else ""
+        self.db.execute(
+            f"UPDATE crawl_status SET status=?, duration=?, http_code=?, state_msg=?, file_path=?, spider_name=?, {retry_reset} retry_count = retry_count + ? WHERE url=?",
+            (status, duration, http_code, state_msg, file_path, spider, retry_inc, url))
 
-        self.db.execute(f"""
-            UPDATE crawl_status 
-            SET status = ?,
-                duration = ?,
-                http_code = ?,
-                state_msg = ?,
-                file_path = ?,
-                spider_name = ?,
-                {retry_reset_clause}
-                retry_count = retry_count + ?
-            WHERE url = ?
-        """, (status, duration, http_code, state_msg, file_path, spider, retry_inc, url))
-
-        # 2. 内存统计更新
+        # 3. Memory Update (In-Place)
         with self.stats_lock:
-            # Running -1
-            self.global_stats['running'] = max(0, self.global_stats['running'] - 1)
-            if group_path not in self.group_stats:
-                self.group_stats[group_path] = {'total': 0, 'success': 0, 'failed': 0, 'running': 0}
-            self.group_stats[group_path]['running'] = max(0, self.group_stats[group_path]['running'] - 1)
+            if log_id in self.active_events_map:
+                event_obj = self.active_events_map[log_id]
+                event_obj['status'] = int(status)
+                event_obj['duration'] = duration
+                event_obj['state_msg'] = state_msg  # Optional: add error msg for UI
 
-            # Counters +1
-            self.global_stats['total'] += 1
-            self.group_stats[group_path]['total'] += 1
-
-            if status == Status.SUCCESS:
-                self.global_stats['success'] += 1
-                self.group_stats[group_path]['success'] += 1
-            elif status in [Status.TEMP_FAIL, Status.PERM_FAIL]:
-                self.global_stats['failed'] += 1
-                self.group_stats[group_path]['failed'] += 1
-
-            # 2. 如果是 Anchor URL，更新 Anchor 专属统计
-            if url in self.known_anchors:
-                if url not in self.anchor_stats:
-                    self.anchor_stats[url] = {'total': 0, 'success': 0, 'failed': 0}
-
-                stats = self.anchor_stats[url]
-                stats['total'] += 1
-                if status == Status.SUCCESS:
-                    stats['success'] += 1
-                elif status in [Status.TEMP_FAIL, Status.PERM_FAIL]:
-                    stats['failed'] += 1
-
-        if status == Status.SUCCESS:
-            logger.info(f"[{group_path}] SUCCESS: {url}")
-        elif status != Status.SKIPPED:
-            logger.warning(f"[{group_path}] FAIL({status.name}): {url}")
+                # Cleanup reference from active map
+                del self.active_events_map[log_id]
+            else:
+                # Edge case: Task started before reset, finished after reset.
+                # Or stateless report. Add to buffer now.
+                event_obj = {
+                    'ts': time.time(),
+                    'url': url,
+                    'spider': spider,
+                    'group_path': group_path,
+                    'status': int(status),
+                    'duration': duration,
+                    'state_msg': state_msg,
+                    'is_anchor': url in self.known_anchors
+                }
+                self.event_buffer.append(event_obj)
 
     def reset_statistics(self):
+        """
+        Resets the session view.
+        Clears both the timeline buffer and the active lookup map.
+        Active tasks will continue to run, but their 'Finish' updates
+        will be ignored by memory stats (since they are removed from map).
+        """
         logger.info("Session statistics reset by user.")
-        self._reset_memory_stats()
-
-    def _reset_memory_stats(self):
         with self.stats_lock:
             self.session_start_time = time.time()
-            self.global_stats = {'total': 0, 'success': 0, 'failed': 0, 'running': 0}
-            self.group_stats = {}
-            # 专门统计 Anchor 的内存计数器
-            # Key: URL, Value: {total, success, failed}
-            self.anchor_stats = {}
+            self.event_buffer.clear()
+            self.active_events_map.clear()
 
     # --- 5. Flow Control & Signals ---
 
@@ -711,66 +709,277 @@ class GovernanceManager:
             remaining = end_time - time.time()
             time.sleep(min(0.1, remaining))
 
-    # --- 6. Dashboard Statistics (Optimized) ---
+    # --- 6. Dashboard Statistics (Unified Logic) ---
 
-    def get_dashboard_summary(self, spider_filter: str = None) -> List[Dict]:
+    def _get_aggregated_stats(self, since_time: Optional[datetime.datetime]) -> Dict[str, Dict]:
         """
-        Merge DB Metadata (Structure) + Memory Stats (Counters)
+        Helper: Aggregates statistics for all groups.
+
+        Strategy:
+        1. Memory Hit: If 'since_time' is covered by our memory ring buffer,
+           we aggregate purely in Python. This includes 'RUNNING' tasks because
+           they are now synchronized in the buffer.
+        2. Memory Miss: If 'since_time' is older than our buffer history,
+           we query the DB. The DB also contains 'RUNNING' rows (inserted at start).
+
+        Returns:
+            Dict: { group_path: {'total': int, 'success': int, 'failed': int, 'running': int} }
         """
-        # 1. 从 DB 获取结构 (Groups & Anchor URLs)
-        # 这保证了即使 reset 了统计，组的列表依然存在，只是数字变 0
+        use_db = False
+        target_ts = since_time.timestamp() if since_time else 0
+        events_source = []
+
+        # Step 1: Determine Source (Thread-Safe)
+        with self.stats_lock:
+            if not since_time:
+                # Case A: No time filter -> Use full memory buffer (Fastest)
+                events_source = list(self.event_buffer)
+            elif len(self.event_buffer) == 0:
+                # Case B: Buffer empty (fresh start) -> Must use DB
+                use_db = True
+            else:
+                # Case C: Check if buffer covers the requested time range
+                oldest_ts = self.event_buffer[0]['ts']
+                if target_ts >= oldest_ts:
+                    # Cache Hit: Filter events in memory
+                    events_source = [e for e in self.event_buffer if e['ts'] > target_ts]
+                else:
+                    # Cache Miss: Requested time is too old -> Use DB
+                    use_db = True
+
+        stats_map = {}
+
+        # Step 2: Aggregation
+        if not use_db:
+            # --- Path A: In-Memory Aggregation ---
+            for e in events_source:
+                gp = e['group_path']
+                st = e['status']
+
+                if gp not in stats_map:
+                    stats_map[gp] = {'total': 0, 'success': 0, 'failed': 0, 'running': 0}
+
+                # In Memory, Total = Finished + Running
+                stats_map[gp]['total'] += 1
+
+                if st == Status.SUCCESS:
+                    stats_map[gp]['success'] += 1
+                elif st == Status.RUNNING:
+                    stats_map[gp]['running'] += 1
+                elif st in [Status.TEMP_FAIL, Status.PERM_FAIL]:
+                    stats_map[gp]['failed'] += 1
+
+        else:
+            # --- Path B: Database Aggregation ---
+            # DB 'crawl_log' contains rows for RUNNING status (inserted at task start).
+            rows = self.db.fetch_all("""
+                SELECT group_path, status, COUNT(*) as cnt
+                FROM crawl_log
+                WHERE created_at > ?
+                GROUP BY group_path, status
+            """, (since_time,))
+
+            for r in rows:
+                gp = r['group_path']
+                st = r['status']
+                count = r['cnt']
+
+                if gp not in stats_map:
+                    stats_map[gp] = {'total': 0, 'success': 0, 'failed': 0, 'running': 0}
+
+                stats_map[gp]['total'] += count
+
+                if st == Status.SUCCESS:
+                    stats_map[gp]['success'] += count
+                elif st == Status.RUNNING:
+                    stats_map[gp]['running'] += count
+                elif st in [Status.TEMP_FAIL, Status.PERM_FAIL]:
+                    stats_map[gp]['failed'] += count
+
+        return stats_map
+
+    def get_dashboard_summary(self, spider_filter: str = None, since_time: datetime.datetime = None) -> List[Dict]:
+        """
+        Constructs the full dashboard view for the Frontend.
+
+        Components:
+        1. Metadata: Static group structure (always from DB task_groups).
+        2. Stats: Dynamic counters (from Memory or DB, depending on time).
+        3. Anchor Status: Persistent state of the Seed/List URL (from DB crawl_status).
+        """
+
+        # 1. Fetch Structure (Task Groups)
         groups = self.db.fetch_all("SELECT group_path, list_url, name FROM task_groups")
 
-        # 2. 从 DB 获取 Anchor 状态 (Anchor 状态是持久的，不应随 Session 重置而消失)
+        # 2. Get Dynamic Statistics (Smart Cache Logic)
+        stats_map = self._get_aggregated_stats(since_time)
+
+        # 3. Fetch Anchor/List URL Status
+        # We need the current state (e.g., Next Run Time) of the entry points.
         list_urls = [g['list_url'] for g in groups if g['list_url']]
         list_url_map = {}
+
         if list_urls:
             placeholders = ','.join(['?'] * len(list_urls))
-            url_rows = self.db.fetch_all(f"""
+            params = list(list_urls)
+
+            sql = """
                 SELECT url, status, last_run_at, next_run_at, http_code, state_msg 
-                FROM crawl_status WHERE url IN ({placeholders})
-            """, tuple(list_urls))
+                FROM crawl_status 
+                WHERE url IN ({})
+            """
+
+            # If viewing a specific time window, we filter anchors that haven't run recently.
+            # This helps the UI highlight only active groups.
+            if since_time:
+                sql += " AND last_run_at > ?"
+                params.append(since_time)
+
+            url_rows = self.db.fetch_all(sql.format(placeholders), tuple(params))
             list_url_map = {row['url']: dict(row) for row in url_rows}
 
-        # 3. 组装 (使用内存中的 group_stats)
+        # 4. Assemble Final Result
         result = []
-        with self.stats_lock: # Read lock
-            for g in groups:
-                g_path = g['group_path']
-                if spider_filter and not g_path.startswith(spider_filter): continue
+        for g in groups:
+            g_path = g['group_path']
 
-                # 注入 Anchor 的内存统计数据
-                # 这样前端既有持久化的 l_status (State)，也有内存的 session_stats (Counters)
-                mem_stats = self.group_stats.get(g_path, {'total':0, 'success':0, 'running':0, 'failed':0})
+            # Apply optional spider filter (e.g., 'spider/news')
+            if spider_filter and not g_path.startswith(spider_filter):
+                continue
 
-                l_url = g['list_url']
-                l_status = list_url_map.get(l_url)
+            # Retrieve stats (Default to zero if no activity found)
+            current_stats = stats_map.get(g_path, {'total': 0, 'success': 0, 'failed': 0, 'running': 0})
 
-                anchor_session_stats = self.anchor_stats.get(
-                    l_url, {'total': 0, 'success': 0, 'failed': 0}) if l_url else None
-                if l_status:
-                    l_status['url'] = l_url
-                    l_status['session_stats'] = anchor_session_stats
+            # Retrieve Anchor Status
+            l_url = g['list_url']
+            l_status = list_url_map.get(l_url)  # Will be None if filtered by time
 
-                result.append({
-                    'group_path': g_path,
-                    'name': g['name'],
-                    'stats': mem_stats,         # <--- Memory Data
-                    'list_url_status': l_status # <--- DB Data (Persistent State)
-                })
+            result.append({
+                'group_path': g_path,
+                'name': g['name'],
+                'stats': current_stats,
+                'list_url_status': l_status
+            })
 
         return result
 
-    def get_session_stats(self):
-        with self.stats_lock:
-            # 计算简单的成功率
-            total = self.global_stats['total']
-            rate = 0
-            if total > 0:
-                rate = round((self.global_stats['success'] / total) * 100, 1)
+    def get_session_stats(self, since_time: datetime.datetime = None):
+        """
+        Returns global counts. Uses the same Memory/DB logic.
+        """
+        stats_map = self._get_aggregated_stats(since_time)
 
-            return {
-                **self.global_stats,
-                'success_rate': rate,
-                'session_start': self.session_start_time
-            }
+        # Flatten the grouped map into global totals
+        total = 0
+        success = 0
+        failed = 0
+
+        for gp_data in stats_map.values():
+            total += gp_data['total']
+            success += gp_data['success']
+            failed += gp_data['failed']
+
+        rate = round((success / total) * 100, 1) if total > 0 else 0
+
+        # Determine the effective start time
+        if since_time:
+            ref_time = since_time
+        else:
+            with self.stats_lock:
+                ref_time = self.session_start_time
+
+        return {
+            'total': total,
+            'success': success,
+            'failed': failed,
+            'success_rate': rate,
+            'session_start': ref_time
+        }
+
+    # --- 7. Data Access Interfaces for Backend (New) ---
+
+    def get_pending_count(self) -> int:
+        """Get the current depth of the queue (Persistent State)."""
+        row = self.db.fetch_one("SELECT count(*) as cnt FROM crawl_status WHERE status=?", (Status.PENDING,))
+        return row['cnt'] if row else 0
+
+    def get_logs(self, limit: int = 100, status: Optional[int] = None,
+                 spider: Optional[str] = None, since_time: Optional[datetime.datetime] = None) -> List[Dict]:
+        """Fetch streaming logs with filtering."""
+        query = "SELECT * FROM crawl_log"
+        params = []
+        conditions = []
+
+        if status is not None:
+            conditions.append("status = ?")
+            params.append(status)
+        if spider:
+            conditions.append("spider_name = ?")
+            params.append(spider)
+        if since_time:
+            conditions.append("created_at > ?")
+            params.append(since_time)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.db.fetch_all(query, tuple(params))
+        return [dict(row) for row in rows]
+
+    def get_snapshot_path(self, url_hash: str) -> Optional[str]:
+        """Retrieve file path by URL hash."""
+        row = self.db.fetch_one("SELECT file_path FROM crawl_status WHERE url_hash = ?", (url_hash,))
+        return row['file_path'] if row else None
+
+    def get_recent_statuses(self, limit: int = 100, spider: Optional[str] = None, status: Optional[int] = None) -> List[
+        Dict]:
+        """
+        Fetch 'Live' statuses directly from Memory Buffer.
+        No DB access. No Time parameter needed.
+
+        Logic:
+        1. Iterate Memory Buffer in Reverse (Newest first).
+        2. Deduplicate by URL (Show only the LATEST state of a URL).
+        3. Apply Filters.
+        """
+        result = []
+        seen_urls = set()
+
+        with self.stats_lock:
+            # Iterate backwards to get the most recent events first
+            # list(reversed(deque)) is efficient enough for typical buffer sizes (e.g. 5k)
+            for event in reversed(self.event_buffer):
+                if len(result) >= limit:
+                    break
+
+                url = event.get('url')
+
+                # Deduplication: Only show the latest status for a specific URL
+                if url in seen_urls:
+                    continue
+
+                # Filters
+                if spider and event.get('spider') != spider:
+                    continue
+                if status is not None and event.get('status') != status:
+                    continue
+
+                seen_urls.add(url)
+
+                # Create a clean copy for the view
+                view_item = {
+                    'url': url,
+                    'status': event['status'],
+                    'spider_name': event.get('spider'),
+                    'group_path': event['group_path'],
+                    'last_run_at': datetime.datetime.fromtimestamp(event['ts']).isoformat(),
+                    # Convert timestamp to ISO for Frontend
+                    'duration': event.get('duration', 0),
+                    'state_msg': event.get('state_msg')
+                }
+                result.append(view_item)
+
+        return result
