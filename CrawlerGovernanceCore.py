@@ -26,6 +26,7 @@ class Status(IntEnum):
     PERM_FAIL = 4  # Parse error, 404 (Non-retryable)
     SKIPPED = 5  # Skipped by logic (e.g., filtered content)
     STOPPED = 6  # Manually stopped or interrupted
+    CACHED = 7
 
 
 class ControlSignal(Enum):
@@ -180,13 +181,17 @@ class DatabaseHandler:
 
             self.conn.commit()
 
-    def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+    def execute(self, sql: str, params: tuple = ()) -> int:
+        """
+        Executes SQL and returns the lastrowid (safe within lock).
+        """
         with self.lock:
             try:
                 cur = self.conn.cursor()
                 cur.execute(sql, params)
                 self.conn.commit()
-                return cur  # Return cursor to access lastrowid
+                # 在锁释放前获取 ID
+                return cur.lastrowid
             except sqlite3.Error as e:
                 logger.error(f"DB Error: {e} | SQL: {sql}")
                 raise
@@ -304,6 +309,10 @@ class CrawlSession:
     def skip(self, state_msg="Skipped"):
         self.state_msg = state_msg
         self._finalize(Status.SKIPPED)
+
+    def cached(self, state_msg="Cached"):
+        self.state_msg = state_msg
+        self._finalize(Status.CACHED)
 
     def ignore(self):
         self._finished = True
@@ -576,11 +585,12 @@ class GovernanceManager:
         Updated: Now stores 'url' and 'spider' in memory for rich monitoring.
         """
         # 1. DB Insert (Log)
-        cursor = self.db.execute("""
-            INSERT INTO crawl_log (url, group_path, spider_name, status, created_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (url, group, spider, Status.RUNNING))
-        log_id = cursor.lastrowid
+        log_id = self.db.execute("""
+                    INSERT INTO crawl_log (url, group_path, spider_name, status, created_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (url, group, spider, Status.RUNNING))
+
+        if log_id is None: log_id = 0
 
         # 2. DB Upsert (Status)
         self.db.execute("""
@@ -593,10 +603,10 @@ class GovernanceManager:
         # 3. Memory Update (Rich Object)
         with self.stats_lock:
             event_obj = {
-                'id': log_id,  # Track ID
+                'id': log_id,           # Track ID
                 'ts': time.time(),
-                'url': url,  # <--- Added for display
-                'spider': spider,  # <--- Added for filtering
+                'url': url,             # <--- Added for display
+                'spider': spider,       # <--- Added for filtering
                 'group_path': group,
                 'status': int(Status.RUNNING),
                 'duration': 0.0,  # Placeholder
@@ -604,7 +614,9 @@ class GovernanceManager:
             }
 
             self.event_buffer.append(event_obj)
-            self.active_events_map[log_id] = event_obj
+            # 只有有效的 ID 才放入 Map
+            if log_id > 0:
+                self.active_events_map[log_id] = event_obj
 
         return log_id
 
@@ -633,6 +645,10 @@ class GovernanceManager:
 
         # 3. Memory Update (In-Place)
         with self.stats_lock:
+            if log_id and log_id not in self.active_events_map:
+                # 明明有 ID，但 Map 里找不到，导致变成了僵尸
+                logger.warning(f"Orphaned Finish Task: {url} (ID: {log_id}). Start event not found in active map.")
+
             if log_id in self.active_events_map:
                 event_obj = self.active_events_map[log_id]
                 event_obj['status'] = int(status)

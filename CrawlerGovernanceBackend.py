@@ -11,7 +11,6 @@ from flask import Flask, jsonify, request, send_file, render_template
 
 # Import the core logic (Assuming relative import or package structure)
 # from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager, Status
-# For context compatibility, we assume GovernanceManager and Status are available.
 
 self_path = os.path.dirname(os.path.abspath(__file__))
 
@@ -113,6 +112,7 @@ class CrawlerGovernanceBackend:
     def get_dashboard_stats(self):
         """
         Aggregated Global Statistics.
+        Supports 'since' parameter for incremental updates.
         """
         if not self.governor: return jsonify({}), 500
 
@@ -137,6 +137,8 @@ class CrawlerGovernanceBackend:
     def get_groups(self):
         """
         Group Hierarchy & Statistics.
+        Supports 'since' parameter.
+        Only returns groups registered in the current runtime session.
         """
         if not self.governor: return jsonify({"error": "Init failed"}), 500
 
@@ -150,6 +152,7 @@ class CrawlerGovernanceBackend:
     def get_logs(self):
         """
         Streaming Logs.
+        Supports 'since' parameter to fetch new logs only.
         """
         if not self.governor: return jsonify({"error": "Init failed"}), 500
 
@@ -162,12 +165,11 @@ class CrawlerGovernanceBackend:
         logs = self.governor.get_logs(limit=limit, status=status, spider=spider, since_time=since_time)
         return jsonify(logs)
 
-        # Inside CrawlerGovernanceBackend class...
-
     def get_recent_statuses(self):
         """
         Latest URL Statuses (Live Memory View).
         Fetch the latest activity directly from memory.
+        NO 'since' parameter used here as it returns a snapshot of the current state.
         """
         if not self.governor: return jsonify({"error": "Init failed"}), 500
 
@@ -176,7 +178,6 @@ class CrawlerGovernanceBackend:
         status = request.args.get('status', type=int)
 
         # Removed 'since_time' logic as this is a memory snapshot
-
         # Delegate to Governor (Memory Only)
         statuses = self.governor.get_recent_statuses(limit=limit, spider=spider, status=status)
         return jsonify(statuses)

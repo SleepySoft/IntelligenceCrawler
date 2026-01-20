@@ -155,7 +155,7 @@
                     <button @click="selectedGroup = null; currentGroupData = null; refreshData()" class="text-xs text-gray-500 hover:text-white px-2 py-1 rounded hover:bg-gray-700">✕ Close Group</button>
                 </div>
 
-<div class="p-4 flex items-start gap-4">
+                <div class="p-4 flex items-start gap-4">
 
                     <div class="flex-1 bg-gray-800/50 border border-gray-700 rounded p-3 flex gap-3">
                         <div class="shrink-0 pt-1">
@@ -251,7 +251,7 @@
                 <div class="flex gap-1 bg-gray-950 rounded p-1 border border-gray-700">
                     <button @click="logFilter = 'ALL'; refreshData()" :class="logFilter === 'ALL' ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'" class="text-xxs px-2 py-0.5 rounded transition">All</button>
                     <button @click="logFilter = 2; refreshData()" :class="logFilter === 2 ? 'bg-emerald-900/50 text-emerald-200' : 'text-gray-500 hover:text-emerald-400'" class="text-xxs px-2 py-0.5 rounded transition">OK</button>
-                    <button @click="logFilter = 3; refreshData()" :class="logFilter === 3 ? 'bg-red-900/50 text-red-200' : 'text-gray-500 hover:text-red-400'" class="text-xxs px-2 py-0.5 rounded transition">Err</button>
+                    <button @click="logFilter = 'ERR'; refreshData()" :class="logFilter === 'ERR' ? 'bg-red-900/50 text-red-200' : 'text-gray-500 hover:text-red-400'" class="text-xxs px-2 py-0.5 rounded transition">Err</button>
                 </div>
             </div>
 
@@ -282,7 +282,8 @@
                                           'bg-emerald-900/20 text-emerald-400 border-emerald-900/50': row.status === 2,
                                           'bg-yellow-900/20 text-yellow-400 border-yellow-900/50': row.status === 3,
                                           'bg-red-900/20 text-red-400 border-red-900/50': row.status === 4,
-                                          'bg-gray-800 text-gray-500 border-gray-700': row.status === 0 || row.status === 5
+                                          'bg-gray-800 text-gray-500 border-gray-700': row.status === 0 || row.status === 5 || row.status === 6,
+                                          'bg-purple-900/20 text-purple-400 border-purple-900/50': row.status === 7
                                       }"
                                       x-text="getStatusLabel(row.status)">
                                 </span>
@@ -430,38 +431,9 @@
                             this.currentGroupData = this.rawGroups.find(g => g.group_path === this.selectedGroup);
                         }
 
-                        // --- FETCH LIST DATA ---
-                        let endpoint = this.viewMode === 'LATEST' ? '/api/status/recent' : '/api/logs';
-                        let query = `${endpoint}?limit=100`;
-
-                        // 优先级：如果有 specificUrlFilter，则忽略 Group 和 Status 筛选，直接查这个 URL
-                        // 注意：这需要后端支持 url 参数，或者我们在前端过滤
-                        // 为了演示简单，我们在前端过滤 (Backend 暂无 url 参数)
-
-                        if (this.selectedGroup && !this.specificUrlFilter) {
-                            const spider = this.selectedGroup.split('/')[0];
-                            query += `&spider=${encodeURIComponent(spider)}`;
-                        }
-                        if (this.logFilter !== 'ALL' && !this.specificUrlFilter) {
-                            query += `&status=${this.logFilter}`;
-                        }
-
-                        const res = await fetch(query);
-                        let rawRows = await res.json();
-
-                        // Client-side Filtering
-                        if (this.specificUrlFilter) {
-                            // 精确匹配 URL
-                            rawRows = rawRows.filter(r => r.url === this.specificUrlFilter);
-                        } else if (this.selectedGroup) {
-                            // Group 匹配
-                            rawRows = rawRows.filter(r => r.group_path === this.selectedGroup);
-                        }
-
-                        // 修改 listData 的处理逻辑，增加 "is_new_session" 标记
-                        // 在 refreshData 函数的 NORMALIZE DATA 部分：
-
-                        this.listData = this.processRows(rawRows);
+                        // --- 复用 fetchLogsOnly 的逻辑，或者把上面的逻辑复制过来 ---
+                        // 为了代码整洁，直接调用 fetchLogsOnly 即可，但 refreshData 需要等待它
+                        await this.fetchLogsOnly();
 
                     } catch (e) { console.error("Data Fetch Error:", e); }
                 },
@@ -531,23 +503,36 @@
                 // 只刷新右侧日志（轻量级）
                 async fetchLogsOnly() {
                     let endpoint = this.viewMode === 'LATEST' ? '/api/status/recent' : '/api/logs';
-                    let query = `${endpoint}?limit=100`;
+
+                    // [修改点1] 调大 Limit，防止错误被成功刷屏挤掉
+                    let query = `${endpoint}?limit=500`;
 
                     if (this.selectedGroup) {
                         const spider = this.selectedGroup.split('/')[0];
                         query += `&spider=${encodeURIComponent(spider)}`;
                     }
-                    if (this.logFilter !== 'ALL') query += `&status=${this.logFilter}`;
+
+                    // [修改点2] 只有当 filter 是具体数字时才传给后端
+                    // 如果是 'ERR'，我们不传 status，拉回来前端自己筛
+                    if (this.logFilter !== 'ALL' && this.logFilter !== 'ERR') {
+                        query += `&status=${this.logFilter}`;
+                    }
 
                     try {
                         const res = await fetch(query);
                         let rawRows = await res.json();
 
+                        // Group Filter
                         if (this.selectedGroup) {
                             rawRows = rawRows.filter(r => r.group_path === this.selectedGroup);
                         }
 
-                        // 复用数据清洗逻辑
+                        // [修改点3] 前端实现复合过滤 'ERR' (Status >= 3)
+                        if (this.logFilter === 'ERR') {
+                            // 只要不是 PENDING(0), RUNNING(1), SUCCESS(2)，都算异常
+                            rawRows = rawRows.filter(r => r.status >= 3);
+                        }
+
                         this.listData = this.processRows(rawRows);
 
                     } catch(e) { console.error(e); }
@@ -608,7 +593,7 @@
                 },
 
                 getStatusLabel(s) {
-                    const map = {0:'PEND',1:'RUN',2:'OK',3:'RETRY',4:'FAIL',5:'SKIP',6:'STOP'};
+                    const map = {0:'PEND',1:'RUN',2:'OK',3:'RETRY',4:'FAIL',5:'SKIP',6:'STOP',7:'CACHED'};
                     return map[s] || s;
                 },
 
