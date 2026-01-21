@@ -746,6 +746,7 @@ class GovernanceManager:
            they are now synchronized in the buffer.
         2. Memory Miss: If 'since_time' is older than our buffer history,
            we query the DB. The DB also contains 'RUNNING' rows (inserted at start).
+        Includes Performance Metrics (Min/Max/Avg Time) and detailed counts.
 
         Returns:
             Dict: { group_path: {'total': int, 'success': int, 'failed': int, 'running': int} }
@@ -776,29 +777,70 @@ class GovernanceManager:
 
         # Step 2: Aggregation
         if not use_db:
-            # --- Path A: In-Memory Aggregation ---
+            # --- Path A: In-Memory Aggregation (Enhanced) ---
             for e in events_source:
                 gp = e['group_path']
                 st = e['status']
+                dur = e.get('duration', 0) or 0
 
                 if gp not in stats_map:
-                    stats_map[gp] = {'total': 0, 'success': 0, 'failed': 0, 'running': 0}
+                    stats_map[gp] = {
+                        # Basic Counters
+                        'total': 0, 'running': 0, 'success': 0, 'failed': 0,
+                        'valid': 0,  # Success + Cached
+                        'real_fail': 0,  # Fail + Retry + Stop (Excluding Skip)
 
-                # In Memory, Total = Finished + Running
-                stats_map[gp]['total'] += 1
+                        # Performance Metrics
+                        'perf': {'min': 999999, 'max': 0, 'sum': 0, 'count': 0}
+                    }
 
-                if st == Status.SUCCESS:
-                    stats_map[gp]['success'] += 1
-                elif st == Status.RUNNING:
-                    stats_map[gp]['running'] += 1
-                elif st in [Status.TEMP_FAIL, Status.PERM_FAIL]:
-                    stats_map[gp]['failed'] += 1
+                s_dict = stats_map[gp]
+                s_dict['total'] += 1
+
+                # 1. Update Basic Counters
+                if st == Status.RUNNING:
+                    s_dict['running'] += 1
+                elif st == Status.SUCCESS:
+                    s_dict['success'] += 1
+                    s_dict['valid'] += 1
+                elif st == Status.CACHED:
+                    s_dict['valid'] += 1  # Cached counts as valid
+                elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
+                    s_dict['failed'] += 1
+                    s_dict['real_fail'] += 1
+
+                # 2. Update Performance Metrics (Only for finished tasks with duration)
+                # Exclude PENDING(0), RUNNING(1), SKIPPED(5) from timing stats if needed
+                if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED] and dur > 0:
+                    p = s_dict['perf']
+                    if dur < p['min']: p['min'] = dur
+                    if dur > p['max']: p['max'] = dur
+                    p['sum'] += dur
+                    p['count'] += 1
+
+            # Finalize Averages for Memory
+            for gp, data in stats_map.items():
+                p = data['perf']
+                if p['count'] > 0:
+                    p['avg'] = round(p['sum'] / p['count'], 3)
+                    if p['min'] == 999999: p['min'] = 0
+                else:
+                    p['avg'] = 0
+                    p['min'] = 0
 
         else:
-            # --- Path B: Database Aggregation ---
-            # DB 'crawl_log' contains rows for RUNNING status (inserted at task start).
+            # --- Path B: Database Aggregation (Enhanced) ---
+            # Complex aggregation via SQL for performance
+            # Note: This query calculates min/max/avg directly in DB
             rows = self.db.fetch_all("""
-                SELECT group_path, status, COUNT(*) as cnt
+                SELECT 
+                    group_path, 
+                    status, 
+                    COUNT(*) as cnt,
+                    MIN(duration) as min_dur,
+                    MAX(duration) as max_dur,
+                    SUM(duration) as sum_dur,
+                    COUNT(CASE WHEN duration > 0 THEN 1 END) as dur_cnt
                 FROM crawl_log
                 WHERE created_at > ?
                 GROUP BY group_path, status
@@ -810,16 +852,52 @@ class GovernanceManager:
                 count = r['cnt']
 
                 if gp not in stats_map:
-                    stats_map[gp] = {'total': 0, 'success': 0, 'failed': 0, 'running': 0}
+                    stats_map[gp] = {
+                        'total': 0, 'running': 0, 'success': 0, 'failed': 0,
+                        'valid': 0, 'real_fail': 0,
+                        'perf': {'min': 999999, 'max': 0, 'sum': 0, 'count': 0}
+                    }
 
-                stats_map[gp]['total'] += count
+                s_dict = stats_map[gp]
+                s_dict['total'] += count
 
-                if st == Status.SUCCESS:
-                    stats_map[gp]['success'] += count
-                elif st == Status.RUNNING:
-                    stats_map[gp]['running'] += count
-                elif st in [Status.TEMP_FAIL, Status.PERM_FAIL]:
-                    stats_map[gp]['failed'] += count
+                # Counters
+                if st == Status.RUNNING:
+                    s_dict['running'] += count
+                elif st == Status.SUCCESS:
+                    s_dict['success'] += count
+                    s_dict['valid'] += count
+                elif st == Status.CACHED:
+                    s_dict['valid'] += count
+                elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
+                    s_dict['failed'] += count
+                    s_dict['real_fail'] += count
+
+                # Performance (Aggregate DB results into memory dict)
+                # Only consider finished states for timing
+                if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED]:
+                    p = s_dict['perf']
+                    # Safe logic for DB returning None
+                    row_min = r['min_dur'] or 0
+                    row_max = r['max_dur'] or 0
+                    row_sum = r['sum_dur'] or 0
+                    row_cnt = r['dur_cnt'] or 0
+
+                    if row_cnt > 0:
+                        if row_min < p['min'] and row_min > 0: p['min'] = row_min
+                        if row_max > p['max']: p['max'] = row_max
+                        p['sum'] += row_sum
+                        p['count'] += row_cnt
+
+            # Finalize Averages for DB Results
+            for gp, data in stats_map.items():
+                p = data['perf']
+                if p['count'] > 0:
+                    p['avg'] = round(p['sum'] / p['count'], 3)
+                    if p['min'] == 999999: p['min'] = 0
+                else:
+                    p['avg'] = 0;
+                    p['min'] = 0
 
         return stats_map
 
@@ -892,6 +970,121 @@ class GovernanceManager:
             })
 
         return result
+
+    # def get_memory_chart_data(self, bucket_minutes: int = 1) -> List[Dict]:
+    #     """
+    #     NEW: Aggregates memory buffer events into time buckets for the frontend chart.
+    #     Returns a time-series: [{time: '10:00', valid: 10, fail: 2}, ...]
+    #     FIXED: Now correctly uses bucket_minutes to group events.
+    #     """
+    #     timeline = {}
+    #
+    #     # Ensure bucket_minutes is at least 1 to avoid division by zero
+    #     bucket_minutes = max(1, bucket_minutes)
+    #
+    #     with self.stats_lock:
+    #         for e in self.event_buffer:
+    #             # 1. Convert timestamp to datetime
+    #             dt = datetime.datetime.fromtimestamp(e['ts'])
+    #
+    #             # 2. Round down to the nearest bucket
+    #             # Example: If bucket=5 and time is 10:07, discard=2, result=10:05
+    #             discard = dt.minute % bucket_minutes
+    #             dt_floored = dt - datetime.timedelta(minutes=discard, seconds=dt.second, microseconds=dt.microsecond)
+    #
+    #             # 3. Generate Key (HH:MM)
+    #             time_key = dt_floored.strftime("%H:%M")
+    #
+    #             if time_key not in timeline:
+    #                 # 'ts' is used for sorting later (store the timestamp of the bucket start)
+    #                 timeline[time_key] = {'time': time_key, 'ts': dt_floored.timestamp(), 'valid': 0, 'fail': 0}
+    #
+    #             st = e['status']
+    #
+    #             # Logic: "Valid vs Failed" (Excluding Skipped/Pending/Running)
+    #             if st in [Status.SUCCESS, Status.CACHED]:
+    #                 timeline[time_key]['valid'] += 1
+    #             elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
+    #                 timeline[time_key]['fail'] += 1
+    #
+    #     # Convert dict to sorted list (Sort by timestamp to ensure correct time order across hours/days)
+    #     sorted_data = sorted(timeline.values(), key=lambda x: x['ts'])
+    #
+    #     # Remove the internal 'ts' helper field before returning to frontend
+    #     for item in sorted_data:
+    #         del item['ts']
+    #
+    #     return sorted_data
+
+    def get_log_trend_stats(self, start_ts: float, end_ts: float, bucket_minutes: int = 1, group_filter: str = None) -> List[Dict]:
+        """
+        Generates Trend Chart Data from DB Logs.
+        """
+        # Ensure bucket is valid
+        bucket_seconds = max(1, bucket_minutes) * 60
+
+        # SQL Logic:
+        # P1, P2: used for bucket calculation
+        # P3, P4: used for time range filtering
+
+        # We need to fill in the SELECT part explicitly to match the params order
+        sql = """
+            SELECT 
+                (CAST(strftime('%s', created_at) AS INTEGER) / ?) * ? as bucket_ts,
+                status,
+                COUNT(*) as cnt
+            FROM crawl_log
+            WHERE created_at BETWEEN datetime(?, 'unixepoch') AND datetime(?, 'unixepoch')
+        """
+
+        # Initial params matching the 4 placeholders above
+        params = [bucket_seconds, bucket_seconds, start_ts, end_ts]
+
+        # Dynamic Filter
+        if group_filter:
+            sql += " AND group_path = ?"
+            params.append(group_filter)
+
+        # Grouping and Ordering
+        sql += """
+            GROUP BY bucket_ts, status
+            ORDER BY bucket_ts ASC
+        """
+
+        # Correctly pass the dynamic params list
+        rows = self.db.fetch_all(sql, tuple(params))
+
+        # Process raw rows into structured timeline
+        timeline = {}
+
+        for r in rows:
+            ts = r['bucket_ts']
+            if not ts: continue  # Skip invalid dates
+
+            st = r['status']
+            cnt = r['cnt']
+
+            if ts not in timeline:
+                # Initialize bucket
+                time_str = datetime.datetime.fromtimestamp(ts).strftime("%H:%M")
+                timeline[ts] = {
+                    'ts': ts,
+                    'time': time_str,
+                    'valid': 0,
+                    'fail': 0,
+                    'total': 0
+                }
+
+            bucket = timeline[ts]
+            bucket['total'] += cnt
+
+            if st in [Status.SUCCESS, Status.CACHED]:
+                bucket['valid'] += cnt
+            elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
+                bucket['fail'] += cnt
+
+        # Convert to sorted list
+        return sorted(timeline.values(), key=lambda x: x['ts'])
 
     def get_session_stats(self, since_time: datetime.datetime = None):
         """
@@ -1013,3 +1206,51 @@ class GovernanceManager:
                 result.append(view_item)
 
         return result
+
+    def get_db_history_stats(self, days: int = 7) -> Dict:
+        """
+        NEW: Queries DB for long-term historical statistics.
+        Returns data for:
+        1. Daily Bar Chart (Date vs Valid/Fail)
+        2. Status Breakdown Pie Chart
+        """
+
+        # 1. Daily Stats
+        # SQLite 'date' function extracts YYYY-MM-DD
+        rows_daily = self.db.fetch_all("""
+            SELECT 
+                date(created_at) as day, 
+                status, 
+                COUNT(*) as cnt
+            FROM crawl_log 
+            WHERE created_at >= date('now', ?)
+            GROUP BY day, status
+            ORDER BY day ASC
+        """, (f'-{days} days',))
+
+        daily_map = {}
+        for r in rows_daily:
+            day = r['day']
+            st = r['status']
+            cnt = r['cnt']
+
+            if day not in daily_map:
+                daily_map[day] = {'date': day, 'valid': 0, 'fail': 0, 'total': 0}
+
+            daily_map[day]['total'] += cnt
+
+            if st in [Status.SUCCESS, Status.CACHED]:
+                daily_map[day]['valid'] += cnt
+            elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
+                daily_map[day]['fail'] += cnt
+
+        # 2. Overall DB Status Distribution (Snapshot of crawl_status table)
+        rows_status = self.db.fetch_all("""
+            SELECT status, COUNT(*) as cnt FROM crawl_status GROUP BY status
+        """)
+        status_dist = {r['status']: r['cnt'] for r in rows_status}
+
+        return {
+            'daily_trend': list(daily_map.values()),
+            'current_status_dist': status_dist
+        }

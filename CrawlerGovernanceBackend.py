@@ -77,6 +77,11 @@ class CrawlerGovernanceBackend:
                               maybe_wrap(self.get_recent_statuses), methods=['GET'])
         self.app.add_url_rule(build_url('/api/snapshot/<url_hash>'), 'get_snapshot', maybe_wrap(self.get_snapshot),
                               methods=['GET'])
+        self.app.add_url_rule(build_url('/api/dashboard/chart'), 'get_trend_chart',
+                              maybe_wrap(self.get_trend_chart), methods=['GET'])
+
+        self.app.add_url_rule(build_url('/api/history/stats'), 'get_history_stats',
+                              maybe_wrap(self.get_history_stats), methods=['GET'])
 
         # Control APIs (POST)
         self.app.add_url_rule(build_url('/api/control/<action>'), 'system_control', maybe_wrap(self.system_control),
@@ -198,6 +203,46 @@ class CrawlerGovernanceBackend:
             return jsonify({"error": "File on disk missing"}), 404
 
         return send_file(file_path)
+
+    def get_trend_chart(self):
+        """
+        API for Time-Series Trend Chart (From DB).
+        Query Params:
+          - start: float (timestamp, optional, default: 1 hour ago)
+          - end: float (timestamp, optional, default: now)
+          - bucket: int (minutes, default: 1)
+        """
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+
+        now = time.time()
+
+        # Default view: Last 1 Hour
+        start_ts = request.args.get('start', now - 3600, type=float)
+        end_ts = request.args.get('end', now, type=float)
+        bucket = request.args.get('bucket', 1, type=int)
+
+        # 调用新的 DB 聚合方法
+        group = request.args.get('group')
+        data = self.governor.get_log_trend_stats(
+            start_ts=start_ts,
+            end_ts=end_ts,
+            bucket_minutes=bucket,
+            group_filter=group
+        )
+
+        return jsonify(data)
+
+    def get_history_stats(self):
+        """
+        API for Historical Stats Sub-page.
+        Query Params:
+          - days: int (default 7)
+        """
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+
+        days = request.args.get('days', 7, type=int)
+        data = self.governor.get_db_history_stats(days=days)
+        return jsonify(data)
 
     def reset_stats(self):
         if self.governor:

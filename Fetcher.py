@@ -435,7 +435,7 @@ class PlaywrightFetcher(Fetcher):
                             content = self._fetch_page_content(data)
                             result_queue.put(content)
                         except Exception as e:
-                            self._log(f"[Worker Error] Job failed: {e}")
+                            self._log(f"[Worker Error] Job failed: {str(e)}")
                             result_queue.put(e)
                         finally:
                             request_count += 1
