@@ -164,10 +164,12 @@ class CrawlerGovernanceBackend:
         limit = request.args.get('limit', 100, type=int)
         status = request.args.get('status', type=int)
         spider = request.args.get('spider')
-        since_time = self._get_since_time()
+
+        since = request.args.get('since', type=float)
+        until = request.args.get('until', type=float)
 
         # Delegate to Governor
-        logs = self.governor.get_logs(limit=limit, status=status, spider=spider, since_time=since_time)
+        logs = self.governor.get_logs(spider_name=spider, status=status, limit=limit, since_time=since, until_time=until)
         return jsonify(logs)
 
     def get_recent_statuses(self):

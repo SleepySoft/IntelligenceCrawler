@@ -730,7 +730,7 @@ class PlaywrightFetcher(Fetcher):
                     self._log("[Worker Debug] Closing context in finally block.")
                     context.close()
                 except Exception as e:
-                    self._log(f"[Worker Warning] Error closing context: {e}")
+                    self._log(f"[Worker Warning] Error closing context: {str(e)}")
 
     def close(self):
         """

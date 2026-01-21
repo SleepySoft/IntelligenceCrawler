@@ -33,6 +33,14 @@
             content: ''; position: absolute; left: 10px; top: 0; bottom: 0;
             width: 1px; background-color: #374151; opacity: 0.3;
         }
+        input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+            filter: invert(1); /* 黑色变白色 */
+            opacity: 0.6;
+            cursor: pointer;
+        }
+        input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover {
+            opacity: 1;
+        }
     </style>
 </head>
 <body class="bg-gray-950 text-gray-300 h-screen overflow-hidden flex flex-col font-sans" x-data="dashboard()">
@@ -240,19 +248,60 @@
             </div>
 
             <div class="px-4 py-2 bg-gray-900 border-b border-gray-800 flex justify-between items-center shrink-0">
+
                 <div class="flex items-center gap-4">
                     <div class="flex bg-gray-950 p-1 rounded border border-gray-700">
-                        <button @click="switchView('LATEST')" class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent" :class="viewMode === 'LATEST' ? 'bg-gray-800 text-emerald-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'"><span>◎ Latest State</span></button>
-                        <button @click="switchView('HISTORY')" class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent" :class="viewMode === 'HISTORY' ? 'bg-gray-800 text-blue-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'"><span>≣ Log History</span></button>
-                        <button @click="switchView('STATS')" class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent" :class="viewMode === 'STATS' ? 'bg-gray-800 text-purple-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'"><span>📊 Statistics</span></button>
+                        <button @click="switchView('LATEST')"
+                                class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent"
+                                :class="viewMode === 'LATEST' ? 'bg-gray-800 text-emerald-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'">
+                            <span>◎ Latest State</span>
+                        </button>
+                        <button @click="switchView('HISTORY')"
+                                class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent"
+                                :class="viewMode === 'HISTORY' ? 'bg-gray-800 text-blue-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'">
+                            <span>≣ Log History</span>
+                        </button>
+                        <button @click="switchView('STATS')"
+                                class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent"
+                                :class="viewMode === 'STATS' ? 'bg-gray-800 text-purple-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'">
+                            <span>📊 Statistics</span>
+                        </button>
                     </div>
-                    <span class="text-xxs text-gray-500 border-l border-gray-800 pl-4 uppercase tracking-wide" x-show="viewMode === 'LATEST'">Live Snapshot (De-duplicated)</span>
-                    <span class="text-xxs text-gray-500 border-l border-gray-800 pl-4 uppercase tracking-wide" x-show="viewMode === 'HISTORY'">Historical Event Stream</span>
+
+                    <span class="text-xxs text-gray-500 border-l border-gray-800 pl-4 uppercase tracking-wide" x-show="viewMode === 'LATEST'">
+                        Live Snapshot (De-duplicated)
+                    </span>
+                    <span class="text-xxs text-gray-500 border-l border-gray-800 pl-4 uppercase tracking-wide" x-show="viewMode === 'HISTORY'">
+                        Historical Event Stream
+                    </span>
                 </div>
-                <div class="flex gap-1 bg-gray-950 rounded p-1 border border-gray-700">
-                    <button @click="logFilter = 'ALL'; refreshData()" :class="logFilter === 'ALL' ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'" class="text-xxs px-2 py-0.5 rounded transition">All</button>
-                    <button @click="logFilter = 2; refreshData()" :class="logFilter === 2 ? 'bg-emerald-900/50 text-emerald-200' : 'text-gray-500 hover:text-emerald-400'" class="text-xxs px-2 py-0.5 rounded transition">OK</button>
-                    <button @click="logFilter = 'ERR'; refreshData()" :class="logFilter === 'ERR' ? 'bg-red-900/50 text-red-200' : 'text-gray-500 hover:text-red-400'" class="text-xxs px-2 py-0.5 rounded transition">Err</button>
+
+                <div class="flex items-center gap-4">
+
+                    <div class="flex items-center gap-2" x-show="viewMode === 'HISTORY'" x-cloak>
+                        <div class="flex items-center bg-gray-950 rounded p-1 border border-gray-700">
+                            <span class="text-[10px] text-gray-500 px-2">From</span>
+                            <input type="datetime-local" x-model="historyStart"
+                                   class="bg-transparent text-xs text-gray-300 border-none focus:ring-0 p-0 h-5 w-32 font-mono outline-none">
+                        </div>
+
+                        <div class="flex items-center bg-gray-950 rounded p-1 border border-gray-700">
+                            <span class="text-[10px] text-gray-500 px-2">To</span>
+                            <input type="datetime-local" x-model="historyEnd"
+                                   class="bg-transparent text-xs text-gray-300 border-none focus:ring-0 p-0 h-5 w-32 font-mono outline-none">
+                        </div>
+
+                        <button @click="fetchLogsOnly()"
+                                class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded border border-gray-700 transition h-[26px]">
+                            Apply
+                        </button>
+                    </div>
+
+                    <div class="flex gap-1 bg-gray-950 rounded p-1 border border-gray-700">
+                        <button @click="logFilter = 'ALL'; refreshData()" :class="logFilter === 'ALL' ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'" class="text-xxs px-2 py-0.5 rounded transition">All</button>
+                        <button @click="logFilter = 2; refreshData()" :class="logFilter === 2 ? 'bg-emerald-900/50 text-emerald-200' : 'text-gray-500 hover:text-emerald-400'" class="text-xxs px-2 py-0.5 rounded transition">OK</button>
+                        <button @click="logFilter = 'ERR'; refreshData()" :class="logFilter === 'ERR' ? 'bg-red-900/50 text-red-200' : 'text-gray-500 hover:text-red-400'" class="text-xxs px-2 py-0.5 rounded transition">Err</button>
+                    </div>
                 </div>
             </div>
 
@@ -368,6 +417,10 @@
                 trendData: [],
                 maxTrendValue: 1,
                 trendSummary: { total: 0, valid: 0, fail: 0, failRate: 0 },
+
+                // Log History Time Filters
+                historyStart: '',
+                historyEnd: '',
 
                 // State
                 collapsedPaths: new Set(),
@@ -531,6 +584,16 @@
                             this.currentGroupData = this.rawGroups.find(g => g.group_path === this.selectedGroup);
                         }
 
+                        // [修改] 修复 1970 问题
+                        // 只有当 stats.session_start 有真实值，且 historyStart 还没被设置时，才去设置它
+                        if (this.stats.session_start && !this.historyStart) {
+                            const formatted = this.formatForInput(this.stats.session_start);
+                            if (formatted) {
+                                this.historyStart = formatted;
+                                this._lastSessionStart = this.stats.session_start;
+                            }
+                        }
+
                         // --- 复用 fetchLogsOnly 的逻辑，或者把上面的逻辑复制过来 ---
                         // 为了代码整洁，直接调用 fetchLogsOnly 即可，但 refreshData 需要等待它
                         // 根据当前模式决定刷新什么
@@ -607,12 +670,43 @@
                     this.treeNodes.forEach(n => { if (n.hasChildren) this.collapsedPaths.add(n.path); });
                 },
 
+                // Helper: ISO String -> input[type="datetime-local"] format
+                formatForInput(iso) {
+                    if (!iso) return '';
+                    try {
+                        const d = new Date(iso);
+                        // 检查是否是有效日期，且年份不是 1970
+                        if (isNaN(d.getTime()) || d.getFullYear() <= 1970) return '';
+
+                        // 转换为本地时区的 ISO 字符串 (处理时区偏移)
+                        // 方法：把时间减去时区偏差，再转 ISO
+                        const tzOffset = d.getTimezoneOffset() * 60000; // in ms
+                        const localISOTime = new Date(d.getTime() - tzOffset).toISOString().slice(0, 16);
+                        return localISOTime;
+                    } catch(e) { return ''; }
+                },
+
                 // 只刷新右侧日志（轻量级）
                 async fetchLogsOnly() {
                     let endpoint = this.viewMode === 'LATEST' ? '/api/status/recent' : '/api/logs';
 
-                    // [修改点1] 调大 Limit，防止错误被成功刷屏挤掉
+                    // 基础 Limit
                     let query = `${endpoint}?limit=500`;
+
+                    // 如果是 HISTORY 模式，且有时间，附加时间参数
+                    if (this.viewMode === 'HISTORY') {
+                        if (this.historyStart) {
+                            const ts = new Date(this.historyStart).getTime() / 1000;
+                            query += `&since=${ts}`;
+                            // 如果指定了开始时间，通常我们希望看该时间段内的所有日志，
+                            // 所以可以尝试调大 limit，或者干脆去掉 limit (这就看你后端怎么处理了)
+                            // query += `&limit=2000`; // Optional
+                        }
+                        if (this.historyEnd) {
+                            const ts = new Date(this.historyEnd).getTime() / 1000;
+                            query += `&until=${ts}`;
+                        }
+                    }
 
                     if (this.selectedGroup) {
                         const spider = this.selectedGroup.split('/')[0];

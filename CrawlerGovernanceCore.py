@@ -1161,30 +1161,37 @@ class GovernanceManager:
         row = self.db.fetch_one("SELECT count(*) as cnt FROM crawl_status WHERE status=?", (Status.PENDING,))
         return row['cnt'] if row else 0
 
-    def get_logs(self, limit: int = 100, status: Optional[int] = None,
-                 spider: Optional[str] = None, since_time: Optional[datetime.datetime] = None) -> List[Dict]:
-        """Fetch streaming logs with filtering."""
-        query = "SELECT * FROM crawl_log"
+    def get_logs(self, spider_name=None, status=None, limit=100, since_time=None, until_time=None):
+        """
+        Retrieves recent logs with filters.
+        UPDATED: Converts Row objects to dicts for JSON serialization.
+        """
+        sql = "SELECT * FROM crawl_log WHERE 1=1"
         params = []
-        conditions = []
+
+        if spider_name:
+            sql += " AND group_path LIKE ?"
+            params.append(f"{spider_name}%")
 
         if status is not None:
-            conditions.append("status = ?")
+            sql += " AND status = ?"
             params.append(status)
-        if spider:
-            conditions.append("spider_name = ?")
-            params.append(spider)
+
         if since_time:
-            conditions.append("created_at > ?")
+            sql += " AND created_at >= datetime(?, 'unixepoch')"
             params.append(since_time)
 
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
+        if until_time:
+            sql += " AND created_at <= datetime(?, 'unixepoch')"
+            params.append(until_time)
 
-        query += " ORDER BY id DESC LIMIT ?"
+        sql += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
 
-        rows = self.db.fetch_all(query, tuple(params))
+        # 获取原始 Row 对象列表
+        rows = self.db.fetch_all(sql, tuple(params))
+
+        # [关键修复]：使用列表推导式将每个 Row 对象转为标准 dict
         return [dict(row) for row in rows]
 
     def get_snapshot_path(self, url_hash: str) -> Optional[str]:
