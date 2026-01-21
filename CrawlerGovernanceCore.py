@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import logging
@@ -219,6 +220,58 @@ class DatabaseHandler:
 
 # --- File Storage Handler ---
 
+def sanitize_filename(filename: str, replacement: str = "_", max_length: int = 200) -> str:
+    """
+    清洗字符串以用作文件名。
+
+    Args:
+        filename: 原始文件名字符串
+        replacement: 非法字符的替换符，默认为下划线
+        max_length: 文件名最大长度截断（Windows路径通常限制260，预留后缀和路径空间建议设为200）
+
+    Returns:
+        清洗后的合法文件名字符串
+    """
+    if not filename:
+        return "untitled"
+
+    # 1. 替换非法字符 (Windows/Linux/Mac 通用集)
+    # < > : " / \ | ? * 以及 ASCII 控制字符 (0-31)
+    # 网页标题中常见的竖线 | 和冒号 : 会被替换
+    illegal_pattern = r'[<>:"/\\|?*\x00-\x1f]'
+    clean_name = re.sub(illegal_pattern, replacement, filename)
+
+    # 2. 去除首尾空白字符
+    clean_name = clean_name.strip()
+
+    # 3. 避免文件名以 . 或空格结尾 (Windows 可能会自动删除这些，导致找不到文件)
+    clean_name = clean_name.rstrip(". ")
+
+    # 4. 处理 Windows 保留文件名 (如 CON, PRN, AUX, NUL, COM1...LPT9)
+    # 如果文件名是保留字，或者是保留字加扩展名 (如 con.txt)，在前面加个下划线
+    base_name = clean_name.split('.')[0].upper()
+    reserved_names = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    }
+    if base_name in reserved_names:
+        clean_name = f"{replacement}{clean_name}"
+
+    # 5. 长度截断
+    # 某些文件系统对文件名长度有限制 (通常 255 字节)，中文占 3 字节，保险起见按字符数截断
+    if len(clean_name) > max_length:
+        clean_name = clean_name[:max_length]
+        # 截断后再次去除可能出现的末尾空格或点
+        clean_name = clean_name.rstrip(". ")
+
+    # 6. 兜底：如果清洗后为空 (例如原文件名全是 ???)，给个默认名
+    if not clean_name:
+        clean_name = "untitled_file"
+
+    return clean_name
+
+
 class StorageHandler:
     """
     Decoupled file storage.
@@ -239,7 +292,7 @@ class StorageHandler:
         if isinstance(content, str):
             content = content.encode('utf-8')
 
-        full_path = self.base_path / relative_path
+        full_path = self.base_path / sanitize_filename(relative_path)
 
         try:
             full_path.parent.mkdir(parents=True, exist_ok=True)
@@ -803,6 +856,9 @@ class GovernanceManager:
 
                 if st == Status.RUNNING:
                     t['running'] += 1
+                elif st in [Status.PENDING, Status.SKIPPED]:
+                    # Not count in total
+                    pass
                 else:
                     # Exclude 'running' state from 'total'
                     t['total'] += 1
@@ -832,6 +888,9 @@ class GovernanceManager:
                 for u_st in data['_unique_urls'].values():
                     if u_st == Status.RUNNING:
                         r['running'] += 1
+                    elif st in [Status.PENDING, Status.SKIPPED]:
+                        # Not count in total
+                        pass
                     else:
                         # Exclude 'running' state from 'total'
                         r['total'] += 1
@@ -1164,34 +1223,41 @@ class GovernanceManager:
     def get_logs(self, spider_name=None, status=None, limit=100, since_time=None, until_time=None):
         """
         Retrieves recent logs with filters.
-        UPDATED: Converts Row objects to dicts for JSON serialization.
+        Fixes 'ambiguous column name' error by specifying table alias 'l.'.
         """
-        sql = "SELECT * FROM crawl_log WHERE 1=1"
+        # 基础 SQL 包含别名 l (log) 和 s (status)
+        sql = """
+            SELECT l.*, s.url_hash 
+            FROM crawl_log l
+            LEFT JOIN crawl_status s ON l.url = s.url
+            WHERE 1=1
+        """
         params = []
 
         if spider_name:
-            sql += " AND group_path LIKE ?"
+            # 这里必须写 l.group_path，不能只写 group_path
+            sql += " AND l.group_path LIKE ?"
             params.append(f"{spider_name}%")
 
         if status is not None:
-            sql += " AND status = ?"
+            # 这里的 status 虽然通常只有 log 表有，但为了规范也建议加 l.
+            sql += " AND l.status = ?"
             params.append(status)
 
         if since_time:
-            sql += " AND created_at >= datetime(?, 'unixepoch')"
+            sql += " AND l.created_at >= datetime(?, 'unixepoch')"
             params.append(since_time)
 
         if until_time:
-            sql += " AND created_at <= datetime(?, 'unixepoch')"
+            sql += " AND l.created_at <= datetime(?, 'unixepoch')"
             params.append(until_time)
 
-        sql += " ORDER BY id DESC LIMIT ?"
+        sql += " ORDER BY l.id DESC LIMIT ?"
         params.append(limit)
 
-        # 获取原始 Row 对象列表
         rows = self.db.fetch_all(sql, tuple(params))
 
-        # [关键修复]：使用列表推导式将每个 Row 对象转为标准 dict
+        # 转为字典
         return [dict(row) for row in rows]
 
     def get_snapshot_path(self, url_hash: str) -> Optional[str]:

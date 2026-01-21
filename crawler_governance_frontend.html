@@ -187,11 +187,11 @@
 
                             <div class="flex items-center gap-4 text-xs bg-gray-900/50 p-1.5 rounded border border-gray-700/50">
                                 <span class="text-[10px] text-gray-500 uppercase">Session:</span>
-                                <div class="flex gap-2 font-mono">
-                                    <span title="Total Runs">Run:<span class="text-white" x-text="anchorStatus?.session_stats?.total || 0"></span></span>
-                                    <span title="Success">OK:<span class="text-emerald-400" x-text="anchorStatus?.session_stats?.success || 0"></span></span>
-                                    <span title="Failed">Err:<span class="text-red-400" x-text="anchorStatus?.session_stats?.failed || 0"></span></span>
-                                </div>
+                                    <div class="flex gap-2 font-mono">
+                                        <span title="Total Requests">Run:<span class="text-white" x-text="currentGroupData?.stats.traffic?.total || 0"></span></span>
+                                        <span title="Success Requests">OK:<span class="text-emerald-400" x-text="currentGroupData?.stats.traffic?.success || 0"></span></span>
+                                        <span title="Failed Requests">Err:<span class="text-red-400" x-text="currentGroupData?.stats.traffic?.failed || 0"></span></span>
+                                    </div>
                                 <div class="flex-1 text-right">
                                     <button @click="filterLogsByUrl(anchorStatus?.url)"
                                             class="text-[10px] bg-blue-900/30 text-blue-300 border border-blue-800 hover:bg-blue-800 px-2 py-0.5 rounded transition">
@@ -335,7 +335,12 @@
                             </div>
                             <div class="col-span-6 overflow-hidden">
                                 <div class="flex items-center gap-2">
-                                    <div class="truncate text-gray-300 group-hover:text-white cursor-pointer flex-1" :title="row.url" x-text="row.url"></div>
+                                    <a :href="row.url" target="_blank"
+                                       class="truncate text-gray-300 group-hover:text-emerald-400 hover:underline cursor-pointer flex-1 transition-colors"
+                                       :title="row.url"
+                                       x-text="row.url"
+                                       @click.stop>
+                                    </a>
                                     <span x-show="viewMode === 'LATEST' && row.retry_count > 0" class="text-[9px] bg-yellow-900/30 text-yellow-500 border border-yellow-900/50 px-1 rounded flex items-center gap-1 shrink-0"><span>↺</span> <span x-text="row.retry_count"></span></span>
                                 </div>
                                 <div x-show="!selectedGroup" class="truncate text-[9px] text-gray-600" x-text="row.group_path"></div>
@@ -851,14 +856,16 @@
                 },
 
                 viewSnapshot(log) {
-                    // 这里假设 log 对象里有 file_path (从 status 表或 log 表获取)
-                    // 后端需要返回 hash 或 path。
-                    // 临时演示：
+                    // Debug
+                    console.log("View Snapshot:", log.url, log.url_hash);
+
                     if (log.url_hash) {
                          this.previewUrl = `/api/snapshot/${log.url_hash}`;
                          this.modalOpen = true;
                     } else {
-                        alert("No snapshot hash available.");
+                        // 如果后端改了之后还是没有 hash，说明这个 URL 从未在 status 表里记录过（可能是很久以前的僵尸日志）
+                        // 此时我们可以尝试用纯 URL 提示用户
+                        alert("Snapshot unavailable: No hash found for this log entry.");
                     }
                 }
             }
