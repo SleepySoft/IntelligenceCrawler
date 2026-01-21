@@ -70,10 +70,10 @@
 
         <div class="flex gap-4 text-xs">
             <div class="flex items-center gap-2" title="Total requests in this session">
-                <span class="text-gray-500 uppercase text-[10px]">Session Total</span>
+                <span class="text-gray-500 uppercase text-[10px]">Session Requests</span>
                 <span class="font-mono font-bold text-gray-200" x-text="stats.total_requests || 0"></span>
             </div>
-            </div>
+        </div>
     </header>
 
     <main class="flex-1 flex overflow-hidden">
@@ -119,12 +119,12 @@
                         <template x-if="node.isRealGroup && node.data">
                             <div class="flex items-center ml-2 shrink-0">
                                 <div class="flex text-[9px] font-mono border border-gray-700/50 rounded overflow-hidden">
-                                    <div class="px-1.5 py-0.5 text-black font-bold"
-                                         :class="getRateColor(node.data.stats)">
-                                        <span x-text="calculateRate(node.data.stats)"></span>
+                                    <div class="px-1.5 py-0.5 font-bold"
+                                         :class="getRateColor(node.data.stats.results)">
+                                        <span x-text="calculateRate(node.data.stats.results)"></span>
                                     </div>
                                     <div class="px-1.5 py-0.5 bg-gray-700 text-gray-300 min-w-[24px] text-center">
-                                        <span x-text="node.data.stats.total || 0"></span>
+                                        <span x-text="node.data.stats.results?.total || 0"></span>
                                     </div>
                                 </div>
                             </div>
@@ -209,30 +209,29 @@
                     </div>
 
                     <div class="w-32 shrink-0 bg-gray-800/50 border border-gray-700 rounded p-3 flex flex-col justify-center">
-                        <div class="text-[10px] font-bold text-gray-500 uppercase mb-3 border-b border-gray-700 pb-1">Articles</div>
+                        <div class="text-[10px] font-bold text-gray-500 uppercase mb-3 border-b border-gray-700 pb-1">Items (Unique)</div>
                         <div class="grid grid-cols-2 gap-y-3 text-xs">
                             <div>
                                 <div class="text-gray-500 text-[9px] uppercase">Total</div>
-                                <div class="font-mono text-white" x-text="currentGroupData?.stats.total || 0"></div>
+                                <div class="font-mono text-white" x-text="currentGroupData?.stats.results?.total || 0"></div>
                             </div>
                             <div>
                                 <div class="text-gray-500 text-[9px] uppercase">Valid</div>
-                                <div class="font-mono text-emerald-400" x-text="currentGroupData?.stats.valid || 0"></div>
+                                <div class="font-mono text-emerald-400" x-text="currentGroupData?.stats.results?.success || 0"></div>
                             </div>
                         </div>
                     </div>
 
-                    <div class="w-40 shrink-0 bg-gray-800/50 border border-gray-700 rounded p-3 flex flex-col justify-center"
-                         x-show="currentGroupData?.stats.perf?.count > 0">
-                        <div class="text-[10px] font-bold text-gray-500 uppercase mb-3 border-b border-gray-700 pb-1">Performance</div>
+                    <div class="w-40 shrink-0 bg-gray-800/50 border border-gray-700 rounded p-3 flex flex-col justify-center">
+                        <div class="text-[10px] font-bold text-gray-500 uppercase mb-3 border-b border-gray-700 pb-1">Traffic & Perf</div>
                         <div class="grid grid-cols-2 gap-y-3 text-xs">
+                            <div>
+                                <div class="text-gray-500 text-[9px] uppercase">Requests</div>
+                                <div class="font-mono text-gray-400" x-text="currentGroupData?.stats.traffic?.total || 0"></div>
+                            </div>
                             <div>
                                 <div class="text-gray-500 text-[9px] uppercase">Avg Time</div>
                                 <div class="font-mono text-blue-300" x-text="(currentGroupData?.stats.perf?.avg || 0) + 's'"></div>
-                            </div>
-                            <div>
-                                <div class="text-gray-500 text-[9px] uppercase">Max Time</div>
-                                <div class="font-mono text-gray-400" x-text="(currentGroupData?.stats.perf?.max || 0) + 's'"></div>
                             </div>
                         </div>
                     </div>
@@ -686,15 +685,16 @@
 
                 // --- Stats & Formatting Helpers ---
 
-                calculateRate(stats) {
-                    if (!stats || !stats.total) return '0%';
-                    const rate = Math.round((stats.success / stats.total) * 100);
+                calculateRate(statsObj) {
+                    // 增加对 statsObj 的非空检查
+                    if (!statsObj || !statsObj.total) return '0%';
+                    const rate = Math.round((statsObj.success / statsObj.total) * 100);
                     return rate + '%';
                 },
 
-                getRateColor(stats) {
-                    if (!stats || !stats.total) return 'bg-gray-500 text-white';
-                    const rate = (stats.success / stats.total);
+                getRateColor(statsObj) {
+                    if (!statsObj || !statsObj.total) return 'bg-gray-500 text-white';
+                    const rate = (statsObj.success / statsObj.total);
                     if (rate >= 0.9) return 'bg-emerald-500 text-black';
                     if (rate >= 0.5) return 'bg-yellow-500 text-black';
                     return 'bg-red-500 text-white';

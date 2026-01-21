@@ -739,78 +739,79 @@ class GovernanceManager:
     def _get_aggregated_stats(self, since_time: Optional[datetime.datetime]) -> Dict[str, Dict]:
         """
         Helper: Aggregates statistics for all groups.
+        UPDATED: Calculates BOTH Traffic (Requests) and Results (Unique URLs).
 
-        Strategy:
-        1. Memory Hit: If 'since_time' is covered by our memory ring buffer,
-           we aggregate purely in Python. This includes 'RUNNING' tasks because
-           they are now synchronized in the buffer.
-        2. Memory Miss: If 'since_time' is older than our buffer history,
-           we query the DB. The DB also contains 'RUNNING' rows (inserted at start).
-        Includes Performance Metrics (Min/Max/Avg Time) and detailed counts.
-
-        Returns:
-            Dict: { group_path: {'total': int, 'success': int, 'failed': int, 'running': int} }
+        Returns structure per group:
+        {
+            'results': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
+            'traffic': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
+            'perf': {'min': 0, 'max': 0, 'avg': 0, 'sum': 0, 'count': 0}
+        }
         """
         use_db = False
         target_ts = since_time.timestamp() if since_time else 0
         events_source = []
 
-        # Step 1: Determine Source (Thread-Safe)
+        # 1. Determine Source (Memory vs DB)
         with self.stats_lock:
             if not since_time:
-                # Case A: No time filter -> Use full memory buffer (Fastest)
+                # Case A: Default View -> Memory
                 events_source = list(self.event_buffer)
             elif len(self.event_buffer) == 0:
-                # Case B: Buffer empty (fresh start) -> Must use DB
+                # Case B: Buffer Empty -> DB
                 use_db = True
             else:
-                # Case C: Check if buffer covers the requested time range
-                oldest_ts = self.event_buffer[0]['ts']
-                if target_ts >= oldest_ts:
-                    # Cache Hit: Filter events in memory
+                # Case C: Check if time is within buffer
+                if target_ts >= self.event_buffer[0]['ts']:
                     events_source = [e for e in self.event_buffer if e['ts'] > target_ts]
                 else:
-                    # Cache Miss: Requested time is too old -> Use DB
                     use_db = True
 
         stats_map = {}
 
-        # Step 2: Aggregation
+        # Helper to initialize the data structure
+        def init_stats():
+            return {
+                # [A] Result Stats (Snapshot/Unique) - For Tree View
+                'results': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
+
+                # [B] Traffic Stats (Throughput/Log) - For Header & Details
+                'traffic': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
+
+                # Performance Metrics
+                'perf': {'min': 999999, 'max': 0, 'sum': 0, 'count': 0, 'avg': 0},
+
+                # Internal helper for unique tracking (URL -> Last Status)
+                '_unique_urls': {}
+            }
+
         if not use_db:
-            # --- Path A: In-Memory Aggregation (Enhanced) ---
+            # --- Path A: In-Memory Aggregation ---
             for e in events_source:
                 gp = e['group_path']
                 st = e['status']
+                url = e.get('url')
                 dur = e.get('duration', 0) or 0
 
                 if gp not in stats_map:
-                    stats_map[gp] = {
-                        # Basic Counters
-                        'total': 0, 'running': 0, 'success': 0, 'failed': 0,
-                        'valid': 0,  # Success + Cached
-                        'real_fail': 0,  # Fail + Retry + Stop (Excluding Skip)
-
-                        # Performance Metrics
-                        'perf': {'min': 999999, 'max': 0, 'sum': 0, 'count': 0}
-                    }
+                    stats_map[gp] = init_stats()
 
                 s_dict = stats_map[gp]
-                s_dict['total'] += 1
 
-                # 1. Update Basic Counters
+                # 1. Update Traffic (Log Count)
+                t = s_dict['traffic']
+
                 if st == Status.RUNNING:
-                    s_dict['running'] += 1
-                elif st == Status.SUCCESS:
-                    s_dict['success'] += 1
-                    s_dict['valid'] += 1
-                elif st == Status.CACHED:
-                    s_dict['valid'] += 1  # Cached counts as valid
-                elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
-                    s_dict['failed'] += 1
-                    s_dict['real_fail'] += 1
+                    t['running'] += 1
+                else:
+                    # Exclude 'running' state from 'total'
+                    t['total'] += 1
+                    if st in [Status.SUCCESS, Status.CACHED]:
+                        t['success'] += 1
+                    elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
+                        t['failed'] += 1
 
-                # 2. Update Performance Metrics (Only for finished tasks with duration)
-                # Exclude PENDING(0), RUNNING(1), SKIPPED(5) from timing stats if needed
+                # 2. Update Performance (Finished tasks only)
                 if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED] and dur > 0:
                     p = s_dict['perf']
                     if dur < p['min']: p['min'] = dur
@@ -818,20 +819,44 @@ class GovernanceManager:
                     p['sum'] += dur
                     p['count'] += 1
 
-            # Finalize Averages for Memory
+                # 3. Track Unique State (Last Write Wins)
+                # Since events are ordered by time, the last one we see for a URL
+                # is its "Latest State" in this window.
+                if url:
+                    s_dict['_unique_urls'][url] = st
+
+            # 4. Finalize Unique Results & Averages
             for gp, data in stats_map.items():
+                # Process Unique URLs into Results counts
+                r = data['results']
+                for u_st in data['_unique_urls'].values():
+                    if u_st == Status.RUNNING:
+                        r['running'] += 1
+                    else:
+                        # Exclude 'running' state from 'total'
+                        r['total'] += 1
+                        if u_st in [Status.SUCCESS, Status.CACHED]:
+                            r['success'] += 1
+                        elif u_st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
+                            r['failed'] += 1
+
+                # Cleanup internal memory
+                del data['_unique_urls']
+
+                # Finalize Perf Avg
                 p = data['perf']
                 if p['count'] > 0:
                     p['avg'] = round(p['sum'] / p['count'], 3)
                     if p['min'] == 999999: p['min'] = 0
                 else:
-                    p['avg'] = 0
                     p['min'] = 0
 
         else:
-            # --- Path B: Database Aggregation (Enhanced) ---
-            # Complex aggregation via SQL for performance
-            # Note: This query calculates min/max/avg directly in DB
+            # --- Path B: Database Aggregation ---
+            # NOTE: For DB queries, calculating strictly "Unique" results over a time range
+            # is expensive (requires subqueries/window functions).
+            # We fallback 'results' to match 'traffic' or use basic counts.
+
             rows = self.db.fetch_all("""
                 SELECT 
                     group_path, 
@@ -852,32 +877,24 @@ class GovernanceManager:
                 count = r['cnt']
 
                 if gp not in stats_map:
-                    stats_map[gp] = {
-                        'total': 0, 'running': 0, 'success': 0, 'failed': 0,
-                        'valid': 0, 'real_fail': 0,
-                        'perf': {'min': 999999, 'max': 0, 'sum': 0, 'count': 0}
-                    }
+                    stats_map[gp] = init_stats()
 
                 s_dict = stats_map[gp]
-                s_dict['total'] += count
 
-                # Counters
+                # Update Traffic
+                t = s_dict['traffic']
+                t['total'] += count
+
                 if st == Status.RUNNING:
-                    s_dict['running'] += count
-                elif st == Status.SUCCESS:
-                    s_dict['success'] += count
-                    s_dict['valid'] += count
-                elif st == Status.CACHED:
-                    s_dict['valid'] += count
+                    t['running'] += count
+                elif st in [Status.SUCCESS, Status.CACHED]:
+                    t['success'] += count
                 elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
-                    s_dict['failed'] += count
-                    s_dict['real_fail'] += count
+                    t['failed'] += count
 
-                # Performance (Aggregate DB results into memory dict)
-                # Only consider finished states for timing
+                # Update Performance
                 if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED]:
                     p = s_dict['perf']
-                    # Safe logic for DB returning None
                     row_min = r['min_dur'] or 0
                     row_max = r['max_dur'] or 0
                     row_sum = r['sum_dur'] or 0
@@ -889,15 +906,20 @@ class GovernanceManager:
                         p['sum'] += row_sum
                         p['count'] += row_cnt
 
-            # Finalize Averages for DB Results
+            # Finalize DB Stats
             for gp, data in stats_map.items():
+                # Fallback: In DB mode, Results ~= Traffic
+                data['results'] = data['traffic'].copy()
+
                 p = data['perf']
                 if p['count'] > 0:
                     p['avg'] = round(p['sum'] / p['count'], 3)
                     if p['min'] == 999999: p['min'] = 0
                 else:
-                    p['avg'] = 0;
                     p['min'] = 0
+
+                # Cleanup unused
+                del data['_unique_urls']
 
         return stats_map
 
@@ -957,7 +979,12 @@ class GovernanceManager:
 
             # Retrieve stats
             # Note: Even if stats_map has data for old groups, we only grab the ones for active_groups
-            current_stats = stats_map.get(g_path, {'total': 0, 'success': 0, 'failed': 0, 'running': 0})
+            default_stats = {
+                'results': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
+                'traffic': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
+                'perf': {'min': 0, 'max': 0, 'avg': 0, 'count': 0}
+            }
+            current_stats = stats_map.get(g_path, default_stats)
 
             l_url = g['list_url']
             l_status = list_url_map.get(l_url)
@@ -1088,19 +1115,26 @@ class GovernanceManager:
 
     def get_session_stats(self, since_time: datetime.datetime = None):
         """
-        Returns global counts. Uses the same Memory/DB logic.
+        Returns global statistics.
+        UPDATED: Aggregates 'traffic' stats from the nested structure.
         """
+        # Get the nested stats map: { group: { 'traffic': {...}, 'results': {...} } }
         stats_map = self._get_aggregated_stats(since_time)
 
-        # Flatten the grouped map into global totals
+        # Flatten the grouped map into global totals (using TRAFFIC data)
         total = 0
         success = 0
         failed = 0
+        running = 0
 
         for gp_data in stats_map.values():
-            total += gp_data['total']
-            success += gp_data['success']
-            failed += gp_data['failed']
+            # Extract traffic dict, defaulting to empty if missing
+            t = gp_data.get('traffic', {})
+
+            total += t.get('total', 0)
+            success += t.get('success', 0)
+            failed += t.get('failed', 0)
+            running += t.get('running', 0)
 
         rate = round((success / total) * 100, 1) if total > 0 else 0
 
@@ -1115,6 +1149,7 @@ class GovernanceManager:
             'total': total,
             'success': success,
             'failed': failed,
+            'running': running,
             'success_rate': rate,
             'session_start': ref_time
         }

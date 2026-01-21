@@ -721,7 +721,7 @@ class PlaywrightFetcher(Fetcher):
         except Exception as e:
             # This outer catch block handles hard failures (like page.goto)
             # or failures during page.content()
-            self._log(f"[Worker Error] _fetch_page_content failed for {url}: {e}")
+            self._log(f"[Worker Error] _fetch_page_content failed for {url}: {str(e)}")
             raise e  # Re-raise to send back to main thread
 
         finally:
