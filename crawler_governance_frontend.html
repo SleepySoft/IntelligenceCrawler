@@ -33,8 +33,6 @@
             content: ''; position: absolute; left: 10px; top: 0; bottom: 0;
             width: 1px; background-color: #374151; opacity: 0.3;
         }
-        <div class="..."
-            :class="{ 'opacity-50 grayscale': !row.is_current_session }">
     </style>
 </head>
 <body class="bg-gray-950 text-gray-300 h-screen overflow-hidden flex flex-col font-sans" x-data="dashboard()">
@@ -245,31 +243,13 @@
             <div class="px-4 py-2 bg-gray-900 border-b border-gray-800 flex justify-between items-center shrink-0">
                 <div class="flex items-center gap-4">
                     <div class="flex bg-gray-950 p-1 rounded border border-gray-700">
-                        <button @click="switchView('LATEST')"
-                                class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent"
-                                :class="viewMode === 'LATEST' ? 'bg-gray-800 text-emerald-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'">
-                            <span>◎ Latest State</span>
-                        </button>
-                        <button @click="switchView('HISTORY')"
-                                class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent"
-                                :class="viewMode === 'HISTORY' ? 'bg-gray-800 text-blue-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'">
-                            <span>≣ Log History</span>
-                        </button>
-                        <button @click="switchView('STATS')"
-                                class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent"
-                                :class="viewMode === 'STATS' ? 'bg-gray-800 text-purple-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'">
-                            <span>📊 Statistics</span>
-                        </button>
+                        <button @click="switchView('LATEST')" class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent" :class="viewMode === 'LATEST' ? 'bg-gray-800 text-emerald-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'"><span>◎ Latest State</span></button>
+                        <button @click="switchView('HISTORY')" class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent" :class="viewMode === 'HISTORY' ? 'bg-gray-800 text-blue-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'"><span>≣ Log History</span></button>
+                        <button @click="switchView('STATS')" class="px-3 py-1 text-xs rounded transition-all flex items-center gap-2 border border-transparent" :class="viewMode === 'STATS' ? 'bg-gray-800 text-purple-400 border-gray-600 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-300'"><span>📊 Statistics</span></button>
                     </div>
-
-                    <span class="text-xxs text-gray-500 border-l border-gray-800 pl-4 uppercase tracking-wide" x-show="viewMode === 'LATEST'">
-                        Live Snapshot (De-duplicated)
-                    </span>
-                    <span class="text-xxs text-gray-500 border-l border-gray-800 pl-4 uppercase tracking-wide" x-show="viewMode === 'HISTORY'">
-                        Historical Event Stream
-                    </span>
+                    <span class="text-xxs text-gray-500 border-l border-gray-800 pl-4 uppercase tracking-wide" x-show="viewMode === 'LATEST'">Live Snapshot (De-duplicated)</span>
+                    <span class="text-xxs text-gray-500 border-l border-gray-800 pl-4 uppercase tracking-wide" x-show="viewMode === 'HISTORY'">Historical Event Stream</span>
                 </div>
-
                 <div class="flex gap-1 bg-gray-950 rounded p-1 border border-gray-700">
                     <button @click="logFilter = 'ALL'; refreshData()" :class="logFilter === 'ALL' ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'" class="text-xxs px-2 py-0.5 rounded transition">All</button>
                     <button @click="logFilter = 2; refreshData()" :class="logFilter === 2 ? 'bg-emerald-900/50 text-emerald-200' : 'text-gray-500 hover:text-emerald-400'" class="text-xxs px-2 py-0.5 rounded transition">OK</button>
@@ -277,7 +257,7 @@
                 </div>
             </div>
 
-            <div class="flex-1 flex flex-col min-h-0 bg-gray-950">
+            <div class="flex-1 flex flex-col min-h-0 bg-gray-950" x-show="viewMode !== 'STATS'">
                 <div class="grid grid-cols-12 gap-2 px-4 py-2 bg-gray-900/50 border-b border-gray-800 text-xxs font-bold text-gray-500 uppercase tracking-wide shrink-0">
                     <div class="col-span-1 text-center">#</div>
                     <div class="col-span-2">Time</div>
@@ -290,13 +270,8 @@
                 <div class="flex-1 overflow-y-auto overflow-x-hidden" id="mainList">
                     <template x-for="(row, index) in listData" :key="row.id_key">
                         <div class="grid grid-cols-12 gap-2 px-4 py-1.5 border-b border-gray-800/30 text-xs font-mono items-center hover:bg-gray-800/40 transition-colors group">
-
                             <div class="col-span-1 text-center text-gray-600 text-[10px]" x-text="index + 1"></div>
-
-                            <div class="col-span-2 text-gray-500 text-[10px] truncate"
-                                 :title="formatFullDate(row.display_time)"
-                                 x-text="formatLogTime(row.display_time)"> </div>
-
+                            <div class="col-span-2 text-gray-500 text-[10px] truncate" :title="formatFullDate(row.display_time)" x-text="formatLogTime(row.display_time)"></div>
                             <div class="col-span-1">
                                 <span class="px-1.5 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-12 text-center"
                                       :class="{
@@ -310,111 +285,63 @@
                                       x-text="getStatusLabel(row.status)">
                                 </span>
                             </div>
-
                             <div class="col-span-6 overflow-hidden">
                                 <div class="flex items-center gap-2">
                                     <div class="truncate text-gray-300 group-hover:text-white cursor-pointer flex-1" :title="row.url" x-text="row.url"></div>
-
-                                    <span x-show="viewMode === 'LATEST' && row.retry_count > 0"
-                                          class="text-[9px] bg-yellow-900/30 text-yellow-500 border border-yellow-900/50 px-1 rounded flex items-center gap-1 shrink-0">
-                                          <span>↺</span> <span x-text="row.retry_count"></span>
-                                    </span>
+                                    <span x-show="viewMode === 'LATEST' && row.retry_count > 0" class="text-[9px] bg-yellow-900/30 text-yellow-500 border border-yellow-900/50 px-1 rounded flex items-center gap-1 shrink-0"><span>↺</span> <span x-text="row.retry_count"></span></span>
                                 </div>
                                 <div x-show="!selectedGroup" class="truncate text-[9px] text-gray-600" x-text="row.group_path"></div>
                             </div>
-
-                            <div class="col-span-1"
-                                 :class="row.http_code >= 400 ? 'text-red-400 font-bold' : (row.http_code ? 'text-emerald-600' : 'text-gray-700')"
-                                 x-text="row.http_code || '-'"></div>
-
+                            <div class="col-span-1" :class="row.http_code >= 400 ? 'text-red-400 font-bold' : (row.http_code ? 'text-emerald-600' : 'text-gray-700')" x-text="row.http_code || '-'"></div>
                             <div class="col-span-1 text-right flex justify-end items-center gap-2">
                                 <span class="text-gray-600 text-[10px]" x-text="row.duration ? row.duration + 's' : ''"></span>
                                 <button @click="viewSnapshot(row)" x-show="row.status === 2" class="opacity-0 group-hover:opacity-100 text-blue-500 hover:text-blue-300 text-[10px] hover:underline bg-gray-800 px-1 rounded border border-gray-700">SNAP</button>
                             </div>
                         </div>
                     </template>
+                    <div x-show="listData.length === 0" class="p-8 text-center text-gray-700 text-xs italic">No records found for this view.</div>
+                </div>
+            </div>
 
-                    <div x-show="listData.length === 0" class="p-8 text-center text-gray-700 text-xs italic">
-                        No records found for this view.
+            <div class="flex-1 flex flex-col min-h-0 bg-gray-950 overflow-y-auto p-6" x-show="viewMode === 'STATS'" x-cloak>
+                <div class="flex justify-between items-center mb-6">
+                    <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider">Historical Trend Analysis</h3>
+                    <div class="flex bg-gray-900 rounded p-1 border border-gray-800">
+                        <template x-for="range in ['1H', '6H', '24H', '7D']">
+                            <button @click="statsRange = range; fetchTrendData()" class="px-3 py-1 text-xs rounded transition-colors" :class="statsRange === range ? 'bg-purple-900/50 text-purple-200 border border-purple-800' : 'text-gray-500 hover:text-gray-300'" x-text="range"></button>
+                        </template>
                     </div>
                 </div>
 
-                <div class="flex-1 flex flex-col min-h-0 bg-gray-950" x-show="viewMode !== 'STATS'">
-                    </div>
-
-                <div class="flex-1 flex flex-col min-h-0 bg-gray-950 overflow-y-auto p-6" x-show="viewMode === 'STATS'" x-cloak>
-
-                    <div class="flex justify-between items-center mb-6">
-                        <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider">Historical Trend Analysis</h3>
-
-                        <div class="flex bg-gray-900 rounded p-1 border border-gray-800">
-                            <template x-for="range in ['1H', '6H', '24H', '7D']">
-                                <button @click="statsRange = range; fetchTrendData()"
-                                        class="px-3 py-1 text-xs rounded transition-colors"
-                                        :class="statsRange === range ? 'bg-purple-900/50 text-purple-200 border border-purple-800' : 'text-gray-500 hover:text-gray-300'"
-                                        x-text="range"></button>
-                            </template>
-                        </div>
-                    </div>
-
-                    <div class="bg-gray-900/50 border border-gray-800 rounded p-4 mb-6 h-64 flex flex-col relative">
-                        <div class="flex-1 flex items-end gap-1 w-full px-2 pb-6 relative z-10">
-                            <template x-for="bar in trendData" :key="bar.ts">
-                                <div class="flex-1 flex flex-col justify-end group relative h-full min-w-[4px]">
-                                    <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-gray-800 border border-gray-700 text-xxs p-2 rounded shadow-xl hidden group-hover:block z-50 whitespace-nowrap">
-                                        <div class="font-bold text-gray-300 mb-1" x-text="bar.time"></div>
-                                        <div class="text-emerald-400">Valid: <span x-text="bar.valid"></span></div>
-                                        <div class="text-red-400">Fail: <span x-text="bar.fail"></span></div>
-                                        <div class="text-gray-500 border-t border-gray-700 mt-1 pt-1">Total: <span x-text="bar.total"></span></div>
-                                    </div>
-
-                                    <div class="w-full rounded-t opacity-80 hover:opacity-100 transition-all flex flex-col justify-end gap-[1px]"
-                                         :style="`height: ${(bar.total / (maxTrendValue || 1)) * 100}%`">
-
-                                        <div class="w-full bg-red-500/60" :style="`height: ${(bar.fail / bar.total) * 100}%`"></div>
-                                        <div class="w-full bg-emerald-500/60" :style="`height: ${(bar.valid / bar.total) * 100}%`"></div>
-                                    </div>
-
-                                    <div class="absolute top-full mt-1 left-1/2 -translate-x-1/2 text-[9px] text-gray-600 -rotate-45 origin-top-left"
-                                         x-text="bar.time"
-                                         x-show="shouldShowLabel(bar)"></div>
+                <div class="bg-gray-900/50 border border-gray-800 rounded p-4 mb-6 h-64 flex flex-col relative">
+                    <div class="flex-1 flex items-end gap-1 w-full px-2 pb-6 relative z-10">
+                        <template x-for="bar in trendData" :key="bar.ts">
+                            <div class="flex-1 flex flex-col justify-end group relative h-full min-w-[4px]">
+                                <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-gray-800 border border-gray-700 text-xxs p-2 rounded shadow-xl hidden group-hover:block z-50 whitespace-nowrap">
+                                    <div class="font-bold text-gray-300 mb-1" x-text="bar.time"></div>
+                                    <div class="text-emerald-400">Valid: <span x-text="bar.valid"></span></div>
+                                    <div class="text-red-400">Fail: <span x-text="bar.fail"></span></div>
+                                    <div class="text-gray-500 border-t border-gray-700 mt-1 pt-1">Total: <span x-text="bar.total"></span></div>
                                 </div>
-                            </template>
-
-                            <div x-show="trendData.length === 0" class="absolute inset-0 flex items-center justify-center text-gray-600 text-xs">
-                                No data for this time range.
+                                <div class="w-full rounded-t opacity-80 hover:opacity-100 transition-all flex flex-col justify-end gap-[1px]" :style="`height: ${(bar.total / (maxTrendValue || 1)) * 100}%`">
+                                    <div class="w-full bg-red-500/60" :style="`height: ${(bar.fail / bar.total) * 100}%`"></div>
+                                    <div class="w-full bg-emerald-500/60" :style="`height: ${(bar.valid / bar.total) * 100}%`"></div>
+                                </div>
+                                <div class="absolute top-full mt-1 left-1/2 -translate-x-1/2 text-[9px] text-gray-600 -rotate-45 origin-top-left" x-text="bar.time" x-show="shouldShowLabel(bar)"></div>
                             </div>
-                        </div>
-
-                        <div class="absolute inset-0 pointer-events-none flex flex-col justify-between px-4 py-6 opacity-10">
-                            <div class="w-full h-px bg-gray-400"></div>
-                            <div class="w-full h-px bg-gray-400"></div>
-                            <div class="w-full h-px bg-gray-400"></div>
-                            <div class="w-full h-px bg-gray-400"></div>
-                            <div class="w-full h-px bg-gray-400"></div>
-                        </div>
+                        </template>
+                        <div x-show="trendData.length === 0" class="absolute inset-0 flex items-center justify-center text-gray-600 text-xs">No data for this time range.</div>
                     </div>
-
-                    <div class="grid grid-cols-4 gap-4">
-                        <div class="bg-gray-900 border border-gray-800 p-3 rounded">
-                            <div class="text-[10px] text-gray-500 uppercase">Period Total</div>
-                            <div class="text-xl font-mono text-white" x-text="trendSummary.total"></div>
-                        </div>
-                        <div class="bg-gray-900 border border-gray-800 p-3 rounded">
-                            <div class="text-[10px] text-gray-500 uppercase">Valid Runs</div>
-                            <div class="text-xl font-mono text-emerald-400" x-text="trendSummary.valid"></div>
-                        </div>
-                        <div class="bg-gray-900 border border-gray-800 p-3 rounded">
-                            <div class="text-[10px] text-gray-500 uppercase">Failures</div>
-                            <div class="text-xl font-mono text-red-400" x-text="trendSummary.fail"></div>
-                        </div>
-                        <div class="bg-gray-900 border border-gray-800 p-3 rounded">
-                             <div class="text-[10px] text-gray-500 uppercase">Failure Rate</div>
-                             <div class="text-xl font-mono"
-                                  :class="trendSummary.failRate > 10 ? 'text-red-500' : 'text-gray-400'"
-                                  x-text="trendSummary.failRate + '%'"></div>
-                        </div>
+                    <div class="absolute inset-0 pointer-events-none flex flex-col justify-between px-4 py-6 opacity-10">
+                        <div class="w-full h-px bg-gray-400"></div><div class="w-full h-px bg-gray-400"></div><div class="w-full h-px bg-gray-400"></div><div class="w-full h-px bg-gray-400"></div><div class="w-full h-px bg-gray-400"></div>
                     </div>
+                </div>
+
+                <div class="grid grid-cols-4 gap-4">
+                    <div class="bg-gray-900 border border-gray-800 p-3 rounded"><div class="text-[10px] text-gray-500 uppercase">Period Total</div><div class="text-xl font-mono text-white" x-text="trendSummary.total"></div></div>
+                    <div class="bg-gray-900 border border-gray-800 p-3 rounded"><div class="text-[10px] text-gray-500 uppercase">Valid Runs</div><div class="text-xl font-mono text-emerald-400" x-text="trendSummary.valid"></div></div>
+                    <div class="bg-gray-900 border border-gray-800 p-3 rounded"><div class="text-[10px] text-gray-500 uppercase">Failures</div><div class="text-xl font-mono text-red-400" x-text="trendSummary.fail"></div></div>
+                    <div class="bg-gray-900 border border-gray-800 p-3 rounded"><div class="text-[10px] text-gray-500 uppercase">Failure Rate</div><div class="text-xl font-mono" :class="trendSummary.failRate > 10 ? 'text-red-500' : 'text-gray-400'" x-text="trendSummary.failRate + '%'"></div></div>
                 </div>
             </div>
         </section>
