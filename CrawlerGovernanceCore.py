@@ -412,6 +412,114 @@ class CrawlSession:
         self._finished = True
 
 
+class GroupRoundContext:
+    """
+    管理单个 Group 的一轮抓取任务的上下文状态。
+    """
+
+    def __init__(self, group_path: str):
+        self.group_path = group_path
+
+        # --- 长期状态 (Session级) ---
+        self.completed_rounds = 0  # 已完成总轮次 (需求4)
+        self.total_items_processed_session = 0
+
+        # --- 当前轮次状态 (Round级) ---
+        self.phase = "IDLE"  # IDLE | RUNNING
+        self.round_id = 0
+        self.start_ts = 0.0
+        self.expected_count = 0  # 本轮计划抓多少 (需求2)
+        self.processed_count = 0  # 实时计数 (需求3)
+
+        # 实时分类统计
+        self.stats = {
+            "success": 0, "failed": 0, "skipped": 0, "other": 0
+        }
+
+        # --- 调度信息 ---
+        self.last_duration = 0.0  # 上一轮耗时 (需求5)
+        self.last_end_ts = 0.0
+        self.next_run_ts = 0.0  # 下一轮开始时间 (需求5)
+
+    def start(self, expected_count: int):
+        """开启新的一轮"""
+        self.phase = "RUNNING"
+        self.start_ts = time.time()
+        self.round_id += 1
+        self.expected_count = expected_count
+
+        # 重置当前轮次计数
+        self.processed_count = 0
+        self.stats = {"success": 0, "failed": 0, "skipped": 0, "other": 0}
+        self.next_run_ts = 0.0  # 清除之前的倒计时
+
+        logger.info(f"[Round Start] {self.group_path} (Round #{self.round_id}, Plan: {expected_count})")
+
+    def update(self, status: int):
+        """由 Task 完成时回调"""
+        if self.phase != "RUNNING":
+            return
+
+        self.processed_count += 1
+        self.total_items_processed_session += 1
+
+        if status in [Status.SUCCESS, Status.CACHED]:
+            self.stats["success"] += 1
+        elif status in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
+            self.stats["failed"] += 1
+        elif status == Status.SKIPPED:
+            self.stats["skipped"] += 1
+        else:
+            self.stats["other"] += 1
+
+    def finish(self, next_run_delay: float = 0):
+        """结束当前轮次"""
+        now = time.time()
+        if self.phase == "RUNNING":
+            self.last_duration = round(now - self.start_ts, 2)
+            self.completed_rounds += 1
+
+        self.phase = "IDLE"
+        self.last_end_ts = now
+        self.next_run_ts = now + next_run_delay
+
+        logger.info(
+            f"[Round End] {self.group_path} finished. Duration: {self.last_duration}s. Next run in {next_run_delay}s")
+
+    def get_snapshot(self) -> Dict:
+        """返回给 UI/API 的只读快照"""
+        now = time.time()
+
+        # 计算进度百分比
+        progress = 0.0
+        if self.expected_count > 0:
+            progress = round((self.processed_count / self.expected_count) * 100, 1)
+
+        # 计算运行时长
+        duration_current = 0.0
+        if self.phase == "RUNNING":
+            duration_current = round(now - self.start_ts, 1)
+
+        # 计算倒计时
+        ttl = 0
+        if self.phase == "IDLE" and self.next_run_ts > 0:
+            ttl = max(0, round(self.next_run_ts - now, 1))
+
+        return {
+            "group_path": self.group_path,
+            "phase": self.phase,
+            "round_id": self.round_id,
+            "completed_rounds": self.completed_rounds,
+            "progress_pct": progress,
+            "expected": self.expected_count,
+            "processed": self.processed_count,
+            "stats": self.stats,  # success, failed, etc.
+            "current_duration": duration_current,
+            "last_duration": self.last_duration,
+            "seconds_until_next": ttl
+        }
+
+
 # --- Main Governance Class ---
 
 class GovernanceManager:
@@ -454,6 +562,10 @@ class GovernanceManager:
         # Value: {'list_url': str, 'name': str}
         # Replaces the behavior of loading all groups from DB at startup.
         self.runtime_groups: Dict[str, Dict] = {}
+
+        # RoundContext 容器
+        # Key: group_path, Value: GroupRoundContext
+        self.round_contexts: Dict[str, GroupRoundContext] = {}
 
         self.known_anchors = set()
 
@@ -630,6 +742,42 @@ class GovernanceManager:
 
         return CrawlSession(self, url, spider_name, norm_group_path)
 
+    # Helper to safely get or create context
+    def _get_context(self, group_path: str) -> GroupRoundContext:
+        if group_path not in self.round_contexts or self.round_contexts[group_path] is None:
+            self.round_contexts[group_path] = GroupRoundContext(group_path)
+        return self.round_contexts[group_path]
+
+    # --- Round Management (新功能接口) ---
+
+    def _get_round_context(self, group_path: str) -> GroupRoundContext:
+        """获取或创建 Context，非线程安全，需外部加锁"""
+        if group_path not in self.round_contexts:
+            self.round_contexts[group_path] = GroupRoundContext(group_path)
+        return self.round_contexts[group_path]
+
+    def start_round(self, group_path: str, expected_count: int):
+        """业务层调用：告诉系统这组任务开始了一轮"""
+        group_path = _normalize_group_path(group_path)
+        with self.stats_lock:
+            ctx = self._get_round_context(group_path)
+            ctx.start(expected_count)
+
+    def finish_round(self, group_path: str, next_run_delay: float = 0):
+        """业务层调用：告诉系统这组任务这一轮结束了"""
+        group_path = _normalize_group_path(group_path)
+        with self.stats_lock:
+            ctx = self._get_round_context(group_path)
+            ctx.finish(next_run_delay)
+
+    def get_group_round_status(self, group_path: str) -> Dict:
+        """API 调用：获取实时轮次状态"""
+        group_path = _normalize_group_path(group_path)
+        with self.stats_lock:
+            if group_path in self.round_contexts:
+                return self.round_contexts[group_path].get_snapshot()
+            return {}  # 或者返回一个默认空对象
+
     # --- 4. Internal State Management (Called by Session) ---
 
     def _handle_task_start(self, url: str, spider: str, group: str) -> int:
@@ -724,6 +872,11 @@ class GovernanceManager:
                     'is_anchor': url in self.known_anchors
                 }
                 self.event_buffer.append(event_obj)
+
+            # B. 更新 Round Context
+            # 只有当该 group 处于 ACTIVE round 状态时才更新
+            if group_path in self.round_contexts:
+                self.round_contexts[group_path].update(status)
 
     def reset_statistics(self):
         """
@@ -1056,51 +1209,6 @@ class GovernanceManager:
             })
 
         return result
-
-    # def get_memory_chart_data(self, bucket_minutes: int = 1) -> List[Dict]:
-    #     """
-    #     NEW: Aggregates memory buffer events into time buckets for the frontend chart.
-    #     Returns a time-series: [{time: '10:00', valid: 10, fail: 2}, ...]
-    #     FIXED: Now correctly uses bucket_minutes to group events.
-    #     """
-    #     timeline = {}
-    #
-    #     # Ensure bucket_minutes is at least 1 to avoid division by zero
-    #     bucket_minutes = max(1, bucket_minutes)
-    #
-    #     with self.stats_lock:
-    #         for e in self.event_buffer:
-    #             # 1. Convert timestamp to datetime
-    #             dt = datetime.datetime.fromtimestamp(e['ts'])
-    #
-    #             # 2. Round down to the nearest bucket
-    #             # Example: If bucket=5 and time is 10:07, discard=2, result=10:05
-    #             discard = dt.minute % bucket_minutes
-    #             dt_floored = dt - datetime.timedelta(minutes=discard, seconds=dt.second, microseconds=dt.microsecond)
-    #
-    #             # 3. Generate Key (HH:MM)
-    #             time_key = dt_floored.strftime("%H:%M")
-    #
-    #             if time_key not in timeline:
-    #                 # 'ts' is used for sorting later (store the timestamp of the bucket start)
-    #                 timeline[time_key] = {'time': time_key, 'ts': dt_floored.timestamp(), 'valid': 0, 'fail': 0}
-    #
-    #             st = e['status']
-    #
-    #             # Logic: "Valid vs Failed" (Excluding Skipped/Pending/Running)
-    #             if st in [Status.SUCCESS, Status.CACHED]:
-    #                 timeline[time_key]['valid'] += 1
-    #             elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
-    #                 timeline[time_key]['fail'] += 1
-    #
-    #     # Convert dict to sorted list (Sort by timestamp to ensure correct time order across hours/days)
-    #     sorted_data = sorted(timeline.values(), key=lambda x: x['ts'])
-    #
-    #     # Remove the internal 'ts' helper field before returning to frontend
-    #     for item in sorted_data:
-    #         del item['ts']
-    #
-    #     return sorted_data
 
     def get_log_trend_stats(self, start_ts: float, end_ts: float, bucket_minutes: int = 1, group_filter: str = None) -> List[Dict]:
         """

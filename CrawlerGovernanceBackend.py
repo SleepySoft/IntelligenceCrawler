@@ -82,6 +82,8 @@ class CrawlerGovernanceBackend:
 
         self.app.add_url_rule(build_url('/api/history/stats'), 'get_history_stats',
                               maybe_wrap(self.get_history_stats), methods=['GET'])
+        self.app.add_url_rule(build_url('/api/group/round_status'), 'get_group_round_status',
+                              maybe_wrap(self.get_group_round_status), methods=['GET'])
 
         # Control APIs (POST)
         self.app.add_url_rule(build_url('/api/control/<action>'), 'system_control', maybe_wrap(self.system_control),
@@ -96,6 +98,8 @@ class CrawlerGovernanceBackend:
                               methods=['POST'])
         self.app.add_url_rule(build_url('/rpc/report_result'), 'rpc_report_result', maybe_wrap(self.rpc_report_result),
                               methods=['POST'])
+        self.app.add_url_rule(build_url('/rpc/round/lifecycle'), 'rpc_round_lifecycle',
+                              maybe_wrap(self.rpc_round_lifecycle), methods=['POST'])
 
     # --- Helper: Time Parsing ---
 
@@ -246,6 +250,23 @@ class CrawlerGovernanceBackend:
         data = self.governor.get_db_history_stats(days=days)
         return jsonify(data)
 
+    def get_group_round_status(self):
+        """
+        [API] 获取指定 Group 的实时轮次状态 (进度、统计、倒计时)。
+        前端轮询此接口以更新进度条。
+        Query Params:
+            - group: string (必填, e.g., "news/tech")
+        """
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+
+        group_path = request.args.get('group')
+        if not group_path:
+            return jsonify({"error": "Missing group parameter"}), 400
+
+        # 调用 Governor 新增的接口
+        status_data = self.governor.get_group_round_status(group_path)
+        return jsonify(status_data)
+
     def reset_stats(self):
         if self.governor:
             self.governor.reset_statistics()
@@ -309,3 +330,34 @@ class CrawlerGovernanceBackend:
             file_path=data.get('file_path')
         )
         return jsonify({"status": "acked"})
+
+    def rpc_round_lifecycle(self):
+        """
+        [RPC] 外部爬虫控制轮次生命周期。
+        POST JSON Payload:
+            - action: "start" | "finish"
+            - group: "news/tech"
+            - expected_count: int (仅 start 需要)
+            - next_run_delay: float (仅 finish 需要, 单位秒)
+        """
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+        data = request.get_json() or {}
+
+        action = data.get('action')
+        group = data.get('group')
+
+        if not action or not group:
+            return jsonify({"error": "Missing action or group"}), 400
+
+        if action == "start":
+            expected = int(data.get('expected_count', 0))
+            self.governor.start_round(group, expected_count=expected)
+            return jsonify({"status": "started", "group": group})
+
+        elif action == "finish":
+            delay = float(data.get('next_run_delay', 0))
+            self.governor.finish_round(group, next_run_delay=delay)
+            return jsonify({"status": "finished", "group": group})
+
+        else:
+            return jsonify({"error": "Invalid action"}), 400
