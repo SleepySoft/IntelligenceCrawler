@@ -473,7 +473,11 @@ class GroupRoundContext:
             self.stats["other"] += 1
 
     def finish(self, next_run_delay: float = 0):
-        """结束当前轮次"""
+        """
+        Transitions state to IDLE and finalizes duration.
+        now: next_run_delay is optional, primarily used if set explicitly,
+        otherwise wait_interval will update next_run_ts later.
+        """
         now = time.time()
         if self.phase == "RUNNING":
             self.last_duration = round(now - self.start_ts, 2)
@@ -481,7 +485,12 @@ class GroupRoundContext:
 
         self.phase = "IDLE"
         self.last_end_ts = now
-        self.next_run_ts = now + next_run_delay
+
+        # 只有当显式传入了 delay (大于0) 时才设置，否则保持为 0 或由 wait_interval 设置
+        if next_run_delay > 0:
+            self.next_run_ts = now + next_run_delay
+        # 注意：这里不要强制设为 0，因为如果在 finish 之后立即调用 wait_interval，
+        # 我们希望由 wait_interval 来接管这个字段。
 
         logger.info(
             f"[Round End] {self.group_path} finished. Duration: {self.last_duration}s. Next run in {next_run_delay}s")
@@ -763,12 +772,12 @@ class GovernanceManager:
             ctx = self._get_round_context(group_path)
             ctx.start(expected_count)
 
-    def finish_round(self, group_path: Union[str, List[str]], next_run_delay: float = 0):
+    def finish_round(self, group_path: Union[str, List[str]], next_run_delay: int = 0):
         """业务层调用：告诉系统这组任务这一轮结束了"""
         group_path = _normalize_group_path(group_path)
         with self.stats_lock:
             ctx = self._get_round_context(group_path)
-            ctx.finish(next_run_delay, )
+            ctx.finish(next_run_delay=next_run_delay)
 
     def get_group_round_status(self, group_path: str) -> Dict:
         """API 调用：获取实时轮次状态"""
@@ -909,14 +918,31 @@ class GovernanceManager:
             self.db.set_control_signal(signal_str)
             logger.info(f"Control signal set to: {signal_str}")
 
-    def wait_interval(self, seconds: float, stop_event: threading.Event = None):
+    def wait_interval(
+            self,
+            seconds: float,
+            group_path: Union[str, List[str], None] = None,
+            stop_event: threading.Event = None):
         """
         Smart sleep. Reads memory signal (fast) for Pause/Immediate.
         """
         if seconds <= 0: return
 
-        end_time = time.time() + seconds
+        # === 如果有 group_path，自动计算并更新倒计时 ===
+        if group_path:
+            norm_path = _normalize_group_path(group_path)
+            with self.stats_lock:
+                # 更新 context 里的 next_run_ts
+                if norm_path in self.round_contexts:
+                    # 设定预期唤醒时间
+                    target_ts = time.time() + seconds
+                    self.round_contexts[norm_path].next_run_ts = target_ts
+                    logger.info(
+                        f"[{norm_path}] Sleeping for {seconds}s. Next run at {datetime.datetime.fromtimestamp(target_ts)}")
 
+        # === 睡眠逻辑 ===
+
+        end_time = time.time() + seconds
         while time.time() < end_time:
             # 1. Stop Event (Highest Priority - Immediate Exit)
             if stop_event and stop_event.is_set():

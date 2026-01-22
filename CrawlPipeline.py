@@ -256,7 +256,7 @@ class CrawlPipeline:
                         task.fail_perm(state_msg=f"Fail by exception: {str(e)}")
 
             # TODO: Remove next_run_delay
-            self.crawler_governor.finish_round(channel_group, 15 * 60)
+            self.crawler_governor.finish_round(channel_group)
 
         self.contents = contents
         self.log(f"Extracted {len(self.contents)} articles successfully.")
