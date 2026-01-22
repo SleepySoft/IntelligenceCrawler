@@ -17,7 +17,7 @@ from IntelligenceCrawler.Extractor import (
     ReadabilityExtractor, Newspaper3kExtractor, GenericCSSExtractor, Crawl4AIExtractor)
 from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer, ListPageDiscoverer
 from IntelligenceCrawler.Persistence import save_extraction_result_as_md, save_extraction_result_as_pdf
-
+from Tools.ProcessCotrolException import ProcessProblem
 
 log_cb = print
 
@@ -233,11 +233,18 @@ class CrawlPipeline:
 
                     task.save_file(result.markdown_content, result.metadata.get('title', 'NoTitle'))
                     task.success()
+                except ProcessProblem as e:
+                    if exception_handler:
+                        exception_handler(article_url, e)        # Pass URL and exception
+                    if e.problem in ['commit_error']:
+                        task.cached()
+                    else:
+                        task.fail_temp(state_msg=f"Error: {str(e)}")
                 except Exception as e:
                     self.log(f"[Error] Failed to extract {article_url}: {e}")
                     if exception_handler:
                         exception_handler(article_url, e)        # Pass URL and exception
-                    task.fail_temp(state_msg=f"Fail by exception: {str(e)}")
+                    task.fail_perm(state_msg=f"Fail by exception: {str(e)}")
 
         self.contents = contents
         self.log(f"Extracted {len(self.contents)} articles successfully.")
