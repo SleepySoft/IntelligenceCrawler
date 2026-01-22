@@ -756,19 +756,19 @@ class GovernanceManager:
             self.round_contexts[group_path] = GroupRoundContext(group_path)
         return self.round_contexts[group_path]
 
-    def start_round(self, group_path: str, expected_count: int):
+    def start_round(self, group_path: Union[str, List[str]], expected_count: int):
         """业务层调用：告诉系统这组任务开始了一轮"""
         group_path = _normalize_group_path(group_path)
         with self.stats_lock:
             ctx = self._get_round_context(group_path)
             ctx.start(expected_count)
 
-    def finish_round(self, group_path: str, next_run_delay: float = 0):
+    def finish_round(self, group_path: Union[str, List[str]], next_run_delay: float = 0):
         """业务层调用：告诉系统这组任务这一轮结束了"""
         group_path = _normalize_group_path(group_path)
         with self.stats_lock:
             ctx = self._get_round_context(group_path)
-            ctx.finish(next_run_delay)
+            ctx.finish(next_run_delay, )
 
     def get_group_round_status(self, group_path: str) -> Dict:
         """API 调用：获取实时轮次状态"""

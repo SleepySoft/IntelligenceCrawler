@@ -3,6 +3,8 @@
 import os
 import datetime
 import traceback
+from collections import defaultdict
+
 import tldextract
 from urllib.parse import urlparse
 from typing import List, Optional, Callable, Any, Tuple, Dict
@@ -208,43 +210,53 @@ class CrawlPipeline:
 
         self.log(f"--- 3. Fetching & Extracting {len(self.articles)} Articles ---")
 
-        contents = []
+        grouped = defaultdict(list)
         for article_url, channel_group in self.articles:
-            if article_filter and not article_filter(article_url, channel_group):
-                self.log(f"Skipping article (filtered): {article_url}")
-                continue
+            grouped[channel_group].append(article_url)
 
-            self.log(f"Processing: {article_url}")
+        contents = []
+        for channel_group, article_urls in grouped.items():
+            self.crawler_governor.start_round(channel_group, len(article_urls))
 
-            with self.crawler_governor.transaction(article_url, channel_group) as task:
-                try:
-                    content = self.e_fetcher.get_content(article_url, **fetcher_kwargs)
-                    if not content:
-                        task.skip(state_msg='Empty content')
-                        self.log(f"Skipped (no content): {article_url}")
-                        continue
+            for article_url in article_urls:
+                if article_filter and not article_filter(article_url, channel_group):
+                    self.log(f"Skipping article (filtered): {article_url}")
+                    continue
 
-                    self.log(f"  -> Fetched {len(content)} bytes. Extracting...")
-                    result = self.extractor.extract(content, article_url, **extractor_kwargs)
-                    contents.append((article_url, result))  # Store the final result
+                self.log(f"Processing: {article_url}")
 
-                    if content_handler:
-                        content_handler(article_url, result)  # Pass full result to handler
+                with self.crawler_governor.transaction(article_url, channel_group) as task:
+                    try:
+                        content = self.e_fetcher.get_content(article_url, **fetcher_kwargs)
+                        if not content:
+                            task.skip(state_msg='Empty content')
+                            self.log(f"Skipped (no content): {article_url}")
+                            continue
 
-                    task.save_file(result.markdown_content, result.metadata.get('title', 'NoTitle'))
-                    task.success()
-                except ProcessProblem as e:
-                    if exception_handler:
-                        exception_handler(article_url, e)        # Pass URL and exception
-                    if e.problem in ['commit_error']:
-                        task.cached()
-                    else:
-                        task.fail_temp(state_msg=f"Error: {str(e)}")
-                except Exception as e:
-                    self.log(f"[Error] Failed to extract {article_url}: {e}")
-                    if exception_handler:
-                        exception_handler(article_url, e)        # Pass URL and exception
-                    task.fail_perm(state_msg=f"Fail by exception: {str(e)}")
+                        self.log(f"  -> Fetched {len(content)} bytes. Extracting...")
+                        result = self.extractor.extract(content, article_url, **extractor_kwargs)
+                        contents.append((article_url, result))  # Store the final result
+
+                        if content_handler:
+                            content_handler(article_url, result)  # Pass full result to handler
+
+                        task.save_file(result.markdown_content, result.metadata.get('title', 'NoTitle'))
+                        task.success()
+                    except ProcessProblem as e:
+                        if exception_handler:
+                            exception_handler(article_url, e)        # Pass URL and exception
+                        if e.problem in ['commit_error']:
+                            task.cached()
+                        else:
+                            task.fail_temp(state_msg=f"Error: {str(e)}")
+                    except Exception as e:
+                        self.log(f"[Error] Failed to extract {article_url}: {e}")
+                        if exception_handler:
+                            exception_handler(article_url, e)        # Pass URL and exception
+                        task.fail_perm(state_msg=f"Fail by exception: {str(e)}")
+
+            # TODO: Remove next_run_delay
+            self.crawler_governor.finish_round(channel_group, 15 * 60)
 
         self.contents = contents
         self.log(f"Extracted {len(self.contents)} articles successfully.")
