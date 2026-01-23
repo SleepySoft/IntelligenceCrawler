@@ -299,6 +299,22 @@ class IExtractor(ABC):
         pass
 
 
+def extractor_factory(name: str, init_params: dict):
+    if name == 'PassThroughExtractor':
+        return PassThroughExtractor(**init_params)
+    if name == 'TrafilaturaExtractor':
+        return TrafilaturaExtractor(**init_params)
+    if name == 'ReadabilityExtractor':
+        return ReadabilityExtractor(**init_params)
+    if name == 'Newspaper3kExtractor':
+        return Newspaper3kExtractor(**init_params)
+    if name == 'GenericCSSExtractor':
+        return GenericCSSExtractor(**init_params)
+    if name == 'Crawl4AIExtractor':
+        return Crawl4AIExtractor(**init_params)
+    raise ValueError(f"Unknown extractor: {name}")
+
+
 # =======================================================================
 # == PassThroughExtractor
 # =======================================================================

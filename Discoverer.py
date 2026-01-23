@@ -132,6 +132,16 @@ class IDiscoverer(ABC):
         return f"Failed to fetch content from {url}"
 
 
+def discoverer_factory(name: str, init_params: dict):
+    if name == 'RSSDiscoverer':
+        return RSSDiscoverer(**init_params)
+    if name == 'SitemapDiscoverer':
+        return SitemapDiscoverer(**init_params)
+    if name == 'ListPageDiscoverer':
+        return ListPageDiscoverer(**init_params)
+    raise ValueError(f"Unknown discoverer: {name}")
+
+
 class SitemapDiscoverer(IDiscoverer):
     """
     Discovers articles by parsing sitemap.xml files.

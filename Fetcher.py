@@ -103,6 +103,14 @@ class Fetcher(ABC):
         pass
 
 
+def fetcher_factory(name: str, init_params: dict) -> Fetcher:
+    if name == 'RequestsFetcher':
+        return RequestsFetcher(**init_params)
+    if name == 'PlaywrightFetcher':
+        return PlaywrightFetcher(**init_params)
+    raise ValueError(f"Unknown fetcher: {name}")
+
+
 def also_print(log_callback):
     """A helper wrapper to ensure logs are always printed to console."""
 

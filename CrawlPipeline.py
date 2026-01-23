@@ -94,7 +94,7 @@ class CrawlPipeline:
         self.e_fetcher = e_fetcher
         self.extractor = extractor
         self.log = log_callback
-        self.crawler_governor = crawler_governor
+        self.crawler_governor = crawler_governor or GovernanceManager()
 
             # --- State Properties ---
         self.channels: List[str] = []
