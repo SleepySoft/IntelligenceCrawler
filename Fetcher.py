@@ -3,14 +3,16 @@
 import queue
 import random
 import re
+import time
 
 import requests
 import threading        # Add threading for PlaywrightFetcher avoiding asyncio conflict with Newspaper3kExtractor
-from typing import Dict, Optional, Callable
+from typing import Dict, Optional, Callable, List
 from urllib.parse import urlparse
 from abc import ABC, abstractmethod
 
 from IntelligenceCrawler.BrowserMonitor import AutoTrackedBrowser
+from IntelligenceCrawler.PlaywrightActionEngine import PlaywrightActionEngine
 
 try:
     from dateutil.parser import parse as date_parse
@@ -21,7 +23,7 @@ except ImportError:
 
 # --- Playwright Imports (with detailed error checking) ---
 try:
-    from playwright.sync_api import sync_playwright, Error as PlaywrightError
+    from playwright.sync_api import sync_playwright, Page, Error as PlaywrightError
     from playwright._impl._errors import TimeoutError as PlaywrightTimeoutError
 except ImportError:
     print("!!! IMPORT ERROR: Could not import 'playwright.sync_api'.")
@@ -679,8 +681,16 @@ class PlaywrightFetcher(Fetcher):
                     self._log(
                         "[Worker Warning] Network did not become idle after scrolling (5s timeout). Proceeding anyway.")
 
-            if post_extra_action:
-                post_extra_action(page)
+            try:
+                if callable(post_extra_action):
+                    post_extra_action(page)
+                elif isinstance(post_extra_action, list):
+                    action_engine = PlaywrightActionEngine(page=page, )
+                    action_engine.execute(post_extra_action)
+                else:
+                    raise ValueError(f"Not support post extra action - ignore.")
+            except Exception as e:
+                self._log(str(e))
 
             # --- 6. Extract Content ---
             # This code is now reached even if the selector times out.
