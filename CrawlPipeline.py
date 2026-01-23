@@ -332,7 +332,11 @@ def save_article_to_disk(
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-def build_pipeline(config: dict):
+def build_pipeline(
+        config: dict,
+        log_callback: Callable[..., None],
+        crawler_governor: GovernanceManager
+):
     d_fetcher_name = config.get('d_fetcher_name', 'N/A')
     d_fetcher_init_param = config.get('d_fetcher_init_param', {})
     d_fetcher = fetcher_factory(d_fetcher_name, d_fetcher_init_param)
@@ -354,7 +358,8 @@ def build_pipeline(config: dict):
         discoverer=discoverer,
         e_fetcher=e_fetcher,
         extractor=extractor,
-        log_callback=log_cb
+        log_callback=log_callback,
+        crawler_governor=crawler_governor
     )
     return pipeline
 
@@ -403,8 +408,11 @@ def drive_pipeline(pipeline: CrawlPipeline, config: dict):
         extractor_kwargs=extractor_kwargs
     )
 
-def run_pipeline(config: dict):
-    pipeline = build_pipeline(config)
+def run_pipeline(
+        config: dict,
+        log_callback: Callable[..., None] = print,
+        crawler_governor: Optional[GovernanceManager] = None):
+    pipeline = build_pipeline(config, log_callback, crawler_governor)
     drive_pipeline(pipeline, config)
 
 

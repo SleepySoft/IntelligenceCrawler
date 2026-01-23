@@ -130,11 +130,12 @@
 
                             <span class="text-xs truncate" x-text="node.name" :title="node.name"></span>
 
-                            <span x-show="node.isRealGroup && node.data?.round_id > 0"
-                                  class="text-[9px] font-mono bg-gray-800 text-blue-400 border border-gray-700 px-1.5 rounded-sm shrink-0"
-                                  title="Current Round ID">
-                                #<span x-text="node.data.round_id"></span>
-                            </span>
+                            <template x-if="node.isRealGroup && node.data?.round_id > 0">
+                                <span class="text-[9px] font-mono bg-gray-800 text-blue-400 border border-gray-700 px-1.5 rounded-sm shrink-0"
+                                      title="Current Round ID">
+                                    #<span x-text="node.data.round_id"></span>
+                                </span>
+                            </template>
                         </div>
 
                         <template x-if="node.isRealGroup && node.data">
@@ -231,34 +232,34 @@
                             </div>
 
                             <div class="flex-[2] bg-gray-900/80 rounded border border-gray-700/80 p-2 flex flex-col justify-between relative overflow-hidden"
-                                 x-show="roundStatus && roundStatus.round_id > 0">
+                                 x-show="roundStatus && roundStatus?.round_id > 0">
 
                                 <div class="flex justify-between items-center text-[10px] leading-none">
-                                    <span class="text-gray-400 font-bold">ROUND #<span x-text="roundStatus.round_id"></span></span>
-                                    <span class="flex items-center gap-1" :class="roundStatus.phase === 'RUNNING' ? 'text-emerald-400' : 'text-blue-400'">
-                                        <span class="w-1.5 h-1.5 rounded-full" :class="roundStatus.phase === 'RUNNING' ? 'bg-emerald-500 animate-pulse' : 'bg-gray-500'"></span>
-                                        <span x-text="roundStatus.phase === 'RUNNING' ? roundStatus.current_duration + 's' : (roundStatus.seconds_until_next > 0 ? 'T-' + roundStatus.seconds_until_next + 's' : 'IDLE')"></span>
+                                    <span class="text-gray-400 font-bold">ROUND #<span x-text="roundStatus?.round_id"></span></span>
+                                    <span class="flex items-center gap-1" :class="roundStatus?.phase === 'RUNNING' ? 'text-emerald-400' : 'text-blue-400'">
+                                        <span class="w-1.5 h-1.5 rounded-full" :class="roundStatus?.phase === 'RUNNING' ? 'bg-emerald-500 animate-pulse' : 'bg-gray-500'"></span>
+                                        <span x-text="roundStatus?.phase === 'RUNNING' ? roundStatus?.current_duration + 's' : (roundStatus?.seconds_until_next > 0 ? 'T-' + roundStatus?.seconds_until_next + 's' : 'IDLE')"></span>
                                     </span>
                                 </div>
 
                                 <div class="w-full h-1.5 bg-gray-700 rounded-full overflow-hidden mt-1">
-                                    <div class="h-full bg-blue-500 transition-all duration-500" :style="`width: ${roundStatus.progress_pct}%`"></div>
+                                    <div class="h-full bg-blue-500 transition-all duration-500" :style="`width: ${roundStatus?.progress_pct}%`"></div>
                                 </div>
 
                                 <div class="flex justify-between items-center text-[9px] font-mono mt-1 text-gray-500">
                                     <div class="flex gap-2">
-                                        <span title="Success" class="text-emerald-500/90">OK:<span x-text="roundStatus.stats?.success || 0"></span></span>
-                                        <span title="Failed" class="text-red-500/90">Err:<span x-text="roundStatus.stats?.failed || 0"></span></span>
-                                        <span title="Skipped" class="text-yellow-500/90">Skip:<span x-text="roundStatus.stats?.skipped || 0"></span></span>
+                                        <span title="Success" class="text-emerald-500/90">OK:<span x-text="roundStatus?.stats?.success || 0"></span></span>
+                                        <span title="Failed" class="text-red-500/90">Err:<span x-text="roundStatus?.stats?.failed || 0"></span></span>
+                                        <span title="Skipped" class="text-yellow-500/90">Skip:<span x-text="roundStatus?.stats?.skipped || 0"></span></span>
                                     </div>
                                     <div class="text-gray-400">
-                                        <span x-text="roundStatus.processed"></span>/<span x-text="roundStatus.expected"></span>
+                                        <span x-text="roundStatus?.processed"></span>/<span x-text="roundStatus?.expected"></span>
                                     </div>
                                 </div>
                             </div>
 
                             <div class="flex-[2] bg-gray-900/30 rounded border border-gray-800 border-dashed p-2 flex items-center justify-center text-[10px] text-gray-600"
-                                 x-show="!roundStatus || roundStatus.round_id === 0">
+                                 x-show="!roundStatus || roundStatus?.round_id === 0">
                                 No Round Active
                             </div>
 
