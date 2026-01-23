@@ -84,6 +84,8 @@ class CrawlerGovernanceBackend:
                               maybe_wrap(self.get_history_stats), methods=['GET'])
         self.app.add_url_rule(build_url('/api/group/round_status'), 'get_group_round_status',
                               maybe_wrap(self.get_group_round_status), methods=['GET'])
+        self.app.add_url_rule(build_url('/api/export/<target>'), 'export_data',
+                              maybe_wrap(self.export_data), methods=['GET'])
 
         # Control APIs (POST)
         self.app.add_url_rule(build_url('/api/control/<action>'), 'system_control', maybe_wrap(self.system_control),
@@ -266,6 +268,39 @@ class CrawlerGovernanceBackend:
         # 调用 Governor 新增的接口
         status_data = self.governor.get_group_round_status(group_path)
         return jsonify(status_data)
+
+    def export_data(self, target):
+        """
+        导出数据接口。
+        Target: 'global', 'group_status', 'group_logs'
+        Query: group (当 target 不是 global 时必填)
+        """
+        from flask import Response  # 确保引入 Response
+
+        if not self.governor: return jsonify({"error": "Init failed"}), 500
+
+        group = request.args.get('group')
+        csv_content = ""
+        filename = f"export_{target}_{int(time.time())}.csv"
+
+        if target == 'global':
+            csv_content = self.governor.get_export_csv('global_stats')
+        elif target == 'group_status':
+            if not group: return jsonify({"error": "Missing group"}), 400
+            csv_content = self.governor.get_export_csv('group_status', group_path=group)
+            filename = f"status_{group.replace('/', '_')}.csv"
+        elif target == 'group_logs':
+            if not group: return jsonify({"error": "Missing group"}), 400
+            csv_content = self.governor.get_export_csv('group_logs', group_path=group)
+            filename = f"logs_{group.replace('/', '_')}.csv"
+        else:
+            return jsonify({"error": "Invalid export target"}), 400
+
+        return Response(
+            csv_content,
+            mimetype="text/csv",
+            headers={"Content-disposition": f"attachment; filename={filename}"}
+        )
 
     def reset_stats(self):
         if self.governor:

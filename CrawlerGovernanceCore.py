@@ -1227,11 +1227,16 @@ class GovernanceManager:
             l_url = g['list_url']
             l_status = list_url_map.get(l_url)
 
+            current_round_id = 0
+            if g_path in self.round_contexts:
+                current_round_id = self.round_contexts[g_path].round_id
+
             result.append({
                 'group_path': g_path,
                 'name': g['name'],
                 'stats': current_stats,
-                'list_url_status': l_status
+                'list_url_status': l_status,
+                'round_id': current_round_id
             })
 
         return result
@@ -1496,3 +1501,65 @@ class GovernanceManager:
             'daily_trend': list(daily_map.values()),
             'current_status_dist': status_dist
         }
+
+    def get_export_csv(self, export_type: str, group_path: str = None) -> str:
+        """生成 CSV 格式的字符串"""
+        import io
+        import csv
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        if export_type == 'global_stats':
+            # 导出全局统计
+            # Header
+            writer.writerow(['Group', 'Spider', 'Round ID', 'Phase', 'Total Items', 'Success', 'Failed', 'Skipped',
+                             'Avg Duration (s)', 'List URL Status'])
+
+            # Data
+            summary = self.get_dashboard_summary()  # 复用现有的聚合逻辑
+            for item in summary:
+                # 获取更详细的 round context
+                ctx = self.round_contexts.get(item['group_path'])
+                phase = ctx.phase if ctx else "IDLE"
+
+                stats = item['stats']['results']  # 使用结果统计
+                perf = item['stats']['perf']
+                list_st = item['list_url_status']['status'] if item.get('list_url_status') else -1
+
+                writer.writerow([
+                    item['group_path'],
+                    item.get('spider', ''),  # summary里可能需要补充spider字段，或者从path解析
+                    item.get('round_id', 0),
+                    phase,
+                    stats.get('total', 0),
+                    stats.get('success', 0),
+                    stats.get('failed', 0),
+                    stats.get('skipped', 0),  # 需要确保 dashboard summary 的 stats 里有 skipped，如果没有需从 traffic 或 ctx 取
+                    perf.get('avg', 0),
+                    list_st
+                ])
+
+        elif export_type == 'group_status':
+            # 导出当前组的状态快照 (crawl_status)
+            writer.writerow(['URL', 'Status', 'HTTP Code', 'Retry Count', 'Last Run', 'Next Run', 'Error Msg'])
+            if group_path:
+                rows = self.db.fetch_all(
+                    "SELECT url, status, http_code, retry_count, last_run_at, next_run_at, state_msg FROM crawl_status WHERE group_path = ?",
+                    (group_path,))
+                for r in rows:
+                    writer.writerow(
+                        [r['url'], r['status'], r['http_code'], r['retry_count'], r['last_run_at'], r['next_run_at'],
+                         r['state_msg']])
+
+        elif export_type == 'group_logs':
+            # 导出当前组的日志历史 (crawl_log)
+            writer.writerow(['ID', 'Time', 'URL', 'Status', 'HTTP Code', 'Duration'])
+            if group_path:
+                rows = self.db.fetch_all(
+                    "SELECT id, created_at, url, status, http_code, duration FROM crawl_log WHERE group_path = ? ORDER BY id DESC LIMIT 10000",
+                    (group_path,))
+                for r in rows:
+                    writer.writerow([r['id'], r['created_at'], r['url'], r['status'], r['http_code'], r['duration']])
+
+        return output.getvalue()
