@@ -119,7 +119,8 @@ def also_print(log_callback):
     def wrapper(text):
         if log_callback != print:
             print(text)
-        log_callback(text)
+        if log_callback:
+            log_callback(text)
 
     return wrapper
 
@@ -608,8 +609,9 @@ class PlaywrightFetcher(Fetcher):
                 wait_until=wait_until
             )
 
-            if self.pause_browser:
-                page.pause()
+            # TODO: DEBUG
+            # if self.pause_browser:
+            #     page.pause()
 
             # This is a hard failure. If the page didn't load, we must error.
             if not response or not response.ok:
@@ -682,7 +684,9 @@ class PlaywrightFetcher(Fetcher):
                         "[Worker Warning] Network did not become idle after scrolling (5s timeout). Proceeding anyway.")
 
             try:
-                if callable(post_extra_action):
+                if post_extra_action is None:
+                    pass
+                elif callable(post_extra_action):
                     post_extra_action(page)
                 elif isinstance(post_extra_action, list):
                     action_engine = PlaywrightActionEngine(page=page, )

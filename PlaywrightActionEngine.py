@@ -113,9 +113,10 @@ class PlaywrightActionEngine:
                 success = self._execute_step(step)
 
                 if not success:
-                    # 步骤失败，返回False
-                    self._log(f"Step {i + 1} failed, stopping execution")
-                    return False
+                    self._log(f"Step {i + 1} failed, go next step.")
+                    # # 步骤失败，返回False
+                    # self._log(f"Step {i + 1} failed, stopping execution")
+                    # return False
 
             except Exception as e:
                 self._log(f"Error in step {i + 1}: {str(e)}")

@@ -1121,14 +1121,18 @@ class GovernanceManager:
 
                 # Update Traffic
                 t = s_dict['traffic']
-                t['total'] += count
 
                 if st == Status.RUNNING:
                     t['running'] += count
-                elif st in [Status.SUCCESS, Status.CACHED]:
-                    t['success'] += count
-                elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
-                    t['failed'] += count
+                elif st in [Status.PENDING, Status.SKIPPED]:
+                    # Not count in total
+                    pass
+                else:
+                    t['total'] += count
+                    if st in [Status.SUCCESS, Status.CACHED]:
+                        t['success'] += count
+                    elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
+                        t['failed'] += count
 
                 # Update Performance
                 if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED]:
