@@ -3,23 +3,18 @@
 import os
 import datetime
 import traceback
-from collections import defaultdict
-
 import tldextract
+from functools import partial
 from urllib.parse import urlparse
+from collections import defaultdict
 from typing import List, Optional, Callable, Any, Tuple, Dict
 
-# Import for generated code
-from functools import partial
-
-from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager, CrawlSession
-from IntelligenceCrawler.Fetcher import Fetcher, RequestsFetcher, PlaywrightFetcher
-from IntelligenceCrawler.Extractor import (
-    ExtractionResult, IExtractor, PassThroughExtractor, TrafilaturaExtractor,
-    ReadabilityExtractor, Newspaper3kExtractor, GenericCSSExtractor, Crawl4AIExtractor)
-from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer, ListPageDiscoverer
-from IntelligenceCrawler.Persistence import save_extraction_result_as_md, save_extraction_result_as_pdf
 from Tools.ProcessCotrolException import ProcessProblem
+from IntelligenceCrawler.Persistence import save_extraction_result_as_md, save_extraction_result_as_pdf
+from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager
+from IntelligenceCrawler.Discoverer import IDiscoverer, discoverer_factory
+from IntelligenceCrawler.Extractor import IExtractor, ExtractionResult, extractor_factory
+from IntelligenceCrawler.Fetcher import Fetcher, fetcher_factory
 
 log_cb = print
 
@@ -333,3 +328,84 @@ def save_article_to_disk(
     # PDF export has issue. Do not use.
     # if in_pdf:
     #     save_extraction_result_as_pdf(result, root_dir=BASE_OUTPUT_DIR)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+
+def build_pipeline(config: dict):
+    d_fetcher_name = config.get('d_fetcher_name', 'N/A')
+    d_fetcher_init_param = config.get('d_fetcher_init_param', {})
+    d_fetcher = fetcher_factory(d_fetcher_name, d_fetcher_init_param)
+
+    e_fetcher_name = config.get('e_fetcher_name', 'N/A')
+    e_fetcher_init_param = config.get('e_fetcher_init_param', {})
+    e_fetcher = fetcher_factory(e_fetcher_name, e_fetcher_init_param)
+
+    discoverer_name = config.get('discoverer_name', 'N/A')
+    discoverer_init_param = config.get('discoverer_init_param', {})
+    discoverer = discoverer_factory(discoverer_name, { 'fetcher': d_fetcher, **discoverer_init_param} )
+
+    extractor_name = config.get('extractor_name', 'N/A')
+    extractor_init_param = config.get('extractor_init_param', {})
+    extractor = extractor_factory(extractor_name, extractor_init_param)
+
+    pipeline = CrawlPipeline(
+        d_fetcher=d_fetcher,
+        discoverer=discoverer,
+        e_fetcher=e_fetcher,
+        extractor=extractor,
+        log_callback=log_cb
+    )
+    return pipeline
+
+
+def drive_pipeline(pipeline: CrawlPipeline, config: dict):
+    entry_points = config.get('entry_points', [])
+    start_date, end_date = config.get('period_filter', (None, None))
+    d_fetcher_kwargs = config.get('d_fetcher_kwargs', {})
+
+    # ============== 1. Discover Channels ==============
+
+    pipeline.discover_channels(
+        entry_point=entry_points,
+        start_date=start_date,
+        end_date=end_date,
+        fetcher_kwargs=d_fetcher_kwargs)
+
+    # ============== 2. Discover Articles ==============
+
+    # Only support channel_list_filter
+    channel_filter = config.get('channel_filter', {})
+    if 'channel_list_filter' in channel_filter:
+        channel_list_filter_params = channel_filter['channel_list_filter']
+        channel_filter = partial(common_channel_filter, channel_filter_list=channel_list_filter_params)
+    else:
+        channel_filter = None
+
+    pipeline.discover_articles(
+        channel_filter=channel_filter,
+        fetcher_kwargs=d_fetcher_kwargs)
+
+    # =============== 3. Extract Articles ===============
+
+    article_filter = config.get('article_filter', None)
+    content_handler = config.get('content_handler', None)
+    exception_handler = config.get('exception_handler', None)
+
+    e_fetcher_kwargs = config.get('e_fetcher_kwargs', { })
+    extractor_kwargs = config.get('extractor_kwargs', { })
+
+    pipeline.extract_articles(
+        article_filter=article_filter,
+        content_handler=content_handler,
+        exception_handler=exception_handler,
+        fetcher_kwargs=e_fetcher_kwargs,
+        extractor_kwargs=extractor_kwargs
+    )
+
+def run_pipeline(config: dict):
+    pipeline = build_pipeline(config)
+    drive_pipeline(pipeline, config)
+
+
+# ----------------------------------------------------------------------------------------------------------------------

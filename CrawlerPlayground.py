@@ -1171,7 +1171,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         code_layout_button_line.addWidget(self.refresh_code_button, 1)
 
         self.save_code_button = QPushButton(QIcon.fromTheme("document-save"), "Save Code to File...")
-        self.save_code_button.setToolTip("Save the generated code above to a Python file (e.g., CrawlerGenerated.py)")
+        self.save_code_button.setToolTip("Save the generated code above to a Python file (e.g., CrawlerConfig.py)")
         code_layout_button_line.addWidget(self.save_code_button, 99)
 
         code_layout.addLayout(code_layout_button_line)
@@ -2166,7 +2166,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             return
 
         # Open "Save As" dialog
-        default_filename = "CrawlerGenerated.py"
+        default_filename = "CrawlerConfig.py"
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Generated Code",
