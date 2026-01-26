@@ -134,15 +134,30 @@ class IDiscoverer(ABC):
 
 def discoverer_factory(name: str, init_params: dict):
     if name == 'RSSDiscoverer':
-        # Params - fetcher: Fetcher, verbose: bool
-        return RSSDiscoverer(**init_params)
+        fetcher = init_params.get('fetcher')
+        verbose = init_params.get('verbose', False)
+        return RSSDiscoverer(fetcher=fetcher, verbose=verbose)
+
     if name == 'SitemapDiscoverer':
-        # Params - fetcher: Fetcher, verbose: bool
-        return SitemapDiscoverer(**init_params)
+        fetcher = init_params.get('fetcher')
+        verbose = init_params.get('verbose', False)
+        return SitemapDiscoverer(fetcher=fetcher, verbose=verbose)
+
     if name == 'ListPageDiscoverer':
-        # Params - fetcher: Fetcher, verbose: bool, min_group_count: int,
-        #          scope_selector: Optional[str], manual_specified_signature: Optional[str]
-        return ListPageDiscoverer(**init_params)
+        fetcher = init_params.get('fetcher')
+        verbose = init_params.get('verbose', False)
+        min_group_count = init_params.get('min_group_count', 5)
+        scope_selector = init_params.get('scope_selector')
+        manual_specified_signature = init_params.get('manual_specified_signature')
+
+        return ListPageDiscoverer(
+            fetcher=fetcher,
+            verbose=verbose,
+            min_group_count=min_group_count,
+            scope_selector=scope_selector,
+            manual_specified_signature=manual_specified_signature
+        )
+
     raise ValueError(f"Unknown discoverer: {name}")
 
 

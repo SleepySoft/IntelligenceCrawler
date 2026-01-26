@@ -107,12 +107,33 @@ class Fetcher(ABC):
 
 def fetcher_factory(name: str, init_params: dict) -> Fetcher:
     if name == 'RequestsFetcher':
-        # Params - log_callback, proxy: Optional[str], timeout_s: int
-        return RequestsFetcher(**init_params)
+        log_callback = init_params.get('log_callback')
+        proxy = init_params.get('proxy')
+        timeout_s = init_params.get('timeout_s', 30)
+
+        return RequestsFetcher(
+            log_callback=log_callback,
+            proxy=proxy,
+            timeout_s=timeout_s
+        )
+
     if name == 'PlaywrightFetcher':
-        # Params - log_callback, proxy: Optional[str], timeout_s: int,
-        #          stealth: bool, pause_browser: bool, render_page: bool
-        return PlaywrightFetcher(**init_params)
+        log_callback = init_params.get('log_callback')
+        proxy = init_params.get('proxy')
+        timeout_s = init_params.get('timeout_s', 30)
+        stealth = init_params.get('stealth', False)
+        pause_browser = init_params.get('pause_browser', False)
+        render_page = init_params.get('render_page', True)
+
+        return PlaywrightFetcher(
+            log_callback=log_callback,
+            proxy=proxy,
+            timeout_s=timeout_s,
+            stealth=stealth,
+            pause_browser=pause_browser,
+            render_page=render_page
+        )
+
     raise ValueError(f"Unknown fetcher: {name}")
 
 

@@ -301,23 +301,30 @@ class IExtractor(ABC):
 
 def extractor_factory(name: str, init_params: dict):
     if name == 'PassThroughExtractor':
-        # Params - verbose: bool
-        return PassThroughExtractor(**init_params)
+        verbose = init_params.get('verbose', False)
+        return PassThroughExtractor(verbose=verbose)
+
     if name == 'TrafilaturaExtractor':
-        # Params - verbose: bool
-        return TrafilaturaExtractor(**init_params)
+        verbose = init_params.get('verbose', False)
+        return TrafilaturaExtractor(verbose=verbose)
+
     if name == 'ReadabilityExtractor':
-        # Params - verbose: bool
-        return ReadabilityExtractor(**init_params)
+        verbose = init_params.get('verbose', False)
+        return ReadabilityExtractor(verbose=verbose)
+
     if name == 'Newspaper3kExtractor':
-        # Params - verbose: bool
-        return Newspaper3kExtractor(**init_params)
+        verbose = init_params.get('verbose', False)
+        return Newspaper3kExtractor(verbose=verbose)
+
     if name == 'GenericCSSExtractor':
-        # Params - verbose: bool
-        return GenericCSSExtractor(**init_params)
+        verbose = init_params.get('verbose', False)
+        return GenericCSSExtractor(verbose=verbose)
+
     if name == 'Crawl4AIExtractor':
-        # Params (Reserved) - model_name: str, verbose: bool
-        return Crawl4AIExtractor(**init_params)
+        model_name = init_params.get('model_name', 'default_model')
+        verbose = init_params.get('verbose', False)
+        return Crawl4AIExtractor(model_name=model_name, verbose=verbose)
+
     raise ValueError(f"Unknown extractor: {name}")
 
 
