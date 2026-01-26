@@ -102,7 +102,8 @@ from PyQt5.QtWidgets import (
     QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QSplitter,
     QTextEdit, QStatusBar, QTabWidget, QLabel, QFrame, QComboBox,
     QDateEdit, QCheckBox, QToolBar, QSizePolicy, QSpinBox,
-    QMenu, QAction, QFileDialog, QFormLayout, QGridLayout, QDialogButtonBox, QDialog, QListView, QAbstractScrollArea
+    QMenu, QAction, QFileDialog, QFormLayout, QGridLayout, QDialogButtonBox, QDialog, QListView, QAbstractScrollArea,
+    QMessageBox
 )
 from PyQt5.QtCore import (
     Qt, QRunnable, QThreadPool, QObject, pyqtSignal, QTimer, QSettings
@@ -198,9 +199,8 @@ class FetcherConfigWidget(QWidget):
                                           "> 0: Scroll Down (load more)\n"
                                           "< 0: Scroll Up\n"
                                           "0: Disabled")
-        # --- [END NEW] ---
 
-        # --- [MODIFIED] Conditional Layout ---
+        # --- Conditional Layout ---
         if self.layout_style == 'one_row':
             # --- 'one_row' LAYOUT (using QHBoxLayout) ---
             # (用于 Discovery bar)
@@ -224,12 +224,12 @@ class FetcherConfigWidget(QWidget):
             layout.addWidget(self.wait_selector_label)
             layout.addWidget(self.wait_selector_input, 1)  # 选择器输入框也占满空间
 
-            # --- [NEW] Add scroll widgets to one_row layout ---
+            # --- Add scroll widgets to one_row layout ---
             layout.addWidget(self.scroll_pages_label)
             layout.addWidget(self.scroll_pages_spin)
 
         else:
-            # --- [REVISED] 'two_row' LAYOUT (using QGridLayout) ---
+            # --- 'two_row' LAYOUT (using QGridLayout) ---
             grid_layout = QGridLayout(self)
             grid_layout.setContentsMargins(0, 0, 0, 0)
             grid_layout.setSpacing(5)  # 增加控件间距
@@ -242,7 +242,7 @@ class FetcherConfigWidget(QWidget):
             grid_layout.addWidget(self.pause_check, 0, 4)  # Col 4
             grid_layout.addWidget(self.render_check, 0, 5)  # Col 5
 
-            # --- [NEW] Add Scroll to Row 0 (to keep it 2 rows) ---
+            # --- Add Scroll to Row 0 (to keep it 2 rows) ---
             grid_layout.addWidget(self.scroll_pages_label, 0, 6)  # Col 6
             grid_layout.addWidget(self.scroll_pages_spin, 0, 7)   # Col 7
 
@@ -262,8 +262,6 @@ class FetcherConfigWidget(QWidget):
             grid_layout.setColumnStretch(3, 1)  # (Timeout Spin / WaitUntil Combo)
             grid_layout.setColumnStretch(5, 2)  # (Render Check / Wait Selector Input)
             grid_layout.setColumnStretch(7, 1)  # [NEW] (Scroll Spin)
-
-        # --- [END MODIFICATION] ---
 
         # --- Connect Signals (Unchanged) ---
         self.fetcher_combo.currentTextChanged.connect(self._on_fetcher_changed)
@@ -320,6 +318,48 @@ class FetcherConfigWidget(QWidget):
             'wait_for_selector': self.wait_selector_input.text().strip() or None if is_playwright else None,
             'scroll_pages': self.scroll_pages_spin.value() if is_playwright else 0
         }
+
+    def load_from_config(self, fetcher_name: str, init_params: dict, runtime_kwargs: dict):
+        """
+        Smartly loads configuration back into the widget controls.
+        """
+        # 1. 设置 Fetcher 类型 (这将触发 _on_fetcher_changed 信号，更新 UI 可见性)
+        # 我们需要把类名 (RequestsFetcher) 映射回 UI 名称 (Simple (Requests))
+        # 这需要反向映射，或者我们在 UI ComboBox 里存 UserData
+
+        # 简单的反向查找逻辑：
+        target_ui_name = None
+        for i in range(self.fetcher_combo.count()):
+            ui_text = self.fetcher_combo.itemText(i)
+            # 这里的判断逻辑需要和你的生成逻辑对应
+            if "Requests" in fetcher_name and "Requests" in ui_text:
+                target_ui_name = ui_text
+                break
+            if "Playwright" in fetcher_name:
+                if init_params.get("stealth") and "Stealth" in ui_text:
+                    target_ui_name = ui_text
+                    break
+                elif not init_params.get("stealth") and "Advanced" in ui_text:
+                    target_ui_name = ui_text
+                    break
+
+        if target_ui_name:
+            self.fetcher_combo.setCurrentText(target_ui_name)
+
+        # 2. 填充初始化参数 (Init Params)
+        self.proxy_input.setText(init_params.get('proxy') or "")
+        self.timeout_spin.setValue(int(init_params.get('timeout_s', 30)))
+
+        # Playwright 特有
+        if "Playwright" in fetcher_name:
+            self.pause_check.setChecked(init_params.get('pause_browser', False))
+            self.render_check.setChecked(init_params.get('render_page', False))
+
+        # 3. 填充运行时参数 (Runtime Kwargs)
+        if "Playwright" in fetcher_name:
+            self.wait_until_combo.setCurrentText(runtime_kwargs.get('wait_until', 'networkidle'))
+            self.wait_selector_input.setText(runtime_kwargs.get('wait_for_selector') or "")
+            self.scroll_pages_spin.setValue(runtime_kwargs.get('scroll_pages', 0))
 
 
 class AdjustableWidthComboBox(QComboBox):
@@ -824,6 +864,7 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         # --- Initialize UI ---
         self.init_ui()
+        self.create_menu()
         self._load_url_history()
 
         settings = QSettings(SETTING_ORG, SETTING_APP)
@@ -1043,6 +1084,11 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.refresh_code_button.setToolTip("Re-generated code based on current configuration.")
         code_layout_button_line.addWidget(self.refresh_code_button, 1)
 
+        self.load_code_button = QPushButton(QIcon.fromTheme("document-open"), "Load Config...")
+        self.load_code_button.setToolTip("Load a saved CrawlerConfig.py and restore UI settings.")
+        self.load_code_button.clicked.connect(self.load_config_from_file)
+        code_layout_button_line.addWidget(self.load_code_button, 1)  # Add with stretch 1
+
         self.save_code_button = QPushButton(QIcon.fromTheme("document-save"), "Save Code to File...")
         self.save_code_button.setToolTip("Save the generated code above to a Python file (e.g., CrawlerConfig.py)")
         code_layout_button_line.addWidget(self.save_code_button, 99)
@@ -1075,6 +1121,36 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.status_bar.showMessage("Ready. Enter a URL and select a discoverer.")
 
         self.setCentralWidget(main_widget)
+
+    def create_menu(self):
+        # 1. 获取菜单栏
+        menubar = self.menuBar()
+
+        # 2. 创建 'File' 菜单
+        file_menu = menubar.addMenu('&File')
+
+        # 3. 添加 Load Action
+        load_action = QAction(QIcon.fromTheme("document-open"), '&Load Configuration...', self)
+        load_action.setShortcut('Ctrl+O')
+        load_action.setStatusTip('Load a saved configuration file')
+        load_action.triggered.connect(self.load_config_from_file)
+        file_menu.addAction(load_action)
+
+        # 4. 添加 Save Action
+        save_action = QAction(QIcon.fromTheme("document-save"), '&Save Configuration...', self)
+        save_action.setShortcut('Ctrl+S')
+        save_action.setStatusTip('Save current configuration to file')
+        save_action.triggered.connect(self._save_generated_code)
+        file_menu.addAction(save_action)
+
+        file_menu.addSeparator()
+
+        # 5. 添加 Exit Action
+        exit_action = QAction(QIcon.fromTheme("application-exit"), '&Exit', self)
+        exit_action.setShortcut('Ctrl+Q')
+        exit_action.setStatusTip('Exit application')
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
 
     def _create_article_preview_tab(self) -> QWidget:
         """Helper function to build the complex Article Preview tab."""
@@ -2085,6 +2161,128 @@ class CrawlerPlaygroundApp(QMainWindow):
             "Smart Analysis": "ListPageDiscoverer"
         }
         return mapping.get(ui_name, ui_name)
+
+        # 在 CrawlerPlaygroundApp 类中添加
+
+    def load_config_from_file(self):
+        """
+        Loads a python config file and updates the UI.
+        """
+        # 1. 打开文件选择器
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Configuration", "", "Python Files (*.py)"
+        )
+        if not file_path:
+            return
+
+        try:
+            # 2. 动态加载 Python 文件 (即执行它以获取字典)
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("loaded_config", file_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            if not hasattr(module, 'CRAWLER_CONFIG'):
+                raise ValueError("The file does not contain 'CRAWLER_CONFIG'.")
+
+            config = module.CRAWLER_CONFIG
+
+            # ==========================================
+            # 3. 开始 UI 同步 (顺序非常重要)
+            # ==========================================
+
+            # --- A. 恢复 Entry Point (URL) ---
+            entry_points = config.get('entry_points', [])
+            if entry_points:
+                # 假设我们只取第一个，或者把列表拼接成字符串
+                url_text = " ".join(entry_points) if isinstance(entry_points, list) else str(entry_points)
+
+                # 更新输入框
+                self.url_input.setCurrentText(url_text)
+                # 关键：同步更新缓存，否则下次生成会出错
+                self.last_used_entry_point = entry_points
+
+                # --- B. 恢复 Discoverer ---
+            # B1. 先设置类型 (触发 UI 变化)
+            disc_class = config.get('discoverer_name', 'SitemapDiscoverer')
+
+            # 简单的名称映射回 UI
+            ui_disc_map = {
+                'SitemapDiscoverer': 'Sitemap',
+                'RSSDiscoverer': 'RSS',
+                'ListPageDiscoverer': 'Smart Analysis'
+            }
+            ui_disc_name = ui_disc_map.get(disc_class)
+            if ui_disc_name:
+                self.discoverer_combo.setCurrentText(ui_disc_name)
+
+            # B2. 设置 Discoverer 参数 (Smart Analysis 特有)
+            disc_init = config.get('discoverer_init_param', {})
+            if disc_class == 'ListPageDiscoverer':
+                if self.manual_specified_signature_input:
+                    self.manual_specified_signature_input.setText(disc_init.get('manual_specified_signature') or "")
+                if self.scope_selector_input:
+                    self.scope_selector_input.setText(disc_init.get('scope_selector') or "")
+
+            # --- C. 恢复 Discovery Fetcher ---
+            self.discovery_fetcher_widget.load_from_config(
+                fetcher_name=config.get('d_fetcher_name', ''),
+                init_params=config.get('d_fetcher_init_param', {}),
+                runtime_kwargs=config.get('d_fetcher_kwargs', {})
+            )
+
+            # --- D. 恢复 Extractor ---
+            # D1. 设置类型
+            ext_class = config.get('extractor_name', 'TrafilaturaExtractor')
+            # 假设 UI 中的名字基本和类名对应 (去除 'Extractor' 后缀或查表)
+            # 这里做一个简单处理：
+            target_ext_ui = None
+            for i in range(self.extractor_combo.count()):
+                ui_text = self.extractor_combo.itemText(i)
+                # 比如 TrafilaturaExtractor -> Trafilatura
+                if ui_text in ext_class:
+                    target_ext_ui = ui_text
+                    break
+
+            if target_ext_ui:
+                self.extractor_combo.setCurrentText(target_ext_ui)
+
+            # D2. 设置 Extractor 参数 (如 Generic CSS 的 selector)
+            # 注意：Extractor 的参数在生成代码时可能分散在 init_param 和 kwargs 里
+            # 根据你的生成逻辑，Generic CSS 的 selectors 应该在 kwargs 里
+            ext_kwargs = config.get('extractor_kwargs', {})
+            if "Generic" in ext_class:
+                selectors = ext_kwargs.get('selectors', [])
+                if selectors:
+                    self.css_selector_input.setText(", ".join(selectors))
+
+            # --- E. 恢复 Article Fetcher ---
+            self.article_fetcher_widget.load_from_config(
+                fetcher_name=config.get('e_fetcher_name', ''),
+                init_params=config.get('e_fetcher_init_param', {}),
+                runtime_kwargs=config.get('e_fetcher_kwargs', {})
+            )
+
+            # --- F. 恢复 Date Filter ---
+            period = config.get('period_filter', (None, None))
+            # period 可能是 (datetime, datetime) 或者 (None, None)
+            if period and period[0]:
+                self.date_filter_check.setChecked(True)
+                # 计算天数差
+                delta = period[1] - period[0]
+                self.date_filter_days_spin.setValue(max(1, delta.days))
+            else:
+                self.date_filter_check.setChecked(False)
+
+            self.status_bar.showMessage(f"Configuration loaded from {file_path}", 5000)
+
+            # 最后：强制刷新一下代码预览，确保“加载”后的状态和“生成”的代码一致
+            self.update_generated_code()
+
+        except Exception as e:
+            self.status_bar.showMessage(f"Failed to load config: {e}")
+            print(traceback.format_exc())
+            QMessageBox.warning(self, "Load Error", f"Could not load configuration:\n{str(e)}")
 
 
 # =============================================================================
