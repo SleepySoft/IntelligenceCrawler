@@ -134,29 +134,30 @@ class IDiscoverer(ABC):
 
 def discoverer_factory(name: str, init_params: dict):
     if name == 'RSSDiscoverer':
-        fetcher = init_params.get('fetcher')
-        verbose = init_params.get('verbose', False)
-        return RSSDiscoverer(fetcher=fetcher, verbose=verbose)
+        return RSSDiscoverer(
+            fetcher=init_params.get('fetcher'),
+            verbose=init_params.get('verbose', False)
+        )
 
     if name == 'SitemapDiscoverer':
-        fetcher = init_params.get('fetcher')
-        verbose = init_params.get('verbose', False)
-        return SitemapDiscoverer(fetcher=fetcher, verbose=verbose)
+        return SitemapDiscoverer(
+            fetcher=init_params.get('fetcher'),
+            verbose=init_params.get('verbose', False)
+        )
 
     if name == 'ListPageDiscoverer':
-        fetcher = init_params.get('fetcher')
-        verbose = init_params.get('verbose', False)
-        min_group_count = init_params.get('min_group_count', 5)
-        scope_selector = init_params.get('scope_selector')
-        manual_specified_signature = init_params.get('manual_specified_signature')
-
         return ListPageDiscoverer(
-            fetcher=fetcher,
-            verbose=verbose,
-            min_group_count=min_group_count,
-            scope_selector=scope_selector,
-            manual_specified_signature=manual_specified_signature
+            fetcher=init_params.get('fetcher'),
+            verbose=init_params.get('verbose', False),
+            # min_group_count 可以在这里写死或者从 UI 获取，目前默认 5
+            min_group_count=init_params.get('min_group_count', 5),
+            scope_selector=init_params.get('scope_selector'),
+            manual_specified_signature=init_params.get('manual_specified_signature')
         )
+
+    if name == 'Sitemap': return discoverer_factory('SitemapDiscoverer', init_params)
+    if name == 'RSS': return discoverer_factory('RSSDiscoverer', init_params)
+    if name == 'Smart Analysis': return discoverer_factory('ListPageDiscoverer', init_params)
 
     raise ValueError(f"Unknown discoverer: {name}")
 

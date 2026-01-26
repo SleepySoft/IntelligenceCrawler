@@ -107,32 +107,26 @@ class Fetcher(ABC):
 
 def fetcher_factory(name: str, init_params: dict) -> Fetcher:
     if name == 'RequestsFetcher':
-        log_callback = init_params.get('log_callback')
-        proxy = init_params.get('proxy')
-        timeout_s = init_params.get('timeout_s', 30)
-
         return RequestsFetcher(
-            log_callback=log_callback,
-            proxy=proxy,
-            timeout_s=timeout_s
+            log_callback=init_params.get('log_callback'),
+            proxy=init_params.get('proxy'),
+            timeout_s=init_params.get('timeout_s', 30)
         )
 
     if name == 'PlaywrightFetcher':
-        log_callback = init_params.get('log_callback')
-        proxy = init_params.get('proxy')
-        timeout_s = init_params.get('timeout_s', 30)
-        stealth = init_params.get('stealth', False)
-        pause_browser = init_params.get('pause_browser', False)
-        render_page = init_params.get('render_page', True)
-
         return PlaywrightFetcher(
-            log_callback=log_callback,
-            proxy=proxy,
-            timeout_s=timeout_s,
-            stealth=stealth,
-            pause_browser=pause_browser,
-            render_page=render_page
+            log_callback=init_params.get('log_callback'),
+            proxy=init_params.get('proxy'),
+            timeout_s=init_params.get('timeout_s', 30),
+            stealth=init_params.get('stealth', False),
+            pause_browser=init_params.get('pause_browser', False),
+            render_page=init_params.get('render_page', True)
         )
+
+    if 'Requests' in name:
+        return fetcher_factory('RequestsFetcher', init_params)
+    if 'Playwright' in name:
+        return fetcher_factory('PlaywrightFetcher', init_params)
 
     raise ValueError(f"Unknown fetcher: {name}")
 

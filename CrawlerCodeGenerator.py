@@ -50,41 +50,17 @@ if __name__ == "__main__":
 """
 
 
-class CrawlerConfigGenerator:
+class CrawlerCodeGenerator:
     """Generates crawler configuration in dictionary format instead of executable code."""
 
-    def generate_config_from_config(self, config: dict) -> str:
+    def generate_code_from_config(self, config: dict) -> str:
         """
         Takes a configuration dict and generates a configuration dictionary
         instead of executable Python code.
-
-        Args:
-            config: Configuration dictionary from UI
-
-        Returns:
-            String representation of the configuration Python file
         """
-        # Class name mappings (same as before)
-        DISCOVERER_NAME_MAP = {
-            "Sitemap": "SitemapDiscoverer",
-            "RSS": "RSSDiscoverer",
-            "Smart Analysis": "ListPageDiscoverer"
-        }
-
-        FETCHER_NAME_MAP = {
-            "Simple (Requests)": "RequestsFetcher",
-            "Advanced (Playwright)": "PlaywrightFetcher",
-            "Stealth (Playwright)": "PlaywrightFetcher"
-        }
-
-        EXTRACTOR_NAME_MAP = {
-            "PassThrough": 'PassThroughExtractor',
-            "Trafilatura": 'TrafilaturaExtractor',
-            "Readability": 'ReadabilityExtractor',
-            "Newspaper3k": 'Newspaper3kExtractor',
-            "Generic CSS": 'GenericCSSExtractor',
-            "Crawl4AI": 'Crawl4AIExtractor',
-        }
+        # [FIX 1] 移除过时的映射表。
+        # _build_config_dict 现在已经输出了标准的类名 (e.g. 'SitemapDiscoverer', 'RequestsFetcher')
+        # 我们直接信任输入的类名即可。
 
         # Extract configuration sections
         d_config = config['discoverer']
@@ -92,11 +68,12 @@ class CrawlerConfigGenerator:
         d_fetcher_config = d_config['fetcher']
         e_fetcher_config = e_config['fetcher']
 
-        # Map class names
-        discoverer_class = DISCOVERER_NAME_MAP.get(d_config['class'], "UnknownDiscoverer")
-        d_fetcher_class = FETCHER_NAME_MAP.get(d_fetcher_config['class'], "UnknownFetcher")
-        extractor_class = EXTRACTOR_NAME_MAP.get(e_config['class'], "UnknownExtractor")
-        e_fetcher_class = FETCHER_NAME_MAP.get(e_fetcher_config['class'], "UnknownFetcher")
+        # [FIX 1] 直接获取类名，不再进行二次映射
+        # 如果你担心兼容性，可以加一个简单的 fallback，但通常不需要
+        discoverer_class = d_config.get('class', "UnknownDiscoverer")
+        d_fetcher_class = d_fetcher_config.get('class', "UnknownFetcher")
+        extractor_class = e_config.get('class', "UnknownExtractor")
+        e_fetcher_class = e_fetcher_config.get('class', "UnknownFetcher")
 
         # Generate parameter codes for each section
         d_fetcher_init_param_code = self._generate_fetcher_params_code(d_fetcher_class, d_fetcher_config['parameters'])
@@ -105,11 +82,19 @@ class CrawlerConfigGenerator:
         extractor_init_param_code = self._generate_extractor_params_code(extractor_class, e_config.get('args', {}))
 
         # Generate crawl parameters
+        # [FIX 2] 传入 d_config 整体，而不是 args，因为 entry_point 在 args 里，但 date_filter 不在
         entry_points_code = self._generate_entry_points_code(d_config['args'])
-        period_filter_code = self._generate_period_filter_code(d_config['args'])
+
+        # [FIX 2] Date Filter 位于 d_config['date_filter']
+        period_filter_code = self._generate_period_filter_code(d_config.get('date_filter', {}))
+
         channel_filter_code = self._generate_channel_filter_code(config.get('channel_filter', {}))
+
         d_fetcher_kwargs_code = repr(d_config.get('fetcher_kwargs', {}))
         e_fetcher_kwargs_code = repr(e_config.get('fetcher_kwargs', {}))
+
+        # Extractor kwargs 通常就是 args (包含 selectors 等)
+        # 注意：这里可能会和 init_param 重复，但在 Python config 文件中通常是可以接受的
         extractor_kwargs_code = repr(e_config.get('args', {}))
 
         # Format the final configuration
@@ -136,10 +121,11 @@ class CrawlerConfigGenerator:
         """Generate fetcher initialization parameters."""
         fetcher_params = {'log_callback': 'print'}
 
+        # [FIX 4] 键名匹配：UI 传递的是 'timeout_s' 而不是 'timeout'
         if 'Playwright' in fetcher_class:
             fetcher_params.update({
                 'proxy': params.get('proxy'),
-                'timeout_s': params.get('timeout'),
+                'timeout_s': params.get('timeout_s'),  # Changed from 'timeout'
                 'stealth': params.get('stealth', False),
                 'pause_browser': params.get('pause_browser', False),
                 'render_page': params.get('render_page', False)
@@ -147,7 +133,7 @@ class CrawlerConfigGenerator:
         elif 'Requests' in fetcher_class:
             fetcher_params.update({
                 'proxy': params.get('proxy'),
-                'timeout_s': params.get('timeout')
+                'timeout_s': params.get('timeout_s')  # Changed from 'timeout'
             })
 
         return self._dict_to_config_str(fetcher_params)
@@ -166,36 +152,55 @@ class CrawlerConfigGenerator:
 
     def _generate_extractor_params_code(self, extractor_class: str, args: dict) -> str:
         """Generate extractor initialization parameters."""
-        # Basic extractor parameters - can be extended based on specific extractor needs
         extractor_params = {'verbose': True}
+        # 如果有特定于 __init__ 的参数（如 Crawl4AI 的 model_name），应在这里处理
+        if 'Crawl4AI' in extractor_class and 'model_name' in args:
+            extractor_params['model_name'] = args['model_name']
+
         return self._dict_to_config_str(extractor_params)
 
     def _generate_entry_points_code(self, args: dict) -> str:
         """Generate entry points configuration."""
         entry_point = args.get('entry_point')
-        # In your example, you have multiple entry points from the links
-        # For now, using single entry point, but can be extended to support multiple
-        return repr([entry_point] if entry_point else [])
 
-    def _generate_period_filter_code(self, args: dict) -> str:
+        # [FIX 3] entry_point 现在已经是 List[str] 了，不需要再包一层列表
+        # 如果是 None 或空列表，返回 []
+        if not entry_point:
+            return "[]"
+
+        if isinstance(entry_point, list):
+            return repr(entry_point)
+
+        # Fallback (尽管现在的逻辑应该总是 list)
+        return repr([entry_point])
+
+    def _generate_period_filter_code(self, date_filter_config: dict) -> str:
         """Generate period filter configuration."""
-        if args.get('date_filter_enabled'):
-            days_ago = args['date_filter_days']
+        # [FIX 2] 使用传入的 dict (结构为 {'enabled': bool, 'days': int})
+        if date_filter_config.get('enabled'):
+            days_ago = date_filter_config.get('days', 7)
             end_date = datetime.datetime.now()
             start_date = end_date - datetime.timedelta(days=days_ago)
+            # 使用 repr 和 isoformat 生成干净的代码
             return f"(datetime.datetime.fromisoformat('{start_date.isoformat()}'), datetime.datetime.fromisoformat('{end_date.isoformat()}'))"
         else:
             return "(None, None)"
 
     def _generate_channel_filter_code(self, filter_config: dict) -> str:
         """Generate channel filter configuration."""
+        # 这里的 filter_config 结构在上一轮是 {'channel_filter_keys': [...]}
         checked_keys = filter_config.get('channel_filter_keys', [])
+
+        # 如果列表为空，最好生成 None 以表明没有过滤（即允许所有）
+        # 或者生成空列表（取决于你的管道逻辑，通常 None 意味着不过滤，空列表意味着过滤全部）
+        if not checked_keys:
+            return "None"
+
         channel_filter = {'channel_list_filter': checked_keys}
         return self._dict_to_config_str(channel_filter)
 
     def _dict_to_config_str(self, param_dict: dict) -> str:
         """Convert dictionary to configuration string representation."""
-        # Special handling for log_callback and other callbacks
         formatted_items = []
         for key, value in param_dict.items():
             if key == 'log_callback' and value == 'print':
@@ -208,17 +213,3 @@ class CrawlerConfigGenerator:
                 formatted_items.append(f"'{key}': {value}")
 
         return "{" + ", ".join(formatted_items) + "}"
-
-
-# Optional: Maintain backward compatibility with existing code generation
-class CrawlerCodeGenerator:
-    """Legacy code generator - can be deprecated over time"""
-
-    def generate_code_from_config(self, config: dict) -> str:
-        """
-        Legacy method that now uses the new config generator
-        and wraps it in executable code template for backward compatibility.
-        """
-        config_generator = CrawlerConfigGenerator()
-        config_str = config_generator.generate_config_from_config(config)
-        return config_str

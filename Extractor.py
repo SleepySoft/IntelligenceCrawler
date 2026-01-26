@@ -300,30 +300,26 @@ class IExtractor(ABC):
 
 
 def extractor_factory(name: str, init_params: dict):
-    if name == 'PassThroughExtractor':
-        verbose = init_params.get('verbose', False)
-        return PassThroughExtractor(verbose=verbose)
+    if name == 'PassThroughExtractor' or name == 'PassThrough':
+        return PassThroughExtractor(verbose=init_params.get('verbose', False))
 
-    if name == 'TrafilaturaExtractor':
-        verbose = init_params.get('verbose', False)
-        return TrafilaturaExtractor(verbose=verbose)
+    if name == 'TrafilaturaExtractor' or name == 'Trafilatura':
+        return TrafilaturaExtractor(verbose=init_params.get('verbose', False))
 
-    if name == 'ReadabilityExtractor':
-        verbose = init_params.get('verbose', False)
-        return ReadabilityExtractor(verbose=verbose)
+    if name == 'ReadabilityExtractor' or name == 'Readability':
+        return ReadabilityExtractor(verbose=init_params.get('verbose', False))
 
-    if name == 'Newspaper3kExtractor':
-        verbose = init_params.get('verbose', False)
-        return Newspaper3kExtractor(verbose=verbose)
+    if name == 'Newspaper3kExtractor' or name == 'Newspaper3k':
+        return Newspaper3kExtractor(verbose=init_params.get('verbose', False))
 
-    if name == 'GenericCSSExtractor':
-        verbose = init_params.get('verbose', False)
-        return GenericCSSExtractor(verbose=verbose)
+    if name == 'GenericCSSExtractor' or name == 'Generic CSS':
+        return GenericCSSExtractor(verbose=init_params.get('verbose', False))
 
-    if name == 'Crawl4AIExtractor':
-        model_name = init_params.get('model_name', 'default_model')
-        verbose = init_params.get('verbose', False)
-        return Crawl4AIExtractor(model_name=model_name, verbose=verbose)
+    if name == 'Crawl4AIExtractor' or name == 'Crawl4AI':
+        return Crawl4AIExtractor(
+            model_name=init_params.get('model_name', 'default_model'),
+            verbose=init_params.get('verbose', False)
+        )
 
     raise ValueError(f"Unknown extractor: {name}")
 

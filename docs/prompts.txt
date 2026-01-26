@@ -352,7 +352,7 @@ metadata可以添加到pdf的metadata中但不要加入正文中。
 
 CrawlerPlaygroundApp中有个函数叫_build_config_dict()，它会将提取参数并打包，这些参数会用来生成代码。
 此外还有不同的worker，但它有自己的参数机制。我希望它们使用同样的，由_build_config_dict()生成的dict参数包，这样一来能保证一致性。
-同时，我在各类模块中实现了一系列的factory，使用这一系列工厂来统一创建实例：
+同时，我在各类的模块中实现了一系列的factory，改为使用这一系列工厂来统一创建实例：
 
 
 

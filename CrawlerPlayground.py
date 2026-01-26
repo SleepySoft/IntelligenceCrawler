@@ -24,7 +24,7 @@ except Exception as e:
 # --- Core Component Imports ---
 
 try:
-    from IntelligenceCrawler.Fetcher import Fetcher, PlaywrightFetcher, RequestsFetcher
+    from IntelligenceCrawler.Fetcher import Fetcher, PlaywrightFetcher, RequestsFetcher, fetcher_factory
 except ImportError:
     print("!!! CRITICAL: Could not import Fetcher classes.")
 
@@ -33,7 +33,8 @@ except ImportError:
     class PlaywrightFetcher: pass
     class RequestsFetcher: pass
 try:
-    from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer, ListPageDiscoverer
+    from IntelligenceCrawler.Discoverer import IDiscoverer, SitemapDiscoverer, RSSDiscoverer, ListPageDiscoverer, \
+    discoverer_factory
 except ImportError:
     print("!!! CRITICAL: Could not import Discoverer classes.")
     class IDiscoverer: pass
@@ -43,8 +44,8 @@ except ImportError:
 try:
     from IntelligenceCrawler.Extractor import (
         IExtractor, PassThroughExtractor, TrafilaturaExtractor, ReadabilityExtractor,
-        Newspaper3kExtractor, GenericCSSExtractor, Crawl4AIExtractor, ExtractionResult
-)
+        Newspaper3kExtractor, GenericCSSExtractor, Crawl4AIExtractor, ExtractionResult, extractor_factory
+    )
     # Store imported classes for factory
     EXTRACTOR_MAP = {
         "PassThrough": PassThroughExtractor,
@@ -120,79 +121,6 @@ except ImportError:
 
 SETTING_ORG = 'SleepySoft'
 SETTING_APP = 'CrawlerPlayground'
-
-
-# =============================================================================
-#
-# SECTION 1: Utility Factories
-# (To create instances inside workers)
-#
-# =============================================================================
-def create_fetcher_instance(fetcher_name: str,
-                            log_callback,
-                            proxy: Optional[str] = None,
-                            timeout: int = 10,  # <-- NEW (in seconds)
-                            **kwargs) -> Fetcher:
-    """
-    Factory to create a fetcher instance based on its name.
-    (工厂函数：根据名称创建 fetcher 实例。)
-    """
-    stealth_mode = "Stealth" in fetcher_name
-    pause = kwargs.get('pause_browser', False)
-    render = kwargs.get('render_page', False)
-
-    # We assume the Fetcher classes have been modified to accept 'timeout'
-    # in their __init__ and apply it appropriately (e.g., to self.timeout).
-    # (我们假设 Fetcher 类已被修改以在 __init__ 中接受 'timeout'。)
-
-    if "Playwright" in fetcher_name:
-        if not sync_playwright: raise ImportError("Playwright not installed.")
-        if stealth_mode and (not sync_stealth and not Stealth):
-            raise ImportError("Playwright-Stealth not installed.")
-
-        return PlaywrightFetcher(
-            log_callback=log_callback,
-            proxy=proxy,
-            timeout_s=timeout,  # <-- NEW (pass ms)
-            stealth=stealth_mode,
-            pause_browser=pause,
-            render_page=render
-        )
-    else:  # "Simple (Requests)"
-        return RequestsFetcher(
-            log_callback=log_callback,
-            proxy=proxy,
-            timeout_s=timeout
-        )
-
-
-def create_discoverer_instance(discoverer_name: str, fetcher: Fetcher, log_callback, **kwargs) -> IDiscoverer:
-    """Factory to create a discoverer instance based on its name."""
-    if discoverer_name == "Sitemap":
-        if 'SitemapDiscoverer' not in globals(): raise ImportError("SitemapDiscoverer not found.")
-        return SitemapDiscoverer(fetcher, verbose=True)
-    elif discoverer_name == "RSS":
-        if 'RSSDiscoverer' not in globals(): raise ImportError("RSSDiscoverer not found.")
-        return RSSDiscoverer(fetcher, verbose=True)
-    elif discoverer_name == "Smart Analysis":
-        if 'ListPageDiscoverer' not in globals(): raise ImportError("ListPageDiscoverer not found.")
-        # 从 kwargs 获取 manual_specified_signature
-        ai_sig = kwargs.get('manual_specified_signature', None)
-        scope_sel = kwargs.get('scope_selector', None)
-        return ListPageDiscoverer(fetcher, verbose=True,
-                                  manual_specified_signature=ai_sig,
-                                  scope_selector=scope_sel)
-    else:
-        raise ValueError(f"Unknown discoverer_name: {discoverer_name}")
-
-
-def create_extractor_instance(extractor_name: str, log_callback) -> IExtractor:
-    """Factory to create an extractor instance based on its name."""
-    if extractor_name not in EXTRACTOR_MAP:
-        raise ImportError(f"Extractor '{extractor_name}' not found or failed to import.")
-
-    ExtractorClass = EXTRACTOR_MAP[extractor_name]
-    return ExtractorClass(verbose=True)
 
 
 # =============================================================================
@@ -545,34 +473,21 @@ class WorkerSignals(QObject):
 
 
 class ChannelDiscoveryWorker(QRunnable):
-    """Worker thread for Stage 1: Discovering all channels."""
+    """
+    Worker thread for Stage 1: Discovering all channels.
+    Refactored to use config dict and factories.
+    """
 
     def __init__(self,
-                 discoverer_name: str,
-                 fetcher_name: str,
-                 entry_point: Any,
-                 start_date: datetime.datetime,
-                 end_date: datetime.datetime,
-                 proxy: Optional[str],
-                 timeout: int,
-                 pause_browser: bool,
-                 render_page: bool,
-                 fetcher_kwargs: Dict[str, Any],
-                 scope_selector: Optional[str] = None,
-                 manual_specified_signature: Optional[str] = None):
+                 discoverer_config: Dict[str, Any],  # 接收整个 discoverer 配置块
+                 entry_point: Any,  # URL 列表
+                 start_date: Optional[datetime.datetime],
+                 end_date: Optional[datetime.datetime]):
         super(ChannelDiscoveryWorker, self).__init__()
-        self.discoverer_name = discoverer_name
-        self.fetcher_name = fetcher_name
+        self.config = discoverer_config
         self.entry_point = entry_point
         self.start_date = start_date
         self.end_date = end_date
-        self.proxy = proxy
-        self.timeout = timeout
-        self.pause_browser = pause_browser
-        self.scope_selector = scope_selector
-        self.manual_specified_signature = manual_specified_signature
-        self.render_page = render_page  # Note: This is for XML, may break parsing
-        self.fetcher_kwargs = fetcher_kwargs
         self.signals = WorkerSignals()
 
     def run(self):
@@ -580,37 +495,35 @@ class ChannelDiscoveryWorker(QRunnable):
         try:
             log_callback = self.signals.progress.emit
 
-            # 1. Create Fetcher
-            # Note: Forcing render_page=False for discovery, as it's
-            # almost always parsing XML/Text, not rendered HTML.
-            if self.render_page:
-                log_callback("[Warning] 'Render Page' is enabled for Discovery, " \
-                             "this may fail XML/RSS parsing. Forcing False.")
+            # --- 1. Setup Fetcher using Factory ---
+            fetcher_cfg = self.config.get('fetcher', {})
+            fetcher_params = fetcher_cfg.get('parameters', {}).copy()
 
-            fetcher = create_fetcher_instance(
-                self.fetcher_name,
-                log_callback,
-                proxy=self.proxy,
-                timeout=self.timeout,
-                pause_browser=self.pause_browser,
-                render_page=False  # Force False for discovery
-            )
+            # 注入运行时回调
+            fetcher_params['log_callback'] = log_callback
 
-            # 2. Create Discoverer
-            discoverer = create_discoverer_instance(
-                self.discoverer_name,
-                fetcher,
-                log_callback,
-                scope_selector=self.scope_selector,
-                manual_specified_signature=self.manual_specified_signature
-            )
+            fetcher_name = fetcher_cfg.get('class')
+            fetcher = fetcher_factory(fetcher_name, fetcher_params)
 
-            # 3. Do the work
+            # --- 2. Setup Discoverer using Factory ---
+            discoverer_name = self.config.get('class')
+            discoverer_args = self.config.get('args', {}).copy()
+
+            # 注入运行时依赖
+            discoverer_args['fetcher'] = fetcher
+            discoverer_args['verbose'] = True
+
+            discoverer = discoverer_factory(discoverer_name, discoverer_args)
+
+            # --- 3. Execution ---
+            # 运行时参数 (如 wait_until)
+            runtime_kwargs = self.config.get('fetcher_kwargs', {})
+
             channel_list = discoverer.discover_channels(
                 self.entry_point,
                 start_date=self.start_date,
                 end_date=self.end_date,
-                fetcher_kwargs=self.fetcher_kwargs
+                fetcher_kwargs=runtime_kwargs
             )
             self.signals.result.emit(channel_list)
 
@@ -623,32 +536,16 @@ class ChannelDiscoveryWorker(QRunnable):
 
 
 class ArticleListWorker(QRunnable):
-    """Worker thread for Stage 2 (Lazy Loading): Gets articles for one channel."""
+    """
+    Worker thread for Stage 2: Gets articles for one channel.
+    """
 
-    # REFACTORED: Now accepts names
     def __init__(self,
-                 discoverer_name: str,
-                 fetcher_name: str,
-                 channel_url: str,
-                 proxy: Optional[str],
-                 timeout: int,
-                 pause_browser: bool,
-                 render_page: bool,
-                 fetcher_kwargs: Dict[str, Any],
-                 scope_selector: Optional[str] = None,
-                 manual_specified_signature: Optional[str] = None
-                 ):
+                 discoverer_config: Dict[str, Any],
+                 channel_url: str):
         super(ArticleListWorker, self).__init__()
-        self.discoverer_name = discoverer_name
-        self.fetcher_name = fetcher_name
+        self.config = discoverer_config
         self.channel_url = channel_url
-        self.proxy = proxy
-        self.timeout = timeout
-        self.pause_browser = pause_browser
-        self.render_page = render_page
-        self.fetcher_kwargs = fetcher_kwargs
-        self.scope_selector = scope_selector
-        self.manual_specified_signature = manual_specified_signature
         self.signals = WorkerSignals()
 
     def run(self):
@@ -656,32 +553,28 @@ class ArticleListWorker(QRunnable):
         try:
             log_callback = self.signals.progress.emit
 
-            # 1. Create Fetcher
-            if self.render_page:
-                log_callback("[Warning] 'Render Page' is enabled for Article List, this may fail XML/RSS parsing..。")
+            # --- 1. Setup Fetcher ---
+            fetcher_cfg = self.config.get('fetcher', {})
+            # 注意：列表抓取通常也需要渲染，所以沿用 discovery 的配置
+            # 或者，如果逻辑上列表抓取需要强制渲染，可以在这里修改 fetcher_params
+            fetcher_params = fetcher_cfg.get('parameters', {}).copy()
+            fetcher_params['log_callback'] = log_callback
 
-            fetcher = create_fetcher_instance(
-                self.fetcher_name,
-                log_callback,
-                proxy=self.proxy,
-                timeout=self.timeout,
-                pause_browser=self.pause_browser,
-                render_page=self.render_page
-            )
+            fetcher = fetcher_factory(fetcher_cfg.get('class'), fetcher_params)
 
-            # 2. Create Discoverer
-            discoverer = create_discoverer_instance(
-                self.discoverer_name,
-                fetcher,
-                log_callback,
-                scope_selector=self.scope_selector,
-                manual_specified_signature=self.manual_specified_signature
-            )
+            # --- 2. Setup Discoverer ---
+            discoverer_name = self.config.get('class')
+            discoverer_args = self.config.get('args', {}).copy()
+            discoverer_args['fetcher'] = fetcher
 
-            # 3. Do the work
+            discoverer = discoverer_factory(discoverer_name, discoverer_args)
+
+            # --- 3. Execution ---
+            runtime_kwargs = self.config.get('fetcher_kwargs', {})
+
             article_list = discoverer.get_articles_for_channel(
                 self.channel_url,
-                fetcher_kwargs=self.fetcher_kwargs
+                fetcher_kwargs=runtime_kwargs
             )
             self.signals.result.emit({
                 'channel_url': self.channel_url,
@@ -695,31 +588,17 @@ class ArticleListWorker(QRunnable):
             self.signals.finished.emit()
 
 
-class ChannelSourceWorker(QRunnable):
+class ExtractionWorker(QRunnable):
     """
-    Worker thread to fetch raw channel content (e.g., XML) for the text viewer.
-    (REFACTORED from XmlContentWorker)
+    Worker thread for Stage 3: Fetching and Extracting.
     """
 
     def __init__(self,
-                 discoverer_name: str,  # Discoverer needed for get_content_str
-                 fetcher_name: str,
-                 url: str,
-                 proxy: Optional[str],
-                 timeout: int,
-                 pause_browser: bool,
-                 render_page: bool,
-                 fetcher_kwargs: Dict[str, Any]
-                 ):
-        super(ChannelSourceWorker, self).__init__()
-        self.discoverer_name = discoverer_name
-        self.fetcher_name = fetcher_name
-        self.url = url
-        self.proxy = proxy
-        self.timeout = timeout
-        self.pause_browser = pause_browser
-        self.render_page = render_page
-        self.fetcher_kwargs = fetcher_kwargs
+                 extractor_config: Dict[str, Any],  # 接收整个 extractor 配置块
+                 url_to_extract: str):
+        super(ExtractionWorker, self).__init__()
+        self.config = extractor_config
+        self.url_to_extract = url_to_extract
         self.signals = WorkerSignals()
 
     def run(self):
@@ -727,29 +606,53 @@ class ChannelSourceWorker(QRunnable):
         try:
             log_callback = self.signals.progress.emit
 
-            # 1. Create Fetcher
-            if self.render_page:
-                log_callback("[Warning] 'Render Page' is enabled for Channel Source, "
-                             "this may fail XML/RSS parsing. Forcing False.")
+            # --- 1. Setup Fetcher ---
+            fetcher_cfg = self.config.get('fetcher', {})
+            fetcher_params = fetcher_cfg.get('parameters', {}).copy()
+            fetcher_params['log_callback'] = log_callback
 
-            fetcher = create_fetcher_instance(
-                self.fetcher_name,
-                log_callback,
-                proxy=self.proxy,
-                timeout=self.timeout,
-                pause_browser=self.pause_browser,
-                render_page=False  # Force False for discovery
+            fetcher = fetcher_factory(fetcher_cfg.get('class'), fetcher_params)
+
+            # --- 2. Get Content ---
+            runtime_kwargs = self.config.get('fetcher_kwargs', {})
+
+            # 从 kwargs 提取 fetcher.get_content 需要的参数
+            # 注意：timeout_s 在 params 里有，但 get_content 有时也需要 wait_for_timeout_s
+            # 我们可以直接把整个 runtime_kwargs 传进去，只要 Fetcher 支持 **kwargs
+            content_bytes = fetcher.get_content(
+                self.url_to_extract,
+                **runtime_kwargs
             )
 
-            # 2. Create Discoverer (only for its .get_content_str method)
-            discoverer = create_discoverer_instance(self.discoverer_name, fetcher, log_callback)
+            if not content_bytes:
+                raise ValueError("Failed to fetch content (returned None).")
 
-            # 3. Do the work (using the generic interface method)
-            content_string = discoverer.get_content_str(
-                self.url,
-                fetcher_kwargs=self.fetcher_kwargs
+            # --- 3. Setup Extractor ---
+            extractor_name = self.config.get('class')
+            extractor_args = self.config.get('args', {}).copy()
+            extractor_args['verbose'] = True
+
+            extractor = extractor_factory(extractor_name, extractor_args)
+
+            # --- 4. Execution ---
+            # Extractor.extract 通常接收 bytes, url, 以及额外的提取参数 (如 selectors)
+            # 这些参数应该已经在 extractor_args 里了，或者需要单独拆分
+            # 在 _build_config_dict 中，selectors 放在 args 里
+
+            # 注意：某些 Extractor 的 extract 方法参数不同。
+            # GenericCSSExtractor 需要 selectors 列表。
+            # 这里我们将 args 作为 kwargs 传给 extract 方法
+            extract_runtime_args = extractor_args.copy()
+            # 移除 verbose，因为它是 __init__ 参数
+            if 'verbose' in extract_runtime_args: del extract_runtime_args['verbose']
+
+            markdown_result = extractor.extract(
+                content_bytes,
+                self.url_to_extract,
+                **extract_runtime_args
             )
-            self.signals.result.emit(content_string)
+            self.signals.result.emit(markdown_result)
+
         except Exception as e:
             ex_type, ex_value, tb_str = sys.exc_info()
             self.signals.error.emit((str(ex_type), str(e), traceback.format_exc()))
@@ -758,20 +661,18 @@ class ChannelSourceWorker(QRunnable):
             self.signals.finished.emit()
 
 
-# --- NEW WORKER FOR EXTRACTION (REQ 2e) ---
-class ExtractionWorker(QRunnable):
-    """Worker thread for Stage 3: Fetching and Extracting a single article."""
+class ChannelSourceWorker(QRunnable):
+    """
+    Worker thread to fetch raw channel content (e.g., XML) for the text viewer.
+    Refactored to use config dict and factories.
+    """
 
     def __init__(self,
-                 fetcher_config: dict,  # <-- 接收整个配置字典
-                 extractor_name: str,
-                 url_to_extract: str,
-                 extractor_kwargs: dict):
-        super(ExtractionWorker, self).__init__()
-        self.fetcher_config = fetcher_config  # 存储字典
-        self.extractor_name = extractor_name
-        self.url_to_extract = url_to_extract
-        self.extractor_kwargs = extractor_kwargs
+                 discoverer_config: Dict[str, Any],  # 接收标准配置
+                 url: str):
+        super(ChannelSourceWorker, self).__init__()
+        self.config = discoverer_config
+        self.url = url
         self.signals = WorkerSignals()
 
     def run(self):
@@ -779,53 +680,33 @@ class ExtractionWorker(QRunnable):
         try:
             log_callback = self.signals.progress.emit
 
-            # --- [MODIFIED] ---
-            # 1. Create Fetcher
-            fetcher_name = self.fetcher_config.get('fetcher_name')
-            log_callback(f"Fetching {self.url_to_extract} using {fetcher_name}...")
+            # 1. Setup Fetcher via Factory
+            fetcher_cfg = self.config.get('fetcher', {})
+            # 源码查看通常不需要渲染，为了速度和 XML 解析稳定性，强制 render=False
+            # 但如果你希望跟 UI 设置保持一致，就直接用 copy。这里我们做一个特殊处理：
+            fetcher_params = fetcher_cfg.get('parameters', {}).copy()
+            fetcher_params['log_callback'] = log_callback
+            fetcher_params['render_page'] = False  # Force False for source viewing
 
-            fetcher = create_fetcher_instance(
-                fetcher_name,
-                log_callback,
-                proxy=self.fetcher_config.get('proxy'),
-                timeout=self.fetcher_config.get('timeout'),
-                pause_browser=self.fetcher_config.get('pause'),
-                render_page=self.fetcher_config.get('render')
+            fetcher = fetcher_factory(fetcher_cfg.get('class'), fetcher_params)
+
+            # 2. Setup Discoverer via Factory
+            discoverer_name = self.config.get('class')
+            discoverer_args = self.config.get('args', {}).copy()
+            discoverer_args['fetcher'] = fetcher
+
+            discoverer = discoverer_factory(discoverer_name, discoverer_args)
+
+            # 3. Execution
+            # 获取运行时的 kwargs (如 headers, cookies 等，虽然目前主要是 wait_until)
+            runtime_kwargs = self.config.get('fetcher_kwargs', {})
+
+            # 使用 Discoverer 的通用接口 get_content_str
+            content_string = discoverer.get_content_str(
+                self.url,
+                fetcher_kwargs=runtime_kwargs
             )
-
-            # 2. Get Content
-            # 准备传递给 get_content() 的参数
-            wait_until_val = self.fetcher_config.get('wait_until', 'networkidle')
-            wait_for_selector_val = self.fetcher_config.get('wait_for_selector')
-            # 使用主超时作为 'wait_for_timeout_s'
-            wait_for_timeout_s_val = self.fetcher_config.get('timeout')
-            scroll_pages_val = self.fetcher_config.get('scroll_pages', 0)
-
-            # 假设 fetcher.get_content 签名已更新
-            content_bytes = fetcher.get_content(
-                self.url_to_extract,
-                wait_until=wait_until_val,
-                wait_for_selector=wait_for_selector_val,
-                wait_for_timeout_s=wait_for_timeout_s_val,
-                scroll_pages=scroll_pages_val
-            )
-
-            if not content_bytes:
-                raise ValueError("Failed to fetch content (returned None).")
-            # --- [END MODIFICATION] ---
-
-            log_callback(f"Fetched {len(content_bytes)} bytes. Extracting using {self.extractor_name}...")
-
-            # 3. Create Extractor
-            extractor = create_extractor_instance(self.extractor_name, log_callback)
-
-            # 4. Do the work
-            markdown_result = extractor.extract(
-                content_bytes,
-                self.url_to_extract,
-                **self.extractor_kwargs
-            )
-            self.signals.result.emit(markdown_result)
+            self.signals.result.emit(content_string)
 
         except Exception as e:
             ex_type, ex_value, tb_str = sys.exc_info()
@@ -838,56 +719,50 @@ class ExtractionWorker(QRunnable):
 class SignatureAnalysisWorker(QRunnable):
     """
     Worker thread to analyze a list page and get all signature groups.
-    (用于分析列表页并获取所有签名组的 Worker 线程。)
+    Refactored to use config dict and factories.
     """
 
     def __init__(self,
-                 fetcher_config: dict,
-                 url_to_analyze: str,
-                 scope_selector: Optional[str] = None):
+                 discoverer_config: Dict[str, Any],  # 接收标准配置
+                 url_to_analyze: str):
         super(SignatureAnalysisWorker, self).__init__()
-        self.fetcher_config = fetcher_config
+        self.config = discoverer_config
         self.url_to_analyze = url_to_analyze
-        self.scope_selector = scope_selector
         self.signals = WorkerSignals()
 
     def run(self):
         fetcher: Optional[Fetcher] = None
-        discoverer: Optional[IDiscoverer] = None
         try:
             log_callback = self.signals.progress.emit
             log_callback(f"Starting signature analysis on {self.url_to_analyze}...")
 
-            # 1. Create Fetcher
-            fetcher_name = self.fetcher_config.get('fetcher_name')
-            fetcher = create_fetcher_instance(
-                fetcher_name,
-                log_callback,
-                proxy=self.fetcher_config.get('proxy'),
-                timeout=self.fetcher_config.get('timeout'),
-                pause_browser=self.fetcher_config.get('pause'),
-                render_page=self.fetcher_config.get('render')
-            )
+            # 1. Setup Fetcher via Factory
+            fetcher_cfg = self.config.get('fetcher', {})
+            fetcher_params = fetcher_cfg.get('parameters', {}).copy()
+            fetcher_params['log_callback'] = log_callback
 
-            # 2. Create Discoverer (Must be ListPageDiscoverer)
-            # 确保 ListPageDiscoverer 已导入
-            if 'ListPageDiscoverer' not in globals():
-                raise ImportError("ListPageDiscoverer class not found.")
+            fetcher = fetcher_factory(fetcher_cfg.get('class'), fetcher_params)
 
-            discoverer = ListPageDiscoverer(fetcher, verbose=True, scope_selector=self.scope_selector)
+            # 2. Setup Discoverer (Must be ListPageDiscoverer)
+            # 即使 config 里写的是其他名字，这里逻辑上也必须是 ListPage。
+            # 但既然 UI 做了限制，我们可以信任 config['class'] 就是 ListPageDiscoverer
+            discoverer_name = self.config.get('class')
+            discoverer_args = self.config.get('args', {}).copy()
+            discoverer_args['fetcher'] = fetcher
 
-            fetcher_kwargs = {
-                'wait_until': self.fetcher_config.get('wait_until', 'networkidle'),
-                'wait_for_selector': self.fetcher_config.get('wait_for_selector'),
-                'wait_for_timeout_s': self.fetcher_config.get('timeout'),
-                'scroll_pages': self.fetcher_config.get('scroll_pages', 0)
-            }
+            # 强制创建一个 Discoverer 实例
+            discoverer = discoverer_factory(discoverer_name, discoverer_args)
 
-            # 3. Do the work
-            # [核心] 调用你的新接口
+            # 双重检查类型，防止运行时错误
+            if not hasattr(discoverer, 'get_signature_groups'):
+                raise ValueError(f"Discoverer '{discoverer_name}' does not support signature analysis.")
+
+            # 3. Execution
+            runtime_kwargs = self.config.get('fetcher_kwargs', {})
+
             groups_data = discoverer.get_signature_groups(
                 self.url_to_analyze,
-                fetcher_kwargs=fetcher_kwargs
+                fetcher_kwargs=runtime_kwargs
             )
 
             self.signals.result.emit(groups_data)
@@ -896,8 +771,6 @@ class SignatureAnalysisWorker(QRunnable):
             ex_type, ex_value, tb_str = sys.exc_info()
             self.signals.error.emit((str(ex_type), str(e), traceback.format_exc()))
         finally:
-            # 确保 discoverer (及其 fetcher) 被正确关闭
-            # (注意: 我们的 Discoverer 基类没有 .close(), 但 Fetcher 有)
             if fetcher: fetcher.close()
             self.signals.finished.emit()
 
@@ -1420,8 +1293,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.status_bar.showMessage("Error: Please enter a URL or list of URLs.")
             return
 
-        # 2. 统一接口：永远传递 List[str]
-        # 不再进行 http 检查，不再自动补全 https，也不再根据 Discoverer 类型做 if/else 判断
+        # 2. 解析输入
         entry_point_urls = raw_text.split()
 
         self.append_log_history(f"[Info] Dispatching {len(entry_point_urls)} URL(s) to {self.discoverer_name}...")
@@ -1430,54 +1302,34 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.clear_all_controls()
         self._save_url_history(raw_text)
 
-        # 4. 准备日期过滤器 (保持原有逻辑)
+        # =========================================================
+        # 在生成配置之前，必须先更新“最后使用的入口点”缓存
+        # 这样 _build_config_dict() 才能读到最新的值，
+        # 从而保证 Worker 和 代码生成器 都能拿到这次提交的 URL。
+        # =========================================================
+        self.last_used_entry_point = entry_point_urls
+
+        # 4. 现在可以安全地生成配置了
+        full_config = self._build_config_dict()
+        discoverer_config = full_config['discoverer']
+
+        # 5. 准备日期过滤器
         start_date: Optional[datetime.datetime] = None
         end_date: Optional[datetime.datetime] = None
 
-        if self.date_filter_check.isChecked():
-            days_ago = self.date_filter_days_spin.value()
+        if discoverer_config.get('date_filter', {}).get('enabled'):
+            days = discoverer_config['date_filter']['days']
             end_date = datetime.datetime.now()
-            start_date = end_date - datetime.timedelta(days=days_ago)
-            self.append_log_history(f"Applying date filter: Last {days_ago} days.")
-
-        # 5. 准备 Fetcher 配置 (保持原有逻辑)
-        fetcher_config = self.discovery_fetcher_widget.get_config()
-        fetcher_kwargs = {
-            'wait_until': fetcher_config.get('wait_until'),
-            'wait_for_selector': fetcher_config.get('wait_for_selector'),
-            'wait_for_timeout_s': fetcher_config.get('timeout'),
-            'scroll_pages': fetcher_config.get('scroll_pages', 0)
-        }
-
-        self.set_loading_state(True, f"Discovering {self.discoverer_name} channels...")
-        self.update_generated_code()
-
-        # 处理 Smart Analysis 的特殊参数
-        manual_signature = None
-        scope_selector = None
-
-        if self.discoverer_name == "Smart Analysis":
-            manual_signature = self.manual_specified_signature_input.text().strip() or None
-            scope_selector = self.scope_selector_input.text().strip() or None
-            if scope_selector:
-                self.append_log_history(f"[Config] Limiting scope to: {scope_selector}")
+            start_date = end_date - datetime.timedelta(days=days)
 
         # 6. 启动 Worker
-        # 注意：这里的 entry_point 现在始终是 List[str]
-        # 请确保你的 ChannelDiscoveryWorker 及其下游逻辑已经适配了接收列表
+        # 注意：这里可以直接传 self.last_used_entry_point (它现在是新的了)
+        # 也可以传 entry_point_urls，两者现在相等。
         worker = ChannelDiscoveryWorker(
-            discoverer_name=self.discoverer_name,
-            fetcher_name=fetcher_config['fetcher_name'],
-            entry_point=entry_point_urls,  # <--- 统一传入列表
+            discoverer_config=discoverer_config,
+            entry_point=self.last_used_entry_point,
             start_date=start_date,
-            end_date=end_date,
-            proxy=fetcher_config['proxy'],
-            timeout=fetcher_config['timeout'],
-            pause_browser=fetcher_config['pause'],
-            render_page=fetcher_config['render'],
-            fetcher_kwargs=fetcher_kwargs,
-            scope_selector=scope_selector,
-            manual_specified_signature=manual_signature
+            end_date=end_date
         )
 
         worker.signals.result.connect(self.on_channel_discovery_result)
@@ -1496,75 +1348,15 @@ class CrawlerPlaygroundApp(QMainWindow):
         channel_item.setExpanded(True)
         self.status_bar.showMessage(f"Loading articles for {channel_url}...")
 
-        fetcher_config = self.discovery_fetcher_widget.get_config()
-
-        fetcher_kwargs = {
-            'wait_until': fetcher_config.get('wait_until'),
-            'wait_for_selector': fetcher_config.get('wait_for_selector'),
-            'wait_for_timeout_s': fetcher_config.get('timeout'),
-            'scroll_pages': fetcher_config.get('scroll_pages', 0)
-        }
-
-        manual_signature = None
-        scope_selector = None
-
-        # 只有在 Smart Analysis 模式下才读取这些输入
-        # 注意：这里我们假设用户想用当前顶栏里的设置来解析这个频道
-        if self.discoverer_name == "Smart Analysis":
-            if self.manual_specified_signature_input:
-                manual_signature = self.manual_specified_signature_input.text().strip() or None
-            if self.scope_selector_input:
-                scope_selector = self.scope_selector_input.text().strip() or None
-                if scope_selector:
-                    self.append_log_history(f"[Config] Loading articles with scope: {scope_selector}")
+        full_config = self._build_config_dict()
+        discoverer_config = full_config['discoverer']
 
         worker = ArticleListWorker(
-            discoverer_name=self.discoverer_name,
-            fetcher_name=fetcher_config['fetcher_name'],
-            channel_url=channel_url,
-            proxy=fetcher_config['proxy'],
-            timeout=fetcher_config['timeout'],
-            pause_browser=fetcher_config['pause'],
-            render_page=fetcher_config['render'],
-            fetcher_kwargs=fetcher_kwargs,
-            scope_selector=scope_selector,
-            manual_specified_signature=manual_signature
+            discoverer_config=discoverer_config,
+            channel_url=channel_url
         )
 
         worker.signals.result.connect(self.on_article_list_result)
-        worker.signals.finished.connect(self.on_worker_finished)
-        worker.signals.error.connect(self.on_worker_error)
-        worker.signals.progress.connect(self.status_bar.showMessage)
-        worker.signals.progress.connect(self.append_log_history)
-
-        self.thread_pool.start(worker)
-
-    def start_channel_source_loading(self, url: str):
-        """Starts worker to fetch raw channel source (e.g., XML) for the viewer."""
-        self.channel_source_viewer.setPlainText(f"Loading source from {url}...")
-        self.tab_widget.setCurrentWidget(self.channel_source_viewer)
-
-        fetcher_config = self.discovery_fetcher_widget.get_config()
-
-        fetcher_kwargs = {
-            'wait_until': fetcher_config.get('wait_until'),
-            'wait_for_selector': fetcher_config.get('wait_for_selector'),
-            'wait_for_timeout_s': fetcher_config.get('timeout'),
-            'scroll_pages': fetcher_config.get('scroll_pages', 0)
-        }
-
-        worker = ChannelSourceWorker(
-            discoverer_name=self.discoverer_name,
-            fetcher_name=fetcher_config['fetcher_name'],
-            url=url,
-            proxy=fetcher_config['proxy'],
-            timeout=fetcher_config['timeout'],
-            pause_browser=fetcher_config['pause'],
-            render_page=fetcher_config['render'],
-            fetcher_kwargs=fetcher_kwargs
-        )
-
-        worker.signals.result.connect(self.on_channel_source_result)
         worker.signals.finished.connect(self.on_worker_finished)
         worker.signals.error.connect(self.on_worker_error)
         worker.signals.progress.connect(self.status_bar.showMessage)
@@ -1579,30 +1371,40 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.status_bar.showMessage("Error: No article URL to analyze.")
             return
 
-        fetcher_config = self.article_fetcher_widget.get_config()
-        extractor_name = self.extractor_combo.currentText()
+        full_config = self._build_config_dict()
+        extractor_config = full_config['extractor']
 
-        # Get kwargs from our helper function
-        extractor_kwargs = self._get_current_extractor_args(extractor_name)
-
-        if extractor_name == "Generic CSS" and not extractor_kwargs.get('selectors'):
-            self.append_log_history("[Warning] Generic CSS Extractor running with no selectors provided.")
-        # --- [END MODIFICATION] ---
-
-        self.markdown_output_view.setPlainText(f"Starting analysis on {url}...")
-        self.metadata_output_view.setPlainText("Waiting for analysis to complete...")
-        self.set_loading_state(True, f"Extracting {url} with {extractor_name}...")
-        self.update_generated_code()  # Update code snippet
+        url = self.article_url_input.text().strip()
 
         worker = ExtractionWorker(
-            fetcher_config=fetcher_config,
-            extractor_name=extractor_name,
-            url_to_extract=url,
-            extractor_kwargs=extractor_kwargs
+            extractor_config=extractor_config,
+            url_to_extract=url
         )
 
         worker.signals.result.connect(self.on_extraction_result)
         worker.signals.finished.connect(self.on_subtask_finished)
+        worker.signals.error.connect(self.on_worker_error)
+        worker.signals.progress.connect(self.status_bar.showMessage)
+        worker.signals.progress.connect(self.append_log_history)
+
+        self.thread_pool.start(worker)
+
+    def start_channel_source_loading(self, url: str):
+        """Starts worker to fetch raw channel source (e.g., XML) for the viewer."""
+        self.channel_source_viewer.setPlainText(f"Loading source from {url}...")
+        self.tab_widget.setCurrentWidget(self.channel_source_viewer)
+
+        # [REFACTORED] Use unified config
+        full_config = self._build_config_dict()
+        discoverer_config = full_config['discoverer']
+
+        worker = ChannelSourceWorker(
+            discoverer_config=discoverer_config,
+            url=url
+        )
+
+        worker.signals.result.connect(self.on_channel_source_result)
+        worker.signals.finished.connect(self.on_worker_finished)
         worker.signals.error.connect(self.on_worker_error)
         worker.signals.progress.connect(self.status_bar.showMessage)
         worker.signals.progress.connect(self.append_log_history)
@@ -1623,22 +1425,22 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.status_bar.showMessage("Error: Please enter a URL to inspect.")
             return
 
-        # 发现 (Discovery) fetcher 通常用于此操作
-        fetcher_config = self.discovery_fetcher_widget.get_config()
-
         self.set_loading_state(True, f"Inspecting signatures for {url}...")
 
-        scope_selector = self.scope_selector_input.text().strip() or None
+        # [REFACTORED] Use unified config
+        full_config = self._build_config_dict()
+        discoverer_config = full_config['discoverer']
+
+        # 注意：_build_config_dict 已经根据 UI 状态获取了 scope_selector 等参数
+        # 并放入了 discoverer_config['args'] 中，所以这里不需要再手动获取 scope 并传入 Worker
 
         worker = SignatureAnalysisWorker(
-            fetcher_config=fetcher_config,
-            url_to_analyze=url,
-            scope_selector=scope_selector
+            discoverer_config=discoverer_config,
+            url_to_analyze=url
         )
 
-        # [关键] 将结果连接到新的 dialog-showing slot
         worker.signals.result.connect(self.on_signature_inspection_result)
-        worker.signals.finished.connect(self.on_subtask_finished)  # (复用 extraction a的 'finished' 处理器)
+        worker.signals.finished.connect(self.on_subtask_finished)
         worker.signals.error.connect(self.on_worker_error)
         worker.signals.progress.connect(self.status_bar.showMessage)
         worker.signals.progress.connect(self.append_log_history)
@@ -2060,23 +1862,24 @@ class CrawlerPlaygroundApp(QMainWindow):
     def _build_config_dict(self) -> dict:
         """
         Reads all UI controls and builds the standardized config dictionary.
-        (读取所有UI控件并构建标准化的配置字典。)
+        Now uses standardized class names for Factories.
         """
         # --- 1. Discoverer Configuration ---
         d_fetcher_config_dict = self.discovery_fetcher_widget.get_config()
-        discovery_fetcher_name = d_fetcher_config_dict['fetcher_name']
 
+        # [Mapping] UI Name -> Class Name
+        discovery_fetcher_class = self._map_ui_fetcher_to_class(d_fetcher_config_dict['fetcher_name'])
+
+        # Fetcher Init Parameters (for Factory)
         discoverer_fetcher_params = {
-            "class": discovery_fetcher_name,
-            "parameters": {
-                "proxy": d_fetcher_config_dict['proxy'],
-                "timeout": d_fetcher_config_dict['timeout'],
-                "stealth": "Stealth" in discovery_fetcher_name,
-                "pause_browser": d_fetcher_config_dict['pause'],
-                "render_page": d_fetcher_config_dict['render']\
-            }
+            "proxy": d_fetcher_config_dict['proxy'],
+            "timeout_s": d_fetcher_config_dict['timeout'],  # Factory expects timeout_s
+            "stealth": "Stealth" in d_fetcher_config_dict['fetcher_name'],
+            "pause_browser": d_fetcher_config_dict['pause'],
+            "render_page": d_fetcher_config_dict['render']
         }
 
+        # Fetcher Runtime Parameters (for .get_content / .discover)
         discoverer_fetcher_kwargs = {
             'wait_until': d_fetcher_config_dict.get('wait_until'),
             'wait_for_selector': d_fetcher_config_dict.get('wait_for_selector'),
@@ -2084,61 +1887,67 @@ class CrawlerPlaygroundApp(QMainWindow):
             'scroll_pages': d_fetcher_config_dict.get('scroll_pages', 0)
         }
 
-        discoverer_name = self.discoverer_combo.currentText()
+        discoverer_ui_name = self.discoverer_combo.currentText()
+        discoverer_class = self._map_ui_discoverer_to_class(discoverer_ui_name)
+
         discoverer_args = {
-            # Read from our cache, not the live (and potentially empty) UI control.
-            # This 'entry_point' key now matches the 'Any' type (str or List[str]).
             "entry_point": self.last_used_entry_point,
-            # --- MODIFICATION: Store new date filter state ---
-            "date_filter_enabled": self.date_filter_check.isChecked(),
-            "date_filter_days": self.date_filter_days_spin.value(),
+            # Specific args for ListPageDiscoverer
             "scope_selector": self.scope_selector_input.text().strip() or None,
-            "manual_specified_signature": self.manual_specified_signature_input.text().strip() or None
+            "manual_specified_signature": self.manual_specified_signature_input.text().strip() or None,
+            # Common args
+            "verbose": True
         }
 
         # --- 2. Extractor Configuration ---
         e_fetcher_config_dict = self.article_fetcher_widget.get_config()
-        article_fetcher_name = e_fetcher_config_dict['fetcher_name']
+        article_fetcher_class = self._map_ui_fetcher_to_class(e_fetcher_config_dict['fetcher_name'])
 
         extractor_fetcher_params = {
-            "class": article_fetcher_name,
-            "parameters": {
-                "proxy": e_fetcher_config_dict['proxy'],
-                "timeout": e_fetcher_config_dict['timeout'],
-                "stealth": "Stealth" in article_fetcher_name,
-                "pause_browser": e_fetcher_config_dict['pause'],
-                "render_page": e_fetcher_config_dict['render']
-            }
+            "proxy": e_fetcher_config_dict['proxy'],
+            "timeout_s": e_fetcher_config_dict['timeout'],
+            "stealth": "Stealth" in e_fetcher_config_dict['fetcher_name'],
+            "pause_browser": e_fetcher_config_dict['pause'],
+            "render_page": e_fetcher_config_dict['render']
         }
 
-        extractor_name = self.extractor_combo.currentText()
-        extractor_args = self._get_current_extractor_args(extractor_name)
-
-        fetcher_get_content_kwargs = {
+        extractor_fetcher_kwargs = {
             'wait_until': e_fetcher_config_dict['wait_until'],
             'wait_for_selector': e_fetcher_config_dict['wait_for_selector'],
             'wait_for_timeout_s': e_fetcher_config_dict['timeout'],
             'scroll_pages': e_fetcher_config_dict['scroll_pages']
         }
 
-        # --- 3. Channel Filter Configuration (NEW) ---
-        channel_filter_config = self._build_channel_filter_config()
+        extractor_name = self.extractor_combo.currentText()
+        # Extractor args (init args + extract args mixed, separated by Worker logic if needed)
+        extractor_args = self._get_current_extractor_args(extractor_name)
 
         # --- 3. Assemble Final Config ---
         config = {
             "discoverer": {
-                "class": discoverer_name,
+                "class": discoverer_class,
                 "args": discoverer_args,
-                "fetcher": discoverer_fetcher_params,
-                "fetcher_kwargs": discoverer_fetcher_kwargs
+                "fetcher": {
+                    "class": discovery_fetcher_class,
+                    "parameters": discoverer_fetcher_params
+                },
+                "fetcher_kwargs": discoverer_fetcher_kwargs,
+                # Extra meta info
+                "date_filter": {
+                    "enabled": self.date_filter_check.isChecked(),
+                    "days": self.date_filter_days_spin.value()
+                }
             },
             "extractor": {
-                "class": extractor_name,
+                "class": extractor_name,  # Usually matches class name directly
                 "args": extractor_args,
-                "fetcher": extractor_fetcher_params,
-                "fetcher_kwargs": fetcher_get_content_kwargs,
+                "fetcher": {
+                    "class": article_fetcher_class,
+                    "parameters": extractor_fetcher_params
+                },
+                "fetcher_kwargs": extractor_fetcher_kwargs,
             },
-            "channel_filter": channel_filter_config
+            "channel_filter": self._build_channel_filter_config()
         }
         return config
 
@@ -2263,6 +2072,19 @@ class CrawlerPlaygroundApp(QMainWindow):
         settings = QSettings(SETTING_ORG, SETTING_APP)
         settings.setValue(self.URL_HISTORY_KEY, [])
         self.status_bar.showMessage("URL history cleared.")
+
+    def _map_ui_fetcher_to_class(self, ui_name: str) -> str:
+        if "Playwright" in ui_name:
+            return "PlaywrightFetcher"
+        return "RequestsFetcher"
+
+    def _map_ui_discoverer_to_class(self, ui_name: str) -> str:
+        mapping = {
+            "Sitemap": "SitemapDiscoverer",
+            "RSS": "RSSDiscoverer",
+            "Smart Analysis": "ListPageDiscoverer"
+        }
+        return mapping.get(ui_name, ui_name)
 
 
 # =============================================================================
