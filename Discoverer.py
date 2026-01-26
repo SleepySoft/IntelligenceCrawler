@@ -134,10 +134,14 @@ class IDiscoverer(ABC):
 
 def discoverer_factory(name: str, init_params: dict):
     if name == 'RSSDiscoverer':
+        # Params - fetcher: Fetcher, verbose: bool
         return RSSDiscoverer(**init_params)
     if name == 'SitemapDiscoverer':
+        # Params - fetcher: Fetcher, verbose: bool
         return SitemapDiscoverer(**init_params)
     if name == 'ListPageDiscoverer':
+        # Params - fetcher: Fetcher, verbose: bool, min_group_count: int,
+        #          scope_selector: Optional[str], manual_specified_signature: Optional[str]
         return ListPageDiscoverer(**init_params)
     raise ValueError(f"Unknown discoverer: {name}")
 

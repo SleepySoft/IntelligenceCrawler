@@ -301,16 +301,22 @@ class IExtractor(ABC):
 
 def extractor_factory(name: str, init_params: dict):
     if name == 'PassThroughExtractor':
+        # Params - verbose: bool
         return PassThroughExtractor(**init_params)
     if name == 'TrafilaturaExtractor':
+        # Params - verbose: bool
         return TrafilaturaExtractor(**init_params)
     if name == 'ReadabilityExtractor':
+        # Params - verbose: bool
         return ReadabilityExtractor(**init_params)
     if name == 'Newspaper3kExtractor':
+        # Params - verbose: bool
         return Newspaper3kExtractor(**init_params)
     if name == 'GenericCSSExtractor':
+        # Params - verbose: bool
         return GenericCSSExtractor(**init_params)
     if name == 'Crawl4AIExtractor':
+        # Params (Reserved) - model_name: str, verbose: bool
         return Crawl4AIExtractor(**init_params)
     raise ValueError(f"Unknown extractor: {name}")
 
