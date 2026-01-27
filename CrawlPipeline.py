@@ -218,6 +218,9 @@ class CrawlPipeline:
                     self.log(f"Skipping article (filtered): {article_url}")
                     continue
 
+                if not self.crawler_governor.should_crawl(article_url):
+                    continue
+
                 self.log(f"Processing: {article_url}")
 
                 with self.crawler_governor.transaction(article_url, channel_group) as task:
