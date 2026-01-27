@@ -5,22 +5,22 @@ CRAWLER_CONFIG = {
     # === Components init parameters ===
     
     'd_fetcher_name': 'PlaywrightFetcher',
-    'd_fetcher_init_param': {'log_callback': print, 'proxy': 'http://127.0.0.1:10809', 'timeout_s': 20, 'stealth': True, 'pause_browser': False, 'render_page': True},
+    'd_fetcher_init_param': {'log_callback': print, 'proxy': None, 'timeout_s': 20, 'stealth': True, 'pause_browser': False, 'render_page': True},
 
     'e_fetcher_name': 'PlaywrightFetcher',
-    'e_fetcher_init_param': {'log_callback': print, 'proxy': 'http://127.0.0.1:10809', 'timeout_s': 20, 'stealth': True, 'pause_browser': False, 'render_page': True},
+    'e_fetcher_init_param': {'log_callback': print, 'proxy': None, 'timeout_s': 20, 'stealth': True, 'pause_browser': False, 'render_page': True},
 
     'discoverer_name': 'ListPageDiscoverer',
     'discoverer_init_param': {'verbose': True, 'manual_specified_signature': None, 'scope_selector': None},
 
-    'extractor_name': 'TrafilaturaExtractor',
+    'extractor_name': 'Trafilatura',
     'extractor_init_param': {'verbose': True},
 
     # ======== Crawl parameters ========
     
-    'entry_points': [['https://tass.com/world', 'https://tass.com/emergencies', 'https://tass.com/politics', 'https://tass.com/economy', 'https://tass.com/defense', 'https://tass.com/society']],
+    'entry_points': ['https://tass.com/world', 'https://tass.com/emergencies', 'https://tass.com/politics', 'https://tass.com/economy', 'https://tass.com/defense', 'https://tass.com/society'],
     'period_filter': (None, None),
-    'channel_filter': {'channel_list_filter': []},
+    'channel_filter': None,
     'd_fetcher_kwargs': {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 5},
     'e_fetcher_kwargs': {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 0},
     'extractor_kwargs': {},
