@@ -384,7 +384,7 @@ def drive_pipeline(pipeline: CrawlPipeline, config: dict):
 
     # Only support channel_list_filter
     channel_filter = config.get('channel_filter', {})
-    if 'channel_list_filter' in channel_filter:
+    if channel_filter and 'channel_list_filter' in channel_filter:
         channel_list_filter_params = channel_filter['channel_list_filter']
         channel_filter = partial(common_channel_filter, channel_filter_list=channel_list_filter_params)
     else:
