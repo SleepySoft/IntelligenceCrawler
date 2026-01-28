@@ -28,6 +28,7 @@ class Status(IntEnum):
     SKIPPED = 5  # Skipped by logic (e.g., filtered content)
     STOPPED = 6  # Manually stopped or interrupted
     CACHED = 7
+    IGNORED = 8  # 用于临时忽略，不改变最终状态
 
 
 class ControlSignal(Enum):
@@ -321,6 +322,17 @@ class CrawlSession:
         self.group_path = _normalize_group_path(group_path)
         self.start_time = time.time()
 
+        # 记录“原来的状态”
+        # 在把状态改成 RUNNING 之前，先查一下它是啥
+        # 默认是 PENDING (如果是新URL)
+        self.original_status = Status.PENDING
+        existing = self.manager.db.fetch_one("SELECT status FROM crawl_status WHERE url = ?", (url,))
+        if existing:
+            self.original_status = existing['status']
+            # 如果原来是 RUNNING (比如上次崩了)，那回滚状态设为 PENDING 比较安全，防止死锁
+            if self.original_status == Status.RUNNING:
+                self.original_status = Status.PENDING
+
         # Unique ID for the specific log entry of this session
         self.log_id: Optional[int] = None
 
@@ -367,8 +379,9 @@ class CrawlSession:
         self.state_msg = state_msg
         self._finalize(Status.CACHED)
 
-    def ignore(self):
-        self._finished = True
+    def ignore(self, state_msg="Ignored"):
+        self.state_msg = state_msg
+        self._finalize(Status.IGNORED)
 
     def fail_temp(self, http_code=0, state_msg="Retryable Error"):
         self.http_code = http_code
@@ -404,6 +417,7 @@ class CrawlSession:
             spider=self.spider,
             group_path=self.group_path,
             status=status,
+            original_status=self.original_status,
             duration=duration,
             http_code=self.http_code,
             state_msg=self.state_msg,
@@ -467,7 +481,7 @@ class GroupRoundContext:
             self.stats["success"] += 1
         elif status in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
             self.stats["failed"] += 1
-        elif status == Status.SKIPPED:
+        elif status in [Status.SKIPPED, Status.IGNORED]:
             self.stats["skipped"] += 1
         else:
             self.stats["other"] += 1
@@ -830,7 +844,7 @@ class GovernanceManager:
 
         return log_id
 
-    def _handle_task_finish(self, log_id, url, spider, group_path, status, duration, http_code, state_msg, file_path):
+    def _handle_task_finish(self, log_id, url, spider, group_path, status, original_status, duration, http_code, state_msg, file_path):
         """
         Called when transaction ends.
         1. Update DB.
@@ -846,12 +860,24 @@ class GovernanceManager:
                 "INSERT INTO crawl_log (url, group_path, spider_name, status, http_code, duration) VALUES (?,?,?,?,?,?)",
                 (url, group_path, spider, status, http_code, duration))
 
-        # 2. Update crawl_status...
-        retry_inc = 1 if status == Status.TEMP_FAIL else 0
-        retry_reset = "retry_count = 0," if status != Status.TEMP_FAIL else ""
-        self.db.execute(
-            f"UPDATE crawl_status SET status=?, duration=?, http_code=?, state_msg=?, file_path=?, spider_name=?, {retry_reset} retry_count = retry_count + ? WHERE url=?",
-            (status, duration, http_code, state_msg, file_path, spider, retry_inc, url))
+        # 2. Update crawl_status.
+        if status == Status.IGNORED:
+            # === 如果是 IGNORED，我们“回滚”状态 ===
+            # 我们更新 last_run_at (证明我们确实处理过它)，但 status 字段恢复为 original_status
+            self.db.execute(
+                """
+                UPDATE crawl_status 
+                SET status=?, last_run_at=CURRENT_TIMESTAMP, duration=?, state_msg=?, spider_name=?
+                WHERE url=?
+                """,
+                (original_status, duration, state_msg, spider, url)
+            )
+        else:
+            retry_inc = 1 if status == Status.TEMP_FAIL else 0
+            retry_reset = "retry_count = 0," if status != Status.TEMP_FAIL else ""
+            self.db.execute(
+                f"UPDATE crawl_status SET status=?, duration=?, http_code=?, state_msg=?, file_path=?, spider_name=?, {retry_reset} retry_count = retry_count + ? WHERE url=?",
+                (status, duration, http_code, state_msg, file_path, spider, retry_inc, url))
 
         # 3. Memory Update (In-Place)
         with self.stats_lock:
@@ -970,140 +996,107 @@ class GovernanceManager:
 
     def _get_aggregated_stats(self, since_time: Optional[datetime.datetime]) -> Dict[str, Dict]:
         """
-        Helper: Aggregates statistics for all groups.
-        UPDATED: Calculates BOTH Traffic (Requests) and Results (Unique URLs).
-
-        Returns structure per group:
-        {
-            'results': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
-            'traffic': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
-            'perf': {'min': 0, 'max': 0, 'avg': 0, 'sum': 0, 'count': 0}
-        }
+        聚合统计核心函数。
+        Refactored: 提取了公共计数逻辑。
         """
+
+        # --- 1. 内部 Helper：核心计数逻辑 (DRY Principle) ---
+        def accumulate_counts(target_dict: Dict, status: int, count: int = 1):
+            """
+            统一处理 Traffic 和 Results 的计数规则。
+            在此处修改规则，所有统计视图都会自动生效。
+            """
+            if status == Status.RUNNING:
+                target_dict['running'] += count
+
+            # === 核心过滤规则 ===
+            # 这些状态完全排除在 Total (分母) 之外
+            elif status in [Status.PENDING, Status.SKIPPED, Status.IGNORED]:
+                return
+
+            else:
+                # 只有明确的 Success 或 Fail 才计入 Total
+                target_dict['total'] += count
+
+                if status in [Status.SUCCESS, Status.CACHED]:
+                    target_dict['success'] += count
+                elif status in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
+                    target_dict['failed'] += count
+
+        # --- 2. 数据结构初始化 ---
+        stats_map = {}
+
+        def get_group_stats(group_path):
+            if group_path not in stats_map:
+                stats_map[group_path] = {
+                    'results': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
+                    'traffic': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
+                    'perf': {'min': 999999, 'max': 0, 'sum': 0, 'count': 0, 'avg': 0},
+                    '_unique_urls': {}  # 仅内存模式使用
+                }
+            return stats_map[group_path]
+
+        # --- 3. 确定数据源 ---
         use_db = False
         target_ts = since_time.timestamp() if since_time else 0
         events_source = []
 
-        # 1. Determine Source (Memory vs DB)
         with self.stats_lock:
             if not since_time:
-                # Case A: Default View -> Memory
                 events_source = list(self.event_buffer)
             elif len(self.event_buffer) == 0:
-                # Case B: Buffer Empty -> DB
                 use_db = True
             else:
-                # Case C: Check if time is within buffer
                 if target_ts >= self.event_buffer[0]['ts']:
                     events_source = [e for e in self.event_buffer if e['ts'] > target_ts]
                 else:
                     use_db = True
 
-        stats_map = {}
-
-        # Helper to initialize the data structure
-        def init_stats():
-            return {
-                # [A] Result Stats (Snapshot/Unique) - For Tree View
-                'results': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
-
-                # [B] Traffic Stats (Throughput/Log) - For Header & Details
-                'traffic': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
-
-                # Performance Metrics
-                'perf': {'min': 999999, 'max': 0, 'sum': 0, 'count': 0, 'avg': 0},
-
-                # Internal helper for unique tracking (URL -> Last Status)
-                '_unique_urls': {}
-            }
+        # --- 4. 执行聚合 ---
 
         if not use_db:
-            # --- Path A: In-Memory Aggregation ---
+            # === Path A: In-Memory (Live View) ===
             for e in events_source:
                 gp = e['group_path']
                 st = e['status']
-                url = e.get('url')
                 dur = e.get('duration', 0) or 0
 
-                if gp not in stats_map:
-                    stats_map[gp] = init_stats()
+                s_dict = get_group_stats(gp)
 
-                s_dict = stats_map[gp]
+                # A1. Traffic 统计 (流水账)
+                accumulate_counts(s_dict['traffic'], st, count=1)
 
-                # 1. Update Traffic (Log Count)
-                t = s_dict['traffic']
-
-                if st == Status.RUNNING:
-                    t['running'] += 1
-                elif st in [Status.PENDING, Status.SKIPPED]:
-                    # Not count in total
-                    pass
-                else:
-                    # Exclude 'running' state from 'total'
-                    t['total'] += 1
-                    if st in [Status.SUCCESS, Status.CACHED]:
-                        t['success'] += 1
-                    elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
-                        t['failed'] += 1
-
-                # 2. Update Performance (Finished tasks only)
-                if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED] and dur > 0:
+                # A2. 性能统计 (仅针对有效耗时)
+                # 排除 Pending/Running/Skipped/Ignored 对平均耗时的影响
+                if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED, Status.IGNORED] and dur > 0:
                     p = s_dict['perf']
                     if dur < p['min']: p['min'] = dur
                     if dur > p['max']: p['max'] = dur
                     p['sum'] += dur
                     p['count'] += 1
 
-                # 3. Track Unique State (Last Write Wins)
-                # Since events are ordered by time, the last one we see for a URL
-                # is its "Latest State" in this window.
-                if url:
-                    s_dict['_unique_urls'][url] = st
+                # A3. 记录 Unique 状态 (覆盖写)
+                if e.get('url'):
+                    s_dict['_unique_urls'][e['url']] = st
 
-            # 4. Finalize Unique Results & Averages
+            # A4. Finalize Unique Results (修正后的逻辑)
             for gp, data in stats_map.items():
-                # Process Unique URLs into Results counts
                 r = data['results']
+                # 遍历去重后的 URL 字典
                 for u_st in data['_unique_urls'].values():
-                    if u_st == Status.RUNNING:
-                        r['running'] += 1
-                    elif st in [Status.PENDING, Status.SKIPPED]:
-                        # Not count in total
-                        pass
-                    else:
-                        # Exclude 'running' state from 'total'
-                        r['total'] += 1
-                        if u_st in [Status.SUCCESS, Status.CACHED]:
-                            r['success'] += 1
-                        elif u_st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
-                            r['failed'] += 1
+                    # 调用同一个 helper，确保逻辑一致！
+                    accumulate_counts(r, u_st, count=1)
 
-                # Cleanup internal memory
+                # 清理临时内存
                 del data['_unique_urls']
 
-                # Finalize Perf Avg
-                p = data['perf']
-                if p['count'] > 0:
-                    p['avg'] = round(p['sum'] / p['count'], 3)
-                    if p['min'] == 999999: p['min'] = 0
-                else:
-                    p['min'] = 0
-
         else:
-            # --- Path B: Database Aggregation ---
-            # NOTE: For DB queries, calculating strictly "Unique" results over a time range
-            # is expensive (requires subqueries/window functions).
-            # We fallback 'results' to match 'traffic' or use basic counts.
-
+            # === Path B: Database (Historical View) ===
             rows = self.db.fetch_all("""
                 SELECT 
-                    group_path, 
-                    status, 
-                    COUNT(*) as cnt,
-                    MIN(duration) as min_dur,
-                    MAX(duration) as max_dur,
-                    SUM(duration) as sum_dur,
-                    COUNT(CASE WHEN duration > 0 THEN 1 END) as dur_cnt
+                    group_path, status, COUNT(*) as cnt,
+                    MIN(duration) as min_dur, MAX(duration) as max_dur,
+                    SUM(duration) as sum_dur, COUNT(CASE WHEN duration > 0 THEN 1 END) as dur_cnt
                 FROM crawl_log
                 WHERE created_at > ?
                 GROUP BY group_path, status
@@ -1114,54 +1107,37 @@ class GovernanceManager:
                 st = r['status']
                 count = r['cnt']
 
-                if gp not in stats_map:
-                    stats_map[gp] = init_stats()
+                s_dict = get_group_stats(gp)
 
-                s_dict = stats_map[gp]
+                # B1. Traffic 统计
+                accumulate_counts(s_dict['traffic'], st, count=count)
 
-                # Update Traffic
-                t = s_dict['traffic']
-
-                if st == Status.RUNNING:
-                    t['running'] += count
-                elif st in [Status.PENDING, Status.SKIPPED]:
-                    # Not count in total
-                    pass
-                else:
-                    t['total'] += count
-                    if st in [Status.SUCCESS, Status.CACHED]:
-                        t['success'] += count
-                    elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
-                        t['failed'] += count
-
-                # Update Performance
-                if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED]:
+                # B2. 性能统计
+                if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED, Status.IGNORED]:
                     p = s_dict['perf']
                     row_min = r['min_dur'] or 0
                     row_max = r['max_dur'] or 0
-                    row_sum = r['sum_dur'] or 0
                     row_cnt = r['dur_cnt'] or 0
 
                     if row_cnt > 0:
                         if row_min < p['min'] and row_min > 0: p['min'] = row_min
                         if row_max > p['max']: p['max'] = row_max
-                        p['sum'] += row_sum
+                        p['sum'] += (r['sum_dur'] or 0)
                         p['count'] += row_cnt
 
-            # Finalize DB Stats
-            for gp, data in stats_map.items():
-                # Fallback: In DB mode, Results ~= Traffic
+            # B3. DB 模式下的 Results 妥协 (Results = Traffic)
+            for data in stats_map.values():
                 data['results'] = data['traffic'].copy()
+                if '_unique_urls' in data: del data['_unique_urls']
 
-                p = data['perf']
-                if p['count'] > 0:
-                    p['avg'] = round(p['sum'] / p['count'], 3)
-                    if p['min'] == 999999: p['min'] = 0
-                else:
-                    p['min'] = 0
-
-                # Cleanup unused
-                del data['_unique_urls']
+        # --- 5. 计算平均值 (收尾) ---
+        for data in stats_map.values():
+            p = data['perf']
+            if p['count'] > 0:
+                p['avg'] = round(p['sum'] / p['count'], 3)
+                if p['min'] == 999999: p['min'] = 0
+            else:
+                p['min'] = 0
 
         return stats_map
 

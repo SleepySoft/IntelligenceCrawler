@@ -216,12 +216,12 @@ class CrawlPipeline:
             for article_url in article_urls:
                 with self.crawler_governor.transaction(article_url, channel_group) as task:
                     if article_filter and not article_filter(article_url, channel_group):
-                        task.skip()
+                        task.skip(state_msg='Skipped by filter')
                         self.log(f"Skipping article (filtered): {article_url}")
                         continue
 
                     if not self.crawler_governor.should_crawl(article_url):
-                        task.skip()
+                        task.ignore(state_msg='Already fetched - Ignore.')
                         continue
 
                     self.log(f"Processing: {article_url}")

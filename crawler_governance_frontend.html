@@ -391,7 +391,7 @@
                                           'bg-emerald-900/20 text-emerald-400 border-emerald-900/50': row.status === 2,
                                           'bg-yellow-900/20 text-yellow-400 border-yellow-900/50': row.status === 3,
                                           'bg-red-900/20 text-red-400 border-red-900/50': row.status === 4,
-                                          'bg-gray-800 text-gray-500 border-gray-700': row.status === 0 || row.status === 5 || row.status === 6,
+                                          'bg-gray-800 text-gray-500 border-gray-700': row.status === 0 || row.status === 5 || row.status === 6 || row.status === 8,
                                           'bg-purple-900/20 text-purple-400 border-purple-900/50': row.status === 7
                                       }"
                                       x-text="getStatusLabel(row.status)">
@@ -838,8 +838,9 @@
 
                         // [修改点3] 前端实现复合过滤 'ERR' (Status >= 3)
                         if (this.logFilter === 'ERR') {
-                            // 只要不是 PENDING(0), RUNNING(1), SUCCESS(2)，都算异常
-                            rawRows = rawRows.filter(r => r.status >= 3);
+                            // 只筛选 TEMP_FAIL(3) 和 PERM_FAIL(4) 以及 STOPPED(6)
+                            // 排除 SKIPPED(5), CACHED(7), IGNORED(8)
+                            rawRows = rawRows.filter(r => [3, 4, 6].includes(r.status));
                         }
 
                         this.listData = this.processRows(rawRows);
@@ -907,7 +908,7 @@
                 },
 
                 getStatusLabel(s) {
-                    const map = {0:'PEND',1:'RUN',2:'OK',3:'RETRY',4:'FAIL',5:'SKIP',6:'STOP',7:'CACHED'};
+                    const map = {0:'PEND',1:'RUN',2:'OK',3:'RETRY',4:'FAIL',5:'SKIP',6:'STOP',7:'CACHED',8:'IGNORED'};
                     return map[s] || s;
                 },
 
