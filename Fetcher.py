@@ -260,7 +260,13 @@ class PlaywrightFetcher(Fetcher):
                  timeout_s: int = 20,
                  stealth: bool = False,
                  pause_browser: bool = False,
-                 render_page: bool = True):
+                 render_page: bool = True,
+
+                 default_wait_until: str = "domcontentloaded",
+                 default_block_resources: Optional[dict] = None,
+                 default_block_third_party: bool = False,
+                 default_allowed_domains: Optional[list] = None
+):
         """
         Initializes the Fetcher and starts the background Playwright worker thread.
         This method will block until the browser is successfully launched or fails.
@@ -274,6 +280,16 @@ class PlaywrightFetcher(Fetcher):
                                   calls page.pause() for debugging.
             render_page (bool): If True, gets page.content() (rendered HTML).
                                 If False, gets response.body() (raw response).
+
+            default_block_resources example:
+                {
+                  "image": True,
+                  "media": True,
+                  "font": True,
+                  "stylesheet": False,
+                  "script": False
+                }
+
         """
         self._log = also_print(log_callback)
         self.timeout_ms = timeout_s * 1000  # Playwright timeout is in ms
@@ -282,6 +298,18 @@ class PlaywrightFetcher(Fetcher):
         self.stealth_mode = stealth
         self.pause_browser = pause_browser
         self.render_page = render_page
+
+        self.default_wait_until = default_wait_until
+        self.default_block_resources = default_block_resources or {
+            "image": True,
+            "media": True,
+            "font": True,
+            "stylesheet": False,  # 样式表有时影响可见性/selector，默认不禁
+            "script": False  # 禁 script 会直接破坏渲染，默认不禁
+        }
+        self.default_block_third_party = default_block_third_party
+        self.default_allowed_domains = default_allowed_domains  # None 表示不做 allowlist
+
         self.proxy_config: Optional[Dict[str, str]] = None
 
         # --- Queues for thread communication ---
@@ -341,6 +369,71 @@ class PlaywrightFetcher(Fetcher):
             self._log("[Fatal Error] Playwright worker thread timed out on startup.")
             raise TimeoutError("Playwright worker thread failed to start in time.")
 
+    def _create_context(self):
+        """[Worker Thread] Create a long-lived context for same-site crawling."""
+        if not hasattr(self, "browser") or not self.browser:
+            raise RuntimeError("Browser is not initialized; cannot create context.")
+
+        context_options = {
+            "user_agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
+        }
+        if self.proxy_config:
+            context_options["proxy"] = self.proxy_config
+
+        self.context = self.browser.new_context(**context_options)
+
+        # 统一 init script 放在 context 层，保证每个 page 都继承
+        # 注意：如果你使用 stealth v1/v2，它通常还需要对每个 page apply（后面 _fetch_page_content 里仍保留）
+        self.context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+        self._context_created_ts = time.time()
+        self._context_request_count = 0
+        self._consecutive_errors = 0
+
+        self._log("[Worker] Long-lived context created.")
+
+    def _close_context(self):
+        """[Worker Thread] Close current context safely."""
+        if hasattr(self, "context") and self.context:
+            try:
+                self.context.close()
+                self._log("[Worker] Context closed.")
+            except Exception as e:
+                self._log(f"[Worker Warning] Error closing context: {e}")
+            finally:
+                self.context = None
+
+    def _should_rotate_context(self) -> bool:
+        """[Worker Thread] Decide whether to rotate context."""
+        MAX_REQUESTS_PER_CONTEXT = 200  # 建议起步 200~1000
+        MAX_CONTEXT_AGE_S = 30 * 60  # 建议起步 15~60分钟
+        MAX_CONSECUTIVE_ERRORS = 5  # 连续错误触发轮换
+
+        if not hasattr(self, "context") or self.context is None:
+            return True
+
+        age = time.time() - float(getattr(self, "_context_created_ts", 0.0))
+
+        if int(getattr(self, "_context_request_count", 0)) >= MAX_REQUESTS_PER_CONTEXT:
+            self._log(f"[Worker] Rotate context: request count {self._context_request_count} reached.")
+            return True
+
+        if age >= MAX_CONTEXT_AGE_S:
+            self._log(f"[Worker] Rotate context: age {age:.0f}s reached.")
+            return True
+
+        if int(getattr(self, "_consecutive_errors", 0)) >= MAX_CONSECUTIVE_ERRORS:
+            self._log(f"[Worker] Rotate context: consecutive errors {self._consecutive_errors} reached.")
+            return True
+
+        return False
+
+    def _ensure_context(self):
+        """[Worker Thread] Ensure context exists and is healthy; rotate if needed."""
+        if self._should_rotate_context():
+            self._close_context()
+            self._create_context()
+
     def _start_playwright(self):
         """
         [Worker Thread] Initializes Playwright and launches the browser.
@@ -364,10 +457,17 @@ class PlaywrightFetcher(Fetcher):
             real_browser = self.playwright.chromium.launch(
                 headless=headless_mode,
                 args=launch_args
+                # 更推荐把 proxy 放这里（launch(proxy=...)），
             )
 
             # Use the user's custom wrapper
             self.browser = AutoTrackedBrowser(real_browser)
+
+            # --- initialize context-related state (context created later) ---
+            self.context = None
+            self._context_created_ts = 0.0
+            self._context_request_count = 0
+            self._consecutive_errors = 0
 
             self._log("[Worker] Browser instance created successfully.")
             return True
@@ -377,8 +477,14 @@ class PlaywrightFetcher(Fetcher):
             return False
 
     def _stop_playwright(self):
-        """[Worker Thread] Safely shuts down the Playwright browser and process."""
+        """[Worker Thread] Safely shuts down the Playwright browser/context and process."""
         self._log("[Worker] Stopping Playwright browser/context...")
+
+        # --- NEW: close context first ---
+        try:
+            self._close_context()
+        except Exception:
+            pass
 
         # 1. Close Browser
         if hasattr(self, 'browser') and self.browser:
@@ -404,10 +510,11 @@ class PlaywrightFetcher(Fetcher):
         """
         [Worker Thread] Main loop with Robust Lifecycle Management.
         Implements a "Restart Periodically" strategy to prevent memory leaks.
+        Now also reuses a long-lived Context and rotates it periodically.
         """
 
         # Configuration: Restart browser after N requests to clear memory leaks
-        MAX_REQUESTS_PER_BROWSER = 50
+        MAX_REQUESTS_PER_BROWSER = 500
 
         # Signal successful thread start (initial only)
         # We try to start it once to check dependencies.
@@ -425,12 +532,14 @@ class PlaywrightFetcher(Fetcher):
             try:
                 # 1. Start Browser Session
                 if not self._start_playwright():
-                    # If browser fails to start, wait a bit and retry (prevent tight loop spin)
                     self._log("[Worker Error] Browser failed to start. Retrying in 5s...")
                     threading.Event().wait(5)
                     continue
 
                 request_count = 0
+
+                # Create long-lived context once per browser session
+                self._create_context()
 
                 # --- INNER LOOP: Manages Job Processing ---
                 while not shutdown_requested:
@@ -438,16 +547,22 @@ class PlaywrightFetcher(Fetcher):
                     if request_count >= MAX_REQUESTS_PER_BROWSER:
                         self._log(
                             f"[Worker] Reached limit ({MAX_REQUESTS_PER_BROWSER} jobs). Restarting browser to free memory...")
-                        break  # Break inner loop -> trigger finally -> restart outer loop
+                        break  # trigger finally -> restart outer loop
+
+                    # ensure context is healthy (rotate if needed)
+                    try:
+                        self._ensure_context()
+                    except Exception as e:
+                        self._log(f"[Worker Error] Failed to ensure context: {e}. Forcing browser restart...")
+                        break
 
                     try:
-                        # Wait for job
-                        job_data = self.job_queue.get(
-                            timeout=1.0)  # Use timeout to check for shutdown/restart regularly
+                        job_data = self.job_queue.get(timeout=1.0)
                     except queue.Empty:
-                        continue  # Loop back to check shutdown_requested
+                        continue
 
-                    if not job_data: continue
+                    if not job_data:
+                        continue
 
                     job_type, data, result_queue = job_data
 
@@ -456,7 +571,7 @@ class PlaywrightFetcher(Fetcher):
                         self._log("[Worker] Shutdown signal received.")
                         result_queue.put(True)
                         shutdown_requested = True
-                        break  # Break inner loop
+                        break
 
                     # Handle Fetch Job
                     if job_type == 'get_content':
@@ -473,50 +588,136 @@ class PlaywrightFetcher(Fetcher):
 
             except Exception as e:
                 self._log(f"[Worker Critical Error] Unhandled exception in worker loop: {e}")
-                # Wait before restart to prevent rapid error looping
                 threading.Event().wait(2)
 
             finally:
-                # --- CLEANUP: Ensures Browser is destroyed before restart or exit ---
-                # This runs when:
-                # 1. Inner loop breaks (Periodic Restart)
-                # 2. Inner loop breaks (Shutdown)
-                # 3. Exception occurs
+                # ensure context closed before browser restart/exit
+                try:
+                    self._close_context()
+                except Exception:
+                    pass
                 self._stop_playwright()
 
         self._log("[Worker] Thread exiting cleanly.")
 
     def get_content(self, url: str, **kwargs) -> Optional[bytes]:
         """
-        [Main Thread] Fetches content from a URL with flexible wait conditions.
+        Fetches content from a URL with flexible wait conditions.
 
-        This method is synchronous and thread-safe. It sends the request
-        to the background worker thread and blocks until the result is returned.
+        This method is synchronous and thread-safe. It sends a job to the
+        background worker thread and blocks until the result is returned.
+
+        Timeout behavior (important):
+            - By default, timeout_s=None => wait indefinitely as long as the worker
+              thread is still alive.
+            - The method periodically wakes up every `check_interval_s` seconds to
+              check if the worker thread is still alive.
+            - If the worker thread dies/hangs permanently and stops responding
+              (i.e., the thread is not alive), this method raises RuntimeError.
+            - If timeout_s is provided (float), it behaves like a hard deadline and
+              raises TimeoutError when exceeded.
 
         Args:
-            url (str): The URL to fetch.
-            **kwargs: Flexible options passed to the worker, including:
-                wait_until (str): The 'wait_until' strategy for page.goto().
-                    One of: 'load', 'domcontentloaded', 'networkidle'.
-                    Defaults to 'load'.
-                wait_for_selector (Optional[str]): A CSS selector to wait for
-                    after the page.goto() completes. (Best-effort wait).
-                wait_for_timeout_s (Optional[int]): Specific timeout in seconds
-                    for the 'wait_for_selector'. If None, defaults to the
-                    main 'timeout_s' defined in __init__.
-                scroll_pages (int): Number of pages to scroll.
-                    > 0: Scroll down (content moves up).
-                    < 0: Scroll up (content moves down).
-                    0: No scrolling (default).
-                post_extra_action (Callable[[Page], None]): The extra action after page loaded and scrolled.
+            url (str):
+                The URL to fetch.
+
+            timeout_s (Optional[float], default None):
+                Overall waiting time in seconds in the main thread.
+                - None: wait forever (recommended for production stability when
+                  worker is reliable and Playwright has its own internal timeouts).
+                - float: wait at most this many seconds for the worker result.
+
+            check_interval_s (float, default 0.5):
+                The polling interval (seconds) used to periodically check whether
+                the worker thread is still alive while waiting for the job result.
+                Smaller => more responsive to worker death, but slightly more CPU wakeups.
+
+            **kwargs:
+                Flexible options passed to the worker, including:
+
+                --- Navigation / waiting strategy ---
+                wait_until (str):
+                    Passed to page.goto(wait_until=...). One of:
+                    'load', 'domcontentloaded', 'networkidle'.
+                    If not provided, uses self.default_wait_until if defined,
+                    otherwise falls back to 'networkidle' (legacy behavior).
+
+                wait_mode (str):
+                    Alias of wait_until. If both provided, wait_mode takes priority.
+
+                wait_for_selector (Optional[str]):
+                    A CSS selector to wait for after navigation.
+                    Best-effort: timeout will be logged but not necessarily raise
+                    inside worker (depending on worker implementation).
+
+                wait_for_timeout_s (Optional[int/float]):
+                    Timeout (seconds) for the selector/function/response waits.
+                    If None, defaults to self.timeout_ms.
+
+                wait_for_function (Optional[str]):
+                    A JS predicate string for page.wait_for_function().
+                    Example: "() => window.__DATA__ !== undefined"
+                    Best-effort by design (recommended for SPA readiness).
+
+                wait_for_response_url (Optional[str]):
+                    Wait until a network response URL contains this substring.
+                    Useful when SPA loads content via XHR/fetch.
+
+                wait_for_text (Optional[str]):
+                    Wait until document.body.innerText includes this text.
+                    Useful for simple readiness checks without selectors.
+
+                extra_wait_s (int/float):
+                    Extra small delay after waits (e.g., animations), in seconds.
+
+                --- Rendering / extraction ---
+                render_page (Optional[bool]):
+                    Override instance-level self.render_page for this request only.
+                    - True: return rendered HTML via page.content() (needs JS render)
+                    - False: return raw response body via response.body() (faster)
+
+                --- Page interactions ---
+                scroll_pages (int):
+                    Number of pages to scroll.
+                    > 0: scroll down; < 0: scroll up; 0: no scroll.
+
+                post_extra_action (Callable[[Page], None] | list | None):
+                    Extra action after page loaded and scrolled.
+                    - callable(page): do anything (click, type, evaluate...)
+                    - list: if your worker supports PlaywrightActionEngine actions
+                    - None: no extra action
+
+                --- Resource blocking / performance knobs ---
+                block_resources (Optional[dict]):
+                    Resource type blocking map; True => abort.
+                    Example:
+                        {
+                          "image": True,
+                          "media": True,
+                          "font": True,
+                          "stylesheet": False,
+                          "script": False
+                        }
+                    If None, uses self.default_block_resources if defined.
+
+                block_third_party (bool):
+                    If True, abort requests whose host is third-party relative to page URL.
+                    If not provided, uses self.default_block_third_party if defined.
+
+                allowed_domains (Optional[list[str]]):
+                    Allowlist of domains. If set, abort any request not in allowlist.
+                    Stronger than block_third_party. If None, no allowlist restriction.
 
         Returns:
-            Optional[bytes]: The fetched page content (HTML or raw bytes).
+            Optional[bytes]:
+                The fetched page content (rendered HTML bytes or raw response bytes).
 
         Raises:
-            RuntimeError: If the worker thread is not running.
-            TimeoutError: If the worker thread times out responding.
-            PlaywrightError: If a non-recoverable error occurs (e.g., page load failure).
+            RuntimeError:
+                - If the worker thread is not running (dead/hung and not alive).
+                - If the worker returns an Exception (re-raised here).
+            TimeoutError:
+                - If timeout_s is provided and exceeded.
         """
         if not self.worker_thread or not self.worker_thread.is_alive():
             raise RuntimeError(
@@ -525,20 +726,47 @@ class PlaywrightFetcher(Fetcher):
         # Create a one-time queue to get the result back
         result_queue: "queue.Queue[Any]" = queue.Queue(maxsize=1)
 
-        wait_until_val = kwargs.get('wait_until', 'networkidle')
+        # --- wait options ---
+        wait_until_val = kwargs.get('wait_until', None)
+        wait_mode_val = kwargs.get('wait_mode', None)  # NEW alias
+        wait_until_final = wait_mode_val or wait_until_val or self.default_wait_until
+
         wait_for_selector_val = kwargs.get('wait_for_selector', None)
         wait_for_timeout_s_val = kwargs.get('wait_for_timeout_s', None)
         scroll_pages_val = kwargs.get('scroll_pages', 0)
         post_extra_action = kwargs.get('post_extra_action', None)
 
-        # --- Create the job payload with all wait parameters ---
+        # --- NEW: resource blocking / domain policy ---
+        block_resources = kwargs.get("block_resources", None) or self.default_block_resources
+        block_third_party = kwargs.get("block_third_party", self.default_block_third_party)
+        allowed_domains = kwargs.get("allowed_domains", self.default_allowed_domains)
+
+        # --- NEW: more precise waits ---
+        wait_for_function = kwargs.get("wait_for_function", None)  # JS string: "() => ..."
+        wait_for_response_url = kwargs.get("wait_for_response_url", None)  # substring match
+        wait_for_text = kwargs.get("wait_for_text", None)  # simple text presence
+        extra_wait_s = kwargs.get("extra_wait_s", 0)  # small buffer for animation
+
         job_payload = {
             'url': url,
-            'wait_until': wait_until_val,
+            'wait_until': wait_until_final,
             'wait_for_selector': wait_for_selector_val,
             'wait_for_timeout_ms': (wait_for_timeout_s_val * 1000) if wait_for_timeout_s_val is not None else None,
             'scroll_pages': scroll_pages_val,
-            'post_extra_action': post_extra_action
+            'post_extra_action': post_extra_action,
+
+            # NEW
+            'block_resources': block_resources,
+            'block_third_party': block_third_party,
+            'allowed_domains': allowed_domains,
+
+            'wait_for_function': wait_for_function,
+            'wait_for_response_url': wait_for_response_url,
+            'wait_for_text': wait_for_text,
+            'extra_wait_s': extra_wait_s,
+
+            # allow overriding render_page per request
+            'render_page': kwargs.get("render_page", None),
         }
 
         # 添加任何其他传入的 kwargs (未来扩展性)
@@ -547,230 +775,277 @@ class PlaywrightFetcher(Fetcher):
         # Send the job to the worker thread
         self.job_queue.put(('get_content', job_payload, result_queue))
 
-        # --- 动态计算等待超时时间 ---
+        poll_interval_s = 10
+        overall_timeout_s = 10 * 60
+        deadline = time.time() + overall_timeout_s
 
-        # 1. 主超时时间 (默认为 20s)
-        base_timeout = self.timeout_ms / 1000
+        while True:
+            # 1) 线程死了就立刻退出（避免永久等待）
+            if not self.worker_thread.is_alive():
+                raise RuntimeError(f"Worker thread died while waiting for result: {url}")
 
-        # 2. 估算滚动所需时间: 滚动次数 * (最大抖动 1s + 网络等待 3s)
-        # 注意: 即使网络等待超时，Playwright 也会在 3s 后返回，所以用 3s 是安全的估算。
-        scroll_time_estimate = abs(scroll_pages_val) * (1 + 3)
+            # 2) 指定了 overall_timeout_s 才执行硬截止
+            if deadline is not None and time.time() >= deadline:
+                raise TimeoutError(f"Playwright job for {url} timed out after {overall_timeout_s}s")
 
-        # 3. 总等待超时 = 主超时 + 滚动估时 + 额外缓冲
-        wait_timeout = base_timeout + scroll_time_estimate + 5  # 5s 缓冲
+            try:
+                # 3) 关键：用 poll_interval_s 做短超时轮询，让我们有机会检查 worker 状态
+                result = result_queue.get(timeout=poll_interval_s)
+            except queue.Empty:
+                continue
 
-        # 记录日志，以便调试
-        self._log(f"[Main Thread] Calculated wait_timeout: {wait_timeout:.2f}s")
-
-        try:
-            # Block and wait for the result
-            result = result_queue.get(timeout=wait_timeout)
-
-            # If the worker sent back an exception, re-raise it in the main thread
             if isinstance(result, Exception):
                 self._log(f"[Main Thread] Error received from worker for {url}")
                 raise result
 
             return result
-        except queue.Empty:
-            self._log(f"[Main Thread] Timeout waiting for worker response for {url}")
-            raise TimeoutError(f"Playwright job for {url} timed out after {wait_timeout}s")
+
+    def _is_third_party(self, target_url: str, page_url: str) -> bool:
+        """Return True if target_url host differs from page_url host."""
+        try:
+            th = urlparse(target_url).hostname or ""
+            ph = urlparse(page_url).hostname or ""
+            if not th or not ph:
+                return False
+            return th != ph and not th.endswith("." + ph)
+        except Exception:
+            return False
+
+    def _apply_page_routing(self, page, job_payload: dict):
+        """
+        [Worker Thread] Apply per-page routing to block resources/domains.
+        Returns a function to unroute for cleanup.
+        """
+        block_resources = job_payload.get("block_resources") or {}
+        block_third_party = bool(job_payload.get("block_third_party", False))
+        allowed_domains = job_payload.get("allowed_domains", None)
+        page_url = job_payload.get("url")
+
+        def handler(route, request):
+            try:
+                rtype = request.resource_type  # 'document','script','image','media','font','stylesheet','xhr','fetch'...
+                req_url = request.url
+
+                # Allowlist has highest priority: if configured, block anything not in list
+                if allowed_domains:
+                    host = urlparse(req_url).hostname or ""
+                    allowed = any(host == d or host.endswith("." + d) for d in allowed_domains)
+                    if not allowed:
+                        return route.abort()
+
+                # Block third party domains if enabled
+                if block_third_party and self._is_third_party(req_url, page_url):
+                    return route.abort()
+
+                # Block resource types
+                if block_resources.get(rtype, False):
+                    return route.abort()
+
+                return route.continue_()
+            except Exception:
+                # Fail-open to avoid breaking navigation unexpectedly
+                return route.continue_()
+
+        page.route("**/*", handler)
+
+        def cleanup():
+            try:
+                page.unroute("**/*", handler)
+            except Exception:
+                pass
+
+        return cleanup
 
     def _fetch_page_content(self, job_payload: dict) -> Optional[bytes]:
-        """
-        [Worker Thread] The *actual* browser logic, now with flexible
-        and best-effort waiting.
-        """
-        # --- 1. Unpack Job Payload ---
         url = job_payload['url']
-        wait_until = job_payload.get('wait_until', 'load')
+        wait_until = job_payload.get('wait_until', 'domcontentloaded')
         wait_for_selector = job_payload.get('wait_for_selector')
         scroll_pages = job_payload.get('scroll_pages', 0)
         post_extra_action = job_payload.get('post_extra_action', None)
 
-        # Use specific selector timeout, or fall back to the main timeout
         selector_timeout_ms = job_payload.get('wait_for_timeout_ms') or self.timeout_ms
 
-        context = None
+        # NEW precise waits
+        wait_for_function = job_payload.get("wait_for_function", None)
+        wait_for_response_url = job_payload.get("wait_for_response_url", None)
+        wait_for_text = job_payload.get("wait_for_text", None)
+        extra_wait_s = float(job_payload.get("extra_wait_s", 0) or 0)
+
+        # allow per-request render_page override
+        render_page = job_payload.get("render_page")
+        if render_page is None:
+            render_page = self.render_page
+
         page = None
+        cleanup_route = None
+
         try:
-            # --- 2. Create Context and Page ---
-            context_options = {
-                "user_agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
-            }
-            if self.proxy_config:
-                context_options["proxy"] = self.proxy_config
+            self._ensure_context()
+            page = self.context.new_page()
 
-            context = self.browser.new_context(**context_options)
-            page = context.new_page()
-
-            # TODO: Debug
-            # page.on("request", lambda request: print(f">> Request: {request.url}"))
-            # page.on("requestfailed", lambda request: print(f"!! Failed: {request.url} - {request.failure}"))
-            # page.on("response", lambda response: print(f"<< Response: {response.status} {response.url}"))
-
-            # --- 3. Apply Stealth (if enabled) ---
+            # Apply stealth (page-level as before)
             if self.stealth_mode:
-                if Stealth:  # v2
+                if Stealth:
                     Stealth().apply_stealth_sync(page)
-                elif sync_stealth:  # v1
+                elif sync_stealth:
                     sync_stealth(page)
-                else:  # Fallback
+                else:
                     page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             else:
                 page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-            # --- 4. Main Page Navigation (Hard Fail) ---
-            response = page.goto(
-                url,
-                timeout=self.timeout_ms,
-                wait_until=wait_until
-            )
+            # per-page routing (block images/fonts/3rd party etc.)
+            cleanup_route = self._apply_page_routing(page, job_payload)
 
-            # TODO: DEBUG
-            # if self.pause_browser:
-            #     page.pause()
-
-            # This is a hard failure. If the page didn't load, we must error.
+            # --- Main navigation ---
+            response = page.goto(url, timeout=self.timeout_ms, wait_until=wait_until)
             if not response or not response.ok:
                 status = response.status if response else 'N/A'
                 raise PlaywrightError(f"Failed to get valid response. Status: {status}")
 
-            self._log(f"[Worker] page.goto() successful for {url} (Status: {response.status}, Wait: {wait_until})")
+            self._log(f"[Worker] page.goto() ok for {url} (Status: {response.status}, Wait: {wait_until})")
 
-            # --- 5. Best-Effort Selector Wait (Soft Fail) ---
-            if wait_for_selector:
-                self._log(f"[Worker] Waiting for selector '{wait_for_selector}' (timeout: {selector_timeout_ms}ms)...")
+            # --- NEW: wait for response URL (useful for SPA data) ---
+            if wait_for_response_url:
+                self._log(f"[Worker] Waiting for response containing '{wait_for_response_url}'...")
                 try:
-                    page.wait_for_selector(
-                        wait_for_selector,
-                        state='visible',
+                    page.wait_for_response(lambda r: wait_for_response_url in r.url, timeout=selector_timeout_ms)
+                    self._log("[Worker] Target response observed.")
+                except Exception as e:
+                    self._log(f"[Worker Warning] wait_for_response_url timeout/error: {e}")
+
+            # --- Existing: selector wait (best-effort) ---
+            if wait_for_selector:
+                self._log(f"[Worker] Waiting selector '{wait_for_selector}' (timeout {selector_timeout_ms}ms)...")
+                try:
+                    page.wait_for_selector(wait_for_selector, state='visible', timeout=selector_timeout_ms)
+                    self._log(f"[Worker] Selector '{wait_for_selector}' ready.")
+                except Exception as e:
+                    self._log(f"[Worker Warning] Selector wait failed: {e} (best-effort continue)")
+
+            # --- NEW: wait for function (best-effort) ---
+            if wait_for_function:
+                self._log(f"[Worker] Waiting for function: {wait_for_function} ...")
+                try:
+                    page.wait_for_function(wait_for_function, timeout=selector_timeout_ms)
+                    self._log("[Worker] Function condition satisfied.")
+                except Exception as e:
+                    self._log(f"[Worker Warning] wait_for_function timeout/error: {e}")
+
+            # --- NEW: wait for text appears (best-effort) ---
+            if wait_for_text:
+                self._log(f"[Worker] Waiting for text: '{wait_for_text}' ...")
+                try:
+                    # simplest: check body innerText contains
+                    page.wait_for_function(
+                        """(t) => document.body && document.body.innerText && document.body.innerText.includes(t)""",
+                        arg=wait_for_text,
                         timeout=selector_timeout_ms
                     )
-                    self._log(f"[Worker] Found selector '{wait_for_selector}'.")
+                    self._log("[Worker] Text condition satisfied.")
                 except Exception as e:
-                    # This is the "best-effort" logic. We log the warning
-                    # but DO NOT raise the error.
-                    self._log(f"[Worker Warning] Timeout or error waiting for selector '{wait_for_selector}': {str(e)}")
-                    self._log("[Worker] Proceeding to extract content anyway (best-effort).")
+                    self._log(f"[Worker Warning] wait_for_text timeout/error: {e}")
 
-            # --- 5.5. Handle Scrolling (健壮且带抖动的版本) ---
+            # optional small buffer
+            if extra_wait_s > 0:
+                page.wait_for_timeout(int(extra_wait_s * 1000))
+
+            # --- scrolling (keep your current logic; later we can optimize away from networkidle) ---
             if scroll_pages != 0:
                 scroll_direction = 'down' if scroll_pages > 0 else 'up'
-                self._log(
-                    f"[Worker] Scrolling {abs(scroll_pages)} pages {scroll_direction} (robust + jitter mode)...")
+                self._log(f"[Worker] Scrolling {abs(scroll_pages)} pages {scroll_direction} (jitter mode)...")
 
                 js_scroll_distance = "window.innerHeight" if scroll_pages > 0 else "-window.innerHeight"
-
-                # 智能等待（networkidle）的超时时间
-                scroll_network_timeout = 3000
+                scroll_network_timeout = 1500  # NEW: reduce default to be faster; still best-effort
 
                 for i in range(abs(scroll_pages)):
-                    # --- 1. 执行滚动 ---
                     page.evaluate(f"window.scrollBy(0, {js_scroll_distance});")
-                    self._log(f"[Worker] Scroll {i + 1}/{abs(scroll_pages)} executed.")
-
-                    # --- 2. 增加“人性化”时间抖动 ---
-                    # 模拟人类滚动后，视线移动或反应的短暂延迟
-                    # 随机在 300ms 到 1000ms 之间暂停
-                    jitter_ms = random.randint(1000, 3000)
-                    self._log(f"[Worker] Pausing for {jitter_ms}ms (human jitter)...")
+                    jitter_ms = random.randint(300, 900)  # NEW: faster jitter; enough for lazyload
                     page.wait_for_timeout(jitter_ms)
 
-                    # --- 3. 智能等待（捕获异常） ---
-                    # 抖动暂停后，我们再开始等待网络加载
-                    # 这是你问题的核心：用 try...except 包裹
-                    self._log(
-                        f"[Worker] Jitter complete. Waiting for network idle (max {scroll_network_timeout}ms)...")
                     try:
-                        # 尝试等待网络空闲
-                        page.wait_for_load_state('networkidle', timeout=scroll_network_timeout)
-                        self._log(f"[Worker] Scroll {i + 1} network is idle.")
-                    except Exception as e:
-                        # 【关键】如果超时（或其他错误），我们捕获它，打印日志，但不让程序崩溃
-                        # 循环会继续执行下一次滚动
-                        self._log(
-                            f"[Worker Warning] Network not idle after scroll {i + 1} (timeout/error: {e}). Continuing loop.")
+                        # best-effort, short timeout
+                        page.wait_for_load_state('domcontentloaded', timeout=scroll_network_timeout)
+                    except Exception:
+                        pass
 
-                self._log(f"[Worker] Finished all scrolling.")
                 try:
-                    # 等待所有懒加载的内容完成
-                    page.wait_for_load_state('networkidle', timeout=5000)
-                    self._log("[Worker] Network is idle after scrolling.")
+                    page.wait_for_timeout(300)  # small settle
                 except Exception:
-                    self._log(
-                        "[Worker Warning] Network did not become idle after scrolling (5s timeout). Proceeding anyway.")
+                    pass
 
+            # --- post actions ---
             try:
                 if post_extra_action is None:
                     pass
                 elif callable(post_extra_action):
                     post_extra_action(page)
                 elif isinstance(post_extra_action, list):
-                    action_engine = PlaywrightActionEngine(page=page, )
+                    action_engine = PlaywrightActionEngine(page=page)
                     action_engine.execute(post_extra_action)
                 else:
-                    raise ValueError(f"Not support post extra action - ignore.")
+                    raise ValueError("Not support post extra action - ignore.")
             except Exception as e:
                 self._log(str(e))
 
-            # --- 6. Extract Content ---
-            # This code is now reached even if the selector times out.
+            # --- Extract content ---
             content_bytes: Optional[bytes] = None
-            # Maybe there's re-direction after scrolling or post extra actions.
             if 200 <= response.status < 300:
-                if self.render_page:
-                    self._log("[Worker] Rendering page.content()...")
+                if render_page:
+                    self._log("[Worker] Extracting rendered page.content()...")
                     content_str = page.content()
-                    content_bytes = content_str.encode('utf-8')
+                    content_bytes = content_str.encode("utf-8")
                 else:
-                    self._log("[Worker] Getting raw response.body()...")
+                    self._log("[Worker] Extracting raw response.body()...")
                     content_bytes = response.body()
             else:
-                self._log('[Worker] Detect error response when getting content.')
+                self._log("[Worker] Non-2xx response while extracting content.")
 
-            # safe_filename = re.sub(r'[^\w\s-]', '', url)[:50]
-            # dump_filename = f'dump_{safe_filename}.html'
-
-            # self._log(f"[Worker DEBUG] Dumping content to {dump_filename}")
-            # with open(dump_filename, 'wb') as f:
-            #     f.write(content_bytes)
-
+            # bookkeeping success
+            self._context_request_count += 1
+            self._consecutive_errors = 0
             return content_bytes
 
         except PlaywrightTimeoutError:
-            if self._log:
-                self._log(f"[Warning] Page.goto timed out for {job_payload['url']}. "
-                          f"Attempting to grab content anyway.")
-
-            # !!! 关键：超时了，但我们不在乎，我们直接尝试获取内容
-            # 如果页面（如HTML）已经存在，这将成功返回
-            # 确保 'page' 对象存在
+            self._log(f"[Warning] goto timeout for {url}, trying to grab content anyway.")
             if page:
                 content = page.content()
             else:
                 content = None
 
             if not content:
-                # 如果内容为空或无效，才真正抛出异常
-                raise ValueError(f"Timeout occurred AND page content was empty/invalid.")
+                self._consecutive_errors += 1
+                raise ValueError("Timeout occurred AND page content was empty/invalid.")
 
-            # 如果我们拿到了内容，就假装什么都没发生，返回它
-            return content.encode('utf-8')
+            self._context_request_count += 1
+            self._consecutive_errors = 0
+            return content.encode("utf-8")
 
         except Exception as e:
-            # This outer catch block handles hard failures (like page.goto)
-            # or failures during page.content()
-            self._log(f"[Worker Error] _fetch_page_content failed for {url}: {str(e)}")
-            raise e  # Re-raise to send back to main thread
+            self._consecutive_errors += 1
+            msg = str(e).lower()
+            if ("target closed" in msg) or ("context closed" in msg) or ("browser" in msg and "disconnected" in msg):
+                self._log("[Worker] Critical error suggests broken context; closing context to force recreation.")
+                try:
+                    self._close_context()
+                except Exception:
+                    pass
+
+            self._log(f"[Worker Error] _fetch_page_content failed for {url}: {e}")
+            raise
 
         finally:
-            if context:
+            # cleanup route first
+            if cleanup_route:
                 try:
-                    self._log("[Worker Debug] Closing context in finally block.")
-                    context.close()
+                    cleanup_route()
+                except Exception:
+                    pass
+            if page:
+                try:
+                    page.close()
                 except Exception as e:
-                    self._log(f"[Worker Warning] Error closing context: {str(e)}")
+                    self._log(f"[Worker Warning] Error closing page: {e}")
 
     def close(self):
         """
