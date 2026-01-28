@@ -71,8 +71,7 @@ class PlaywrightActionEngine:
             [
                 {"selector": "#username", "action": "fill", "value": "user123"},
                 {"selector": "input[type='password']", "action": "fill", "value": "pass456"},
-                {"selector": "button.submit", "action": "click"},
-                {"text": "Success!", "action": "wait", "timeout": 3000}
+                {"selector": "button.submit", "action": "click"}
             ]
 
         3. Handling optional elements with quick timeout:
