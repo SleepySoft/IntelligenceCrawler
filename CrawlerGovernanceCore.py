@@ -326,12 +326,10 @@ class CrawlSession:
         # 在把状态改成 RUNNING 之前，先查一下它是啥
         # 默认是 PENDING (如果是新URL)
         self.original_status = Status.PENDING
-        existing = self.manager.db.fetch_one("SELECT status FROM crawl_status WHERE url = ?", (url,))
-        if existing:
-            self.original_status = existing['status']
-            # 如果原来是 RUNNING (比如上次崩了)，那回滚状态设为 PENDING 比较安全，防止死锁
-            if self.original_status == Status.RUNNING:
-                self.original_status = Status.PENDING
+
+        existing = self.manager.db.fetch_one("SELECT * FROM crawl_status WHERE url = ?", (url,))
+        self._has_prev_row = bool(existing)
+        self._prev_row_snapshot = dict(existing) if existing else None
 
         # Unique ID for the specific log entry of this session
         self.log_id: Optional[int] = None
@@ -377,11 +375,11 @@ class CrawlSession:
 
     def cached(self, state_msg="Cached"):
         self.state_msg = state_msg
-        self._finalize(Status.CACHED)
+        self._finalize_memory_only(Status.CACHED)
 
     def ignore(self, state_msg="Ignored"):
         self.state_msg = state_msg
-        self._finalize(Status.IGNORED)
+        self._finalize_memory_only(Status.IGNORED)
 
     def fail_temp(self, http_code=0, state_msg="Retryable Error"):
         self.http_code = http_code
@@ -417,12 +415,39 @@ class CrawlSession:
             spider=self.spider,
             group_path=self.group_path,
             status=status,
-            original_status=self.original_status,
             duration=duration,
             http_code=self.http_code,
             state_msg=self.state_msg,
             file_path=self.file_path
         )
+        self._finished = True
+
+
+    def _finalize_memory_only(self, status: Status):
+        """
+        纯内存状态：不影响 DB（连 last_run_at 都不变）。
+        要求：
+        - 撤销 _handle_task_start 写入的 crawl_status/crawl_log
+        - 内存 event_buffer 仍然记录该事件（用于 UI/监控）
+        """
+        if self._finished:
+            return
+
+        self.status = status
+        duration = round(time.time() - self.start_time, 3)
+
+        self.manager._handle_task_memory_only_finish(
+            log_id=self.log_id,
+            url=self.url,
+            spider=self.spider,
+            group_path=self.group_path,
+            status=status,
+            duration=duration,
+            state_msg=self.state_msg,
+            prev_exists=self._has_prev_row,
+            prev_snapshot=self._prev_row_snapshot
+        )
+
         self._finished = True
 
 
@@ -470,18 +495,21 @@ class GroupRoundContext:
         logger.info(f"[Round Start] {self.group_path} (Round #{self.round_id}, Plan: {expected_count})")
 
     def update(self, status: int):
-        """由 Task 完成时回调"""
         if self.phase != "RUNNING":
+            return
+
+        if status in [Status.IGNORED, Status.CACHED]:
             return
 
         self.processed_count += 1
         self.total_items_processed_session += 1
 
-        if status in [Status.SUCCESS, Status.CACHED]:
+
+        if status in [Status.SUCCESS]:
             self.stats["success"] += 1
         elif status in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
             self.stats["failed"] += 1
-        elif status in [Status.SKIPPED, Status.IGNORED]:
+        elif status in [Status.SKIPPED]:
             self.stats["skipped"] += 1
         else:
             self.stats["other"] += 1
@@ -560,6 +588,8 @@ class GovernanceManager:
         self.db = DatabaseHandler(db_path)
         self.storage = StorageHandler(files_path)
 
+        self._recover_incomplete_running_tasks()
+
         # Sync control signal from DB to memory on startup
         self._control_signal = self.db.get_control_signal(key='global')
         self._signal_lock = threading.RLock()
@@ -598,6 +628,32 @@ class GovernanceManager:
 
     def _hash(self, text: str) -> str:
         return hashlib.md5(text.encode()).hexdigest()
+
+
+    def _recover_incomplete_running_tasks(self):
+        """
+        恢复上次异常退出留下的 RUNNING 状态，避免永久卡死。
+        策略：
+        - crawl_status.RUNNING -> PENDING
+        - crawl_log.RUNNING    -> STOPPED (可选，但建议)
+        """
+        try:
+            # 1) 恢复 crawl_status
+            self.db.execute(
+                "UPDATE crawl_status SET status = ? WHERE status = ?",
+                (int(Status.PENDING), int(Status.RUNNING))
+            )
+
+            # 2) 恢复 crawl_log (审计更干净；不影响调度)
+            self.db.execute(
+                "UPDATE crawl_log SET status = ? WHERE status = ?",
+                (int(Status.STOPPED), int(Status.RUNNING))
+            )
+
+            logger.info("Recovered incomplete RUNNING tasks from previous session.")
+        except Exception as e:
+            logger.error(f"Failed to recover RUNNING tasks: {e}")
+
 
     # --- 1. Metadata Registration (UI & Entry Points) ---
 
@@ -702,6 +758,7 @@ class GovernanceManager:
 
         # 3. Schedule Check (Time-based Priority)
         # 无论是列表还是文章，只要设定了 next_run_at，就必须遵循时间调度
+        next_run_at = False # Temporary remove this logic
         if next_run_at:
             if isinstance(next_run_at, str):
                 # Handle varying SQLite timestamp formats
@@ -844,74 +901,125 @@ class GovernanceManager:
 
         return log_id
 
-    def _handle_task_finish(self, log_id, url, spider, group_path, status, original_status, duration, http_code, state_msg, file_path):
-        """
-        Called when transaction ends.
-        1. Update DB.
-        2. Retrieve event from Memory Map and perform In-Place Update.
-        3. Clean up Map to prevent leaks.
-        """
-        # 1. DB Update
+    def _update_crawl_log_finish(self, log_id, url, spider, group_path, status, duration, http_code):
         if log_id:
-            self.db.execute("UPDATE crawl_log SET status=?, duration=?, http_code=? WHERE id=?",
-                            (status, duration, http_code, log_id))
+            self.db.execute(
+                "UPDATE crawl_log SET status=?, duration=?, http_code=? WHERE id=?",
+                (int(status), duration, http_code, log_id)
+            )
         else:
             self.db.execute(
                 "INSERT INTO crawl_log (url, group_path, spider_name, status, http_code, duration) VALUES (?,?,?,?,?,?)",
-                (url, group_path, spider, status, http_code, duration))
-
-        # 2. Update crawl_status.
-        if status == Status.IGNORED:
-            # === 如果是 IGNORED，我们“回滚”状态 ===
-            # 我们更新 last_run_at (证明我们确实处理过它)，但 status 字段恢复为 original_status
-            self.db.execute(
-                """
-                UPDATE crawl_status 
-                SET status=?, last_run_at=CURRENT_TIMESTAMP, duration=?, state_msg=?, spider_name=?
-                WHERE url=?
-                """,
-                (original_status, duration, state_msg, spider, url)
+                (url, group_path, spider, int(status), http_code, duration)
             )
-        else:
-            retry_inc = 1 if status == Status.TEMP_FAIL else 0
-            retry_reset = "retry_count = 0," if status != Status.TEMP_FAIL else ""
-            self.db.execute(
-                f"UPDATE crawl_status SET status=?, duration=?, http_code=?, state_msg=?, file_path=?, spider_name=?, {retry_reset} retry_count = retry_count + ? WHERE url=?",
-                (status, duration, http_code, state_msg, file_path, spider, retry_inc, url))
 
-        # 3. Memory Update (In-Place)
+    def _finalize_event_in_memory(self, log_id, url, spider, group_path, status, duration, state_msg):
         with self.stats_lock:
             if log_id and log_id not in self.active_events_map:
-                # 明明有 ID，但 Map 里找不到，导致变成了僵尸
                 logger.warning(f"Orphaned Finish Task: {url} (ID: {log_id}). Start event not found in active map.")
 
-            if log_id in self.active_events_map:
+            if log_id and log_id in self.active_events_map:
                 event_obj = self.active_events_map[log_id]
-                event_obj['status'] = int(status)
-                event_obj['duration'] = duration
-                event_obj['state_msg'] = state_msg  # Optional: add error msg for UI
-
-                # Cleanup reference from active map
+                event_obj["status"] = int(status)
+                event_obj["duration"] = duration
+                event_obj["state_msg"] = state_msg
                 del self.active_events_map[log_id]
             else:
-                # Edge case: Task started before reset, finished after reset.
-                # Or stateless report. Add to buffer now.
-                event_obj = {
-                    'ts': time.time(),
-                    'url': url,
-                    'spider': spider,
-                    'group_path': group_path,
-                    'status': int(status),
-                    'duration': duration,
-                    'state_msg': state_msg,
-                    'is_anchor': url in self.known_anchors
-                }
-                self.event_buffer.append(event_obj)
+                self.event_buffer.append({
+                    "ts": time.time(),
+                    "url": url,
+                    "spider": spider,
+                    "group_path": group_path,
+                    "status": int(status),
+                    "duration": duration,
+                    "state_msg": state_msg,
+                    "is_anchor": url in self.known_anchors
+                })
 
-            # B. 更新 Round Context
-            # 只有当该 group 处于 ACTIVE round 状态时才更新
             if group_path in self.round_contexts:
                 self.round_contexts[group_path].update(status)
+
+    def _update_crawl_status_finish(self, url, spider, status, duration, http_code, state_msg, file_path):
+        retry_inc = 1 if status == Status.TEMP_FAIL else 0
+        retry_reset = "retry_count = 0," if status != Status.TEMP_FAIL else ""
+        self.db.execute(
+            f"""
+            UPDATE crawl_status 
+            SET status=?, duration=?, http_code=?, state_msg=?, file_path=?, spider_name=?, 
+                {retry_reset} retry_count = retry_count + ?
+            WHERE url=?
+            """,
+            (int(status), duration, http_code, state_msg, file_path, spider, retry_inc, url)
+        )
+
+    def _rollback_crawl_status(self, url: str, prev_exists: bool, prev_snapshot: dict):
+        if prev_exists and prev_snapshot:
+            prev_status = prev_snapshot.get("status")
+            if prev_status == int(Status.RUNNING):
+                prev_status = int(Status.PENDING)  # 防止恢复卡死 RUNNING
+
+            self.db.execute("""
+                UPDATE crawl_status
+                SET
+                    group_path = ?,
+                    spider_name = ?,
+                    status = ?,
+                    retry_count = ?,
+                    http_code = ?,
+                    file_path = ?,
+                    last_run_at = ?,
+                    next_run_at = ?,
+                    duration = ?,
+                    state_msg = ?
+                WHERE url = ?
+            """, (
+                prev_snapshot.get("group_path"),
+                prev_snapshot.get("spider_name"),
+                prev_status,
+                prev_snapshot.get("retry_count"),
+                prev_snapshot.get("http_code"),
+                prev_snapshot.get("file_path"),
+                prev_snapshot.get("last_run_at"),
+                prev_snapshot.get("next_run_at"),
+                prev_snapshot.get("duration"),
+                prev_snapshot.get("state_msg"),
+                url
+            ))
+        else:
+            # 原本没有该 URL：撤销 start 时插入的行
+            self.db.execute("DELETE FROM crawl_status WHERE url = ?", (url,))
+
+    def _handle_task_finish(self, log_id, url, spider, group_path, status, duration, http_code, state_msg, file_path):
+        if status in (Status.IGNORED, Status.CACHED):
+            raise RuntimeError("IGNORED/CACHED must use _handle_task_memory_only_finish")
+
+        # 1) crawl_log：保留记录
+        self._update_crawl_log_finish(log_id, url, spider, group_path, status, duration, http_code)
+
+        # 2) crawl_status：更新最终状态
+        self._update_crawl_status_finish(url, spider, status, duration, http_code, state_msg, file_path)
+
+        # 3) 内存事件 + round context
+        self._finalize_event_in_memory(log_id, url, spider, group_path, status, duration, state_msg)
+
+    def _handle_task_memory_only_finish(
+            self, log_id, url, spider, group_path,
+            status: Status, duration: float, state_msg: str,
+            prev_exists: bool, prev_snapshot: dict,
+            http_code: int = None,
+            file_path: str = None
+    ):
+        # 1) crawl_log：保留记录（更新为 IGNORED/CACHED）
+        self._update_crawl_log_finish(log_id, url, spider, group_path, status, duration, http_code)
+
+        # 2) crawl_status：回滚到 session 前（不更新时间、不改最终态）
+        try:
+            self._rollback_crawl_status(url, prev_exists, prev_snapshot)
+        except Exception as e:
+            logger.error(f"Memory-only rollback failed for {url}: {e}")
+
+        # 3) 内存事件 + round context
+        self._finalize_event_in_memory(log_id, url, spider, group_path, status, duration, state_msg)
 
     def reset_statistics(self):
         """
@@ -1010,15 +1118,15 @@ class GovernanceManager:
                 target_dict['running'] += count
 
             # === 核心过滤规则 ===
-            # 这些状态完全排除在 Total (分母) 之外
-            elif status in [Status.PENDING, Status.SKIPPED, Status.IGNORED]:
+            elif status in [Status.PENDING, Status.SKIPPED, Status.IGNORED, Status.CACHED]:
                 return
+
 
             else:
                 # 只有明确的 Success 或 Fail 才计入 Total
                 target_dict['total'] += count
 
-                if status in [Status.SUCCESS, Status.CACHED]:
+                if status in [Status.SUCCESS]:
                     target_dict['success'] += count
                 elif status in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
                     target_dict['failed'] += count

@@ -10,7 +10,7 @@ from collections import defaultdict
 from typing import List, Optional, Callable, Any, Tuple, Dict
 
 from Tools.ProcessCotrolException import ProcessProblem
-from IntelligenceCrawler.Persistence import save_extraction_result_as_md, save_extraction_result_as_pdf
+from IntelligenceCrawler.Persistence import save_extraction_result_as_md
 from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager
 from IntelligenceCrawler.Discoverer import IDiscoverer, discoverer_factory
 from IntelligenceCrawler.Extractor import IExtractor, ExtractionResult, extractor_factory
@@ -182,7 +182,8 @@ class CrawlPipeline:
                     self.log(f"Found {count_new} articles in channel.")
                 except Exception as e:
                     task.fail_temp(state_msg=f"Fail by exception: {str(e)}")
-                    self.log(f"[Error] Failed to process channel {channel_url}: {e}\n{traceback.format_exc()}")
+                    self.log(f"[Error] Failed to process channel {channel_url}: {e}\n")
+                    # print(traceback.format_exc())
 
         self.articles = discovered_results
         self.log(f"Discovered {len(self.articles)} unique articles.")
