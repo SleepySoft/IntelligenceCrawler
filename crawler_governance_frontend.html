@@ -196,8 +196,8 @@
                             <div class="flex justify-between items-center mb-1">
                                 <span class="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-2">
                                     <span class="w-2 h-2 rounded-full shadow-[0_0_8px_rgba(0,0,0,0.5)]"
-                                          :class="getAnchorColorClass(anchorStatus?.status)"
-                                          :class="anchorStatus?.status === 1 ? 'animate-pulse' : ''"></span>
+                                          :class="[getAnchorColorClass(anchorStatus?.status), (anchorStatus?.status === 1 ? 'animate-pulse' : '')]">
+                                    </span>
                                     Anchor Source
                                 </span>
                                 <span class="text-[10px] font-mono px-1.5 py-0.5 rounded border transition-colors"
@@ -432,45 +432,73 @@
                 </div>
             </div>
 
-            <div class="flex-1 flex flex-col min-h-0 bg-gray-950 overflow-y-auto p-6" x-show="viewMode === 'STATS'" x-cloak>
-                <div class="flex justify-between items-center mb-6">
-                    <h3 class="text-sm font-bold text-gray-400 uppercase tracking-wider">Historical Trend Analysis</h3>
-                    <div class="flex bg-gray-900 rounded p-1 border border-gray-800">
-                        <template x-for="range in ['1H', '6H', '24H', '7D']">
-                            <button @click="statsRange = range; fetchTrendData()" class="px-3 py-1 text-xs rounded transition-colors" :class="statsRange === range ? 'bg-purple-900/50 text-purple-200 border border-purple-800' : 'text-gray-500 hover:text-gray-300'" x-text="range"></button>
-                        </template>
-                    </div>
+            <div class="flex flex-col gap-3 mb-6" x-show="viewMode === 'STATS'" x-cloak>
+                <!-- Summary -->
+                <div class="grid grid-cols-4 gap-2">
+                  <div class="bg-gray-900/60 border border-gray-800 rounded p-3">
+                    <div class="text-[10px] text-gray-500 uppercase font-bold">Total</div>
+                    <div class="text-lg font-mono text-gray-200" x-text="trendSummary.total"></div>
+                  </div>
+                  <div class="bg-gray-900/60 border border-gray-800 rounded p-3">
+                    <div class="text-[10px] text-gray-500 uppercase font-bold">Valid</div>
+                    <div class="text-lg font-mono text-emerald-400" x-text="trendSummary.valid"></div>
+                  </div>
+                  <div class="bg-gray-900/60 border border-gray-800 rounded p-3">
+                    <div class="text-[10px] text-gray-500 uppercase font-bold">Fail</div>
+                    <div class="text-lg font-mono text-red-400" x-text="trendSummary.fail"></div>
+                  </div>
+                  <div class="bg-gray-900/60 border border-gray-800 rounded p-3">
+                    <div class="text-[10px] text-gray-500 uppercase font-bold">Fail Rate</div>
+                    <div class="text-lg font-mono text-yellow-300" x-text="trendSummary.failRate + '%'"></div>
+                  </div>
                 </div>
 
-                <div class="bg-gray-900/50 border border-gray-800 rounded p-4 mb-6 h-64 flex flex-col relative">
-                    <div class="flex-1 flex items-end gap-1 w-full px-2 pb-6 relative z-10">
-                        <template x-for="bar in trendData" :key="bar.ts">
-                            <div class="flex-1 flex flex-col justify-end group relative h-full min-w-[4px]">
-                                <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-gray-800 border border-gray-700 text-xxs p-2 rounded shadow-xl hidden group-hover:block z-50 whitespace-nowrap">
-                                    <div class="font-bold text-gray-300 mb-1" x-text="bar.time"></div>
-                                    <div class="text-emerald-400">Valid: <span x-text="bar.valid"></span></div>
-                                    <div class="text-red-400">Fail: <span x-text="bar.fail"></span></div>
-                                    <div class="text-gray-500 border-t border-gray-700 mt-1 pt-1">Total: <span x-text="bar.total"></span></div>
-                                </div>
-                                <div class="w-full rounded-t opacity-80 hover:opacity-100 transition-all flex flex-col justify-end gap-[1px]" :style="`height: ${(bar.total / (maxTrendValue || 1)) * 100}%`">
-                                    <div class="w-full bg-red-500/60" :style="`height: ${(bar.fail / bar.total) * 100}%`"></div>
-                                    <div class="w-full bg-emerald-500/60" :style="`height: ${(bar.valid / bar.total) * 100}%`"></div>
-                                </div>
-                                <div class="absolute top-full mt-1 left-1/2 -translate-x-1/2 text-[9px] text-gray-600 -rotate-45 origin-top-left" x-text="bar.time" x-show="shouldShowLabel(bar)"></div>
-                            </div>
-                        </template>
-                        <div x-show="trendData.length === 0" class="absolute inset-0 flex items-center justify-center text-gray-600 text-xs">No data for this time range.</div>
+                <!-- Chart -->
+                <div class="bg-gray-900/40 border border-gray-800 rounded p-3">
+                  <div class="flex items-center justify-between mb-2">
+                    <div class="text-xs text-gray-400 font-bold uppercase tracking-wider">Bars</div>
+                    <div class="flex items-center gap-3 text-[10px] text-gray-500">
+                      <div class="flex items-center gap-1">
+                        <span class="w-2 h-2 bg-emerald-500 rounded-sm"></span> Valid
+                      </div>
+                      <div class="flex items-center gap-1">
+                        <span class="w-2 h-2 bg-red-500 rounded-sm"></span> Fail
+                      </div>
+                      <div class="flex items-center gap-1" x-show="trendLoading">
+                        <span class="animate-pulse w-2 h-2 bg-blue-400 rounded-full"></span> Loading
+                      </div>
                     </div>
-                    <div class="absolute inset-0 pointer-events-none flex flex-col justify-between px-4 py-6 opacity-10">
-                        <div class="w-full h-px bg-gray-400"></div><div class="w-full h-px bg-gray-400"></div><div class="w-full h-px bg-gray-400"></div><div class="w-full h-px bg-gray-400"></div><div class="w-full h-px bg-gray-400"></div>
-                    </div>
-                </div>
+                  </div>
 
-                <div class="grid grid-cols-4 gap-4">
-                    <div class="bg-gray-900 border border-gray-800 p-3 rounded"><div class="text-[10px] text-gray-500 uppercase">Period Total</div><div class="text-xl font-mono text-white" x-text="trendSummary.total"></div></div>
-                    <div class="bg-gray-900 border border-gray-800 p-3 rounded"><div class="text-[10px] text-gray-500 uppercase">Valid Runs</div><div class="text-xl font-mono text-emerald-400" x-text="trendSummary.valid"></div></div>
-                    <div class="bg-gray-900 border border-gray-800 p-3 rounded"><div class="text-[10px] text-gray-500 uppercase">Failures</div><div class="text-xl font-mono text-red-400" x-text="trendSummary.fail"></div></div>
-                    <div class="bg-gray-900 border border-gray-800 p-3 rounded"><div class="text-[10px] text-gray-500 uppercase">Failure Rate</div><div class="text-xl font-mono" :class="trendSummary.failRate > 10 ? 'text-red-500' : 'text-gray-400'" x-text="trendSummary.failRate + '%'"></div></div>
+                  <!-- Empty state -->
+                  <div x-show="!trendLoading && trendData.length === 0"
+                       class="text-xs text-gray-600 italic p-6 text-center">
+                    No trend data.
+                  </div>
+
+                  <!-- Bar area -->
+                  <div x-show="trendData.length > 0"
+                       class="h-56 flex items-end gap-1 overflow-x-auto pb-2">
+                    <template x-for="(pt, idx) in trendData" :key="(pt.bucket_ts ?? pt.ts ?? pt.time ?? idx)">
+                      <div class="flex flex-col items-center justify-end min-w-[10px]">
+                        <!-- bar -->
+                        <div class="relative w-3 rounded-t bg-emerald-600/70"
+                             :style="`height:${Math.max(2, Math.round(((pt.total || 0) / maxTrendValue) * 180))}px`"
+                             :title="trendTooltip(pt)">
+                          <!-- fail overlay -->
+                          <div class="absolute bottom-0 left-0 w-full bg-red-500/80 rounded-t"
+                               :style="`height:${Math.round(((pt.fail || 0) / Math.max(1,(pt.total||0))) * 100)}%`">
+                          </div>
+                        </div>
+
+                        <!-- label -->
+                        <div class="mt-1 text-[9px] text-gray-600 font-mono whitespace-nowrap"
+                             x-show="shouldShowLabel(idx)"
+                             x-text="formatTrendTick(pt)">
+                        </div>
+                      </div>
+                    </template>
+                  </div>
                 </div>
             </div>
         </section>
@@ -498,6 +526,18 @@
                 trendData: [],
                 maxTrendValue: 1,
                 trendSummary: { total: 0, valid: 0, fail: 0, failRate: 0 },
+                trendAbort: null,
+                trendReqId: 0,
+
+                // Trend controls
+                trendGranularity: 'AUTO',     // 'AUTO' or minutes number string: '5','15','60','1440',...
+                trendScope: 'AUTO',           // 'AUTO' | 'GROUP' | 'GLOBAL'
+                trendAdvancedOpen: false,     // Advanced panel collapse
+                trendTimeField: 'updated_at', // 'updated_at' | 'last_run_at' | 'last_finish_at'
+                trendIncludeCached: false,    // bool -> include_cached=1
+                trendCustomFrom: '',          // datetime-local string
+                trendCustomTo: '',            // datetime-local string
+                trendLoading: false,          // loading flag
 
                 // Log History Time Filters
                 historyStart: '',
@@ -532,63 +572,158 @@
                     }
                 },
 
-                // --- [NEW] Fetch Trend Data ---
-                async fetchTrendData() {
-                    // Calculate start/end based on range
-                    const now = Date.now() / 1000;
-                    let start = now - 3600; // Default 1H
-                    let bucket = 1; // Default 1 min
+                // --- Trend helpers ---
 
-                    if (this.statsRange === '6H') {
-                        start = now - (6 * 3600);
-                        bucket = 5; // 5 min buckets
-                    } else if (this.statsRange === '24H') {
-                        start = now - (24 * 3600);
-                        bucket = 15; // 15 min buckets
-                    } else if (this.statsRange === '7D') {
-                        start = now - (7 * 24 * 3600);
-                        bucket = 60; // 1 hour buckets
+                formatTrendTick(pt) {
+                  const ts = pt.bucket_ts ?? pt.ts ?? pt.time ?? pt.start_ts;
+                  if (!ts) return '';
+                  const d = new Date((ts > 1e12 ? ts : ts * 1000));
+                  const hh = String(d.getHours()).padStart(2,'0');
+                  const mm = String(d.getMinutes()).padStart(2,'0');
+                  // 如果跨度很大可显示日期
+                  if (this.statsRange === '7D' || (this.trendCustomFrom && this.trendCustomTo)) {
+                    const md = `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                    return `${md} ${hh}:${mm}`;
+                  }
+                  return `${hh}:${mm}`;
+                },
+
+                trendTooltip(pt) {
+                  const ts = pt.bucket_ts ?? pt.ts ?? pt.time ?? pt.start_ts;
+                  const d = ts ? new Date((ts > 1e12 ? ts : ts * 1000)).toLocaleString() : '';
+                  const t = pt.total ?? 0, v = pt.valid ?? 0, f = pt.fail ?? 0;
+                  const fr = t > 0 ? Math.round((f/t)*1000)/10 : 0;
+                  return `${d}\nTotal: ${t}\nValid: ${v}\nFail: ${f}\nFailRate: ${fr}%`;
+                },
+
+                // --- Trend helpers ---
+                computeTrendParams(forceApply = false) {
+                  const now = Math.floor(Date.now() / 1000);
+
+                  // 1) Determine start/end
+                  let start = now - 3600;
+                  let end = now;
+
+                  const hasCustom = this.trendCustomFrom && this.trendCustomTo;
+                  if (hasCustom && forceApply) {
+                    const s = Math.floor(new Date(this.trendCustomFrom).getTime() / 1000);
+                    const e = Math.floor(new Date(this.trendCustomTo).getTime() / 1000);
+                    if (!isNaN(s) && !isNaN(e) && e > s) { start = s; end = e; }
+                  } else {
+                    if (this.statsRange === '6H') start = now - 6 * 3600;
+                    else if (this.statsRange === '24H') start = now - 24 * 3600;
+                    else if (this.statsRange === '7D') start = now - 7 * 24 * 3600;
+                    else start = now - 3600;
+                  }
+
+                  // 2) Determine bucket (minutes)
+                  let bucketMin = 60;
+                  if (this.trendGranularity !== 'AUTO') {
+                    bucketMin = Math.max(1, parseInt(this.trendGranularity, 10) || 60);
+                  } else {
+                    // 简单 auto（你后续想更智能我再帮你升级）
+                    if (this.statsRange === '1H') bucketMin = 5;
+                    else if (this.statsRange === '6H') bucketMin = 15;
+                    else if (this.statsRange === '24H') bucketMin = 60;
+                    else if (this.statsRange === '7D') bucketMin = 360;
+                  }
+
+                  // 3) scope -> group_filter
+                  let useGroup = false;
+                  if (this.trendScope === 'GROUP') useGroup = true;
+                  else if (this.trendScope === 'GLOBAL') useGroup = false;
+                  else useGroup = !!this.selectedGroup;
+
+                  // 4) timeField -> use_updated_at
+                  let useUpdatedAt = true;
+                  if (this.trendTimeField === 'last_run_at') useUpdatedAt = false;
+                  if (this.trendTimeField === 'last_finish_at') useUpdatedAt = true; // 后端不支持，退化
+
+                  return {
+                    start_ts: start,
+                    end_ts: end,
+                    bucket_minutes: bucketMin,
+                    group_filter: (useGroup ? this.selectedGroup : null),
+                    use_updated_at: useUpdatedAt ? 1 : 0,
+                    include_cached_as_success: this.trendIncludeCached ? 1 : 0
+                  };
+                },
+
+                buildTrendUrl(p) {
+                  const params = new URLSearchParams();
+                  params.set('start_ts', String(p.start_ts));
+                  params.set('end_ts', String(p.end_ts));
+                  params.set('bucket_minutes', String(p.bucket_minutes));
+                  if (p.group_filter) params.set('group_filter', p.group_filter);
+                  params.set('use_updated_at', String(p.use_updated_at));
+                  params.set('include_cached_as_success', String(p.include_cached_as_success));
+                  return `/api/dashboard/chart?${params.toString()}`;
+                },
+
+                async fetchTrendData(forceApply = false) {
+                  const myReq = ++this.trendReqId;
+                  try { this.trendAbort?.abort(); } catch(e) {}
+                  this.trendAbort = new AbortController();
+
+                  try {
+                    this.trendLoading = true;
+
+                    const p = this.computeTrendParams(forceApply);
+                    const url = this.buildTrendUrl(p);
+
+                    const res = await fetch(url, { signal: this.trendAbort.signal });
+                    if (!res.ok) {
+                      const t = await res.text().catch(() => '');
+                      throw new Error(`Trend API ${res.status}: ${t.slice(0, 200)}`);
                     }
 
-                    let url = `/api/dashboard/trend_chart?start=${start}&end=${now}&bucket=${bucket}`;
+                    const payload = await res.json();
 
-                    if (this.selectedGroup) {
-                        url += `&group=${encodeURIComponent(this.selectedGroup)}`;
-                    }
+                    // 后端按你的实现是直接返回 list
+                    const arr = Array.isArray(payload) ? payload
+                      : (Array.isArray(payload?.data) ? payload.data
+                      : (Array.isArray(payload?.items) ? payload.items : []));
 
-                    // 如果是在某个 Group 下查看统计，理论上后端应该支持过滤（目前 Core 暂未实现按 Group 过滤趋势）
-                    // 如果需要实现“只看当前组的趋势”，需要在 Core 的 SQL 里加 WHERE group_path = ?
-                    // 现阶段我们先展示全局趋势，或者你可以在 Core 加一个 filter 参数
+                    if (myReq !== this.trendReqId) return;
 
-                    try {
-                        const res = await fetch(url);
-                        const data = await res.json();
-                        this.trendData = data;
+                    const normalized = arr.map(d => {
+                      const success = (d.success ?? 0) | 0;
+                      const fail = (d.fail ?? 0) | 0;
+                      const total = (d.total ?? (success + fail)) | 0;
+                      return { ...d, success, fail, total, valid: success };
+                    });
 
-                        // Calculate Max for chart scaling
-                        this.maxTrendValue = Math.max(...data.map(d => d.total), 1); // 避免除以0
+                    this.trendData = normalized;
+                    this.maxTrendValue = Math.max(...normalized.map(d => d.total || 0), 1);
 
-                        // Calculate Summary
-                        let t = 0, v = 0, f = 0;
-                        data.forEach(d => { t += d.total; v += d.valid; f += d.fail; });
-                        this.trendSummary = {
-                            total: t,
-                            valid: v,
-                            fail: f,
-                            failRate: t > 0 ? Math.round((f / t) * 1000) / 10 : 0
-                        };
+                    let t = 0, s = 0, f = 0;
+                    for (const d of normalized) { t += d.total; s += d.success; f += d.fail; }
 
-                    } catch (e) { console.error("Trend Fetch Error", e); }
+                    this.trendSummary = {
+                      total: t,
+                      valid: s,
+                      fail: f,
+                      failRate: t > 0 ? Math.round((f / t) * 1000) / 10 : 0
+                    };
+
+                  } catch (e) {
+                    if (e?.name === 'AbortError') return;
+                    console.error("Trend Fetch Error", e);
+                    this.trendData = [];
+                    this.maxTrendValue = 1;
+                    this.trendSummary = { total: 0, valid: 0, fail: 0, failRate: 0 };
+                  } finally {
+                    if (myReq === this.trendReqId) this.trendLoading = false;
+                  }
                 },
 
                 // Chart Helper: Avoid overlapping labels
-                shouldShowLabel(bar) {
-                    // Simple logic: show every Nth label based on dataset size
-                    const len = this.trendData.length;
-                    if (len < 15) return true;
-                    if (len < 30) return this.trendData.indexOf(bar) % 2 === 0;
-                    if (len < 60) return this.trendData.indexOf(bar) % 5 === 0;
-                    return this.trendData.indexOf(bar) % 10 === 0;
+                shouldShowLabel(idx) {
+                  const len = this.trendData.length;
+                  if (len < 15) return true;
+                  if (len < 30) return idx % 2 === 0;
+                  if (len < 60) return idx % 5 === 0;
+                  return idx % 10 === 0;
                 },
 
                 // --- Data Processing Helper (防弹版) ---
@@ -830,6 +965,10 @@
                     try {
                         const res = await fetch(query);
                         let rawRows = await res.json();
+
+                        if (this.specificUrlFilter) {
+                          rawRows = rawRows.filter(r => r.url === this.specificUrlFilter);
+                        }
 
                         // Group Filter
                         if (this.selectedGroup) {

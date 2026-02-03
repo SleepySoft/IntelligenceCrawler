@@ -214,31 +214,87 @@ class CrawlerGovernanceBackend:
 
     def get_trend_chart(self):
         """
-        API for Time-Series Trend Chart (From DB).
-        Query Params:
-          - start: float (timestamp, optional, default: 1 hour ago)
-          - end: float (timestamp, optional, default: now)
-          - bucket: int (minutes, default: 1)
+        Trend chart API adapter.
+
+        Supports BOTH:
+          - new params (frontend): start_ts, end_ts, bucket_minutes, group_filter, use_updated_at, include_cached_as_success
+          - legacy params (backend old): start, end, bucket, group, time_field
+
+        Returns:
+          List[ {ts, time, success, fail, total} ]
         """
-        if not self.governor: return jsonify({"error": "Init failed"}), 500
+        if not self.governor:
+            return jsonify({"error": "Init failed"}), 500
 
         now = time.time()
 
-        # Default view: Last 1 Hour
-        start_ts = request.args.get('start', now - 3600, type=float)
-        end_ts = request.args.get('end', now, type=float)
-        bucket = request.args.get('bucket', 1, type=int)
+        # --- 1) Parse time range (seconds) ---
+        # Prefer new param names used by frontend
+        start_ts = request.args.get('start_ts', type=float)
+        end_ts = request.args.get('end_ts', type=float)
 
-        # 调用新的 DB 聚合方法
-        group = request.args.get('group')
-        data = self.governor.get_log_trend_stats(
-            start_ts=start_ts,
-            end_ts=end_ts,
-            bucket_minutes=bucket,
-            group_filter=group
-        )
+        # Fallback to legacy names
+        if start_ts is None:
+            start_ts = request.args.get('start', type=float)
+        if end_ts is None:
+            end_ts = request.args.get('end', type=float)
 
-        return jsonify(data)
+        # Defaults
+        if start_ts is None:
+            start_ts = now - 3600
+        if end_ts is None:
+            end_ts = now
+
+        # Guard
+        if end_ts <= start_ts:
+            # swap or clamp
+            end_ts = start_ts + 1
+
+        # --- 2) Parse bucket size (minutes) ---
+        bucket_minutes = request.args.get('bucket_minutes', type=int)
+        if bucket_minutes is None:
+            bucket_minutes = request.args.get('bucket', type=int)
+        if bucket_minutes is None or bucket_minutes <= 0:
+            bucket_minutes = 60
+
+        # --- 3) Parse group filter ---
+        group_filter = request.args.get('group_filter', type=str)
+        if group_filter is None:
+            group_filter = request.args.get('group', type=str)
+
+        # --- 4) Parse time field selector ---
+        # Frontend uses use_updated_at=1/0
+        # Legacy backend uses time_field=updated_at/last_run_at
+        use_updated_at = request.args.get('use_updated_at', type=int)
+        if use_updated_at is None:
+            time_field = request.args.get('time_field', default='updated_at', type=str)
+            use_updated_at = 0 if (time_field or '').lower() == 'last_run_at' else 1
+
+        use_updated_at_bool = bool(int(use_updated_at))
+
+        # --- 5) Cached-as-success flag ---
+        include_cached = request.args.get('include_cached_as_success', type=int)
+        if include_cached is None:
+            # Optional legacy alias if you ever used it:
+            include_cached = request.args.get('include_cached', type=int)
+        include_cached_bool = bool(int(include_cached or 0))
+
+        # --- 6) Call core ---
+        try:
+            data = self.governor.get_log_trend_stats(
+                start_ts=float(start_ts),
+                end_ts=float(end_ts),
+                bucket_minutes=int(bucket_minutes),
+                group_filter=group_filter,
+                use_updated_at=use_updated_at_bool,
+                include_cached_as_success=include_cached_bool
+            )
+            return jsonify(data)
+        except TypeError as e:
+            # Most common: core signature mismatch
+            return jsonify({"error": f"Trend API signature mismatch: {str(e)}"}), 500
+        except Exception as e:
+            return jsonify({"error": f"Trend API error: {str(e)}"}), 500
 
     def get_history_stats(self):
         """
@@ -350,15 +406,15 @@ class CrawlerGovernanceBackend:
         if not all(k in data for k in ['url', 'group_path', 'status']):
             return jsonify({"error": "Missing fields"}), 400
 
-        spider = data.get('spider') or self.governor._extract_spider_name(data['group_path'])
+        gp = data.get('group_path') or ""
+        spider = data.get('spider') or (gp.split('/')[0] if gp else "")
 
-        # Stateless call (log_id=None)
         self.governor._handle_task_finish(
             log_id=None,
             url=data['url'],
             spider=spider,
             group_path=data['group_path'],
-            status=int(data['status']),  # Ensure int
+            status=int(data['status']),
             duration=data.get('duration', 0.0),
             http_code=data.get('http_code', 0),
             state_msg=data.get('error_msg') or data.get('state_msg'),

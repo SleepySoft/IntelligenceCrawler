@@ -108,6 +108,7 @@ class DatabaseHandler:
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         self._init_schema()
+        self._ensure_column("crawl_status", "updated_at TIMESTAMP")
 
     def _init_schema(self):
         with self.lock:
@@ -182,6 +183,17 @@ class DatabaseHandler:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_log_url ON crawl_log(url)")
 
             self.conn.commit()
+
+    def _ensure_column(self, table: str, column_def: str):
+        # column_def 例如 "updated_at TIMESTAMP"
+        try:
+            self.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
+            logger.info(f"Added column {column_def} to {table}")
+        except sqlite3.OperationalError as e:
+            # 重复添加会报 duplicate column name，直接忽略
+            if "duplicate column name" in str(e).lower():
+                return
+            raise
 
     def execute(self, sql: str, params: tuple = ()) -> int:
         """
@@ -875,10 +887,10 @@ class GovernanceManager:
 
         # 2. DB Upsert (Status)
         self.db.execute("""
-            INSERT INTO crawl_status (url, url_hash, group_path, spider_name, status, last_run_at)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO crawl_status (url, url_hash, group_path, spider_name, status, last_run_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(url) DO UPDATE SET
-                status = ?, spider_name = ?, last_run_at = CURRENT_TIMESTAMP
+                status = ?, spider_name = ?, last_run_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
         """, (url, self._hash(url), group, spider, Status.RUNNING, Status.RUNNING, spider))
 
         # 3. Memory Update (Rich Object)
@@ -945,7 +957,8 @@ class GovernanceManager:
         self.db.execute(
             f"""
             UPDATE crawl_status 
-            SET status=?, duration=?, http_code=?, state_msg=?, file_path=?, spider_name=?, 
+            SET status=?, duration=?, http_code=?, state_msg=?, file_path=?, spider_name=?,
+                updated_at=CURRENT_TIMESTAMP,
                 {retry_reset} retry_count = retry_count + ?
             WHERE url=?
             """,
@@ -1329,75 +1342,105 @@ class GovernanceManager:
 
         return result
 
-    def get_log_trend_stats(self, start_ts: float, end_ts: float, bucket_minutes: int = 1, group_filter: str = None) -> List[Dict]:
+    def get_log_trend_stats(
+            self,
+            start_ts: float,
+            end_ts: float,
+            bucket_minutes: int = 60,
+            group_filter: str = None,
+            use_updated_at: bool = True,
+            include_cached_as_success: bool = False
+    ) -> List[Dict]:
         """
-        Generates Trend Chart Data from DB Logs.
+        Trend stats from crawl_status (Outcome-oriented, unique URL snapshot)。
+        Bucket by crawl_status.updated_at (default) or last_run_at。
+        Excludes group list_url anchors (task_groups.list_url)。
+        Returns buckets with success/fail/total for stacked bar chart.
         """
-        # Ensure bucket is valid
+
         bucket_seconds = max(1, bucket_minutes) * 60
+        time_col = "updated_at" if use_updated_at else "last_run_at"
 
-        # SQL Logic:
-        # P1, P2: used for bucket calculation
-        # P3, P4: used for time range filtering
-
-        # We need to fill in the SELECT part explicitly to match the params order
-        sql = """
+        # 注意：crawl_status 是快照表，一 URL 一行，所以统计是“唯一 URL 在该时间段发生更新”的结果分布
+        sql = f"""
             SELECT 
-                (CAST(strftime('%s', created_at) AS INTEGER) / ?) * ? as bucket_ts,
-                status,
+                (CAST(strftime('%s', s.{time_col}) AS INTEGER) / ?) * ? as bucket_ts,
+                s.status as status,
                 COUNT(*) as cnt
-            FROM crawl_log
-            WHERE created_at BETWEEN datetime(?, 'unixepoch') AND datetime(?, 'unixepoch')
+            FROM crawl_status s
+            LEFT JOIN task_groups g ON s.url = g.list_url
+            WHERE s.{time_col} IS NOT NULL
+              AND s.{time_col} BETWEEN datetime(?, 'unixepoch') AND datetime(?, 'unixepoch')
+              AND g.list_url IS NULL
         """
 
-        # Initial params matching the 4 placeholders above
         params = [bucket_seconds, bucket_seconds, start_ts, end_ts]
 
-        # Dynamic Filter
         if group_filter:
-            sql += " AND group_path = ?"
+            sql += " AND s.group_path = ?"
             params.append(group_filter)
 
-        # Grouping and Ordering
         sql += """
             GROUP BY bucket_ts, status
             ORDER BY bucket_ts ASC
         """
 
-        # Correctly pass the dynamic params list
         rows = self.db.fetch_all(sql, tuple(params))
 
-        # Process raw rows into structured timeline
+        # 1) 先准备完整桶，补齐空桶
+        def floor_bucket(ts: float) -> int:
+            return int(ts // bucket_seconds) * bucket_seconds
+
+        start_bucket = floor_bucket(start_ts)
+        end_bucket = floor_bucket(end_ts)
         timeline = {}
 
-        for r in rows:
-            ts = r['bucket_ts']
-            if not ts: continue  # Skip invalid dates
+        # 生成所有桶
+        cur = start_bucket
+        while cur <= end_bucket:
+            # label 你可按 bucket 粒度自定义显示
+            dt = datetime.datetime.fromtimestamp(cur)
+            if bucket_seconds >= 86400:
+                label = dt.strftime("%Y-%m-%d")
+            elif bucket_seconds >= 3600:
+                label = dt.strftime("%m-%d %H:00")
+            else:
+                label = dt.strftime("%H:%M")
 
-            st = r['status']
-            cnt = r['cnt']
+            timeline[cur] = {"ts": cur, "time": label, "success": 0, "fail": 0, "total": 0}
+            cur += bucket_seconds
+
+        # 2) 回填统计
+        success_set = {Status.SUCCESS}
+        if include_cached_as_success:
+            success_set.add(Status.CACHED)
+
+        fail_set = {Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED}
+
+        for r in rows:
+            ts = r["bucket_ts"]
+            st = r["status"]
+            cnt = r["cnt"]
 
             if ts not in timeline:
-                # Initialize bucket
-                time_str = datetime.datetime.fromtimestamp(ts).strftime("%H:%M")
-                timeline[ts] = {
-                    'ts': ts,
-                    'time': time_str,
-                    'valid': 0,
-                    'fail': 0,
-                    'total': 0
-                }
+                # 极端情况下（边界/时区）保护一下
+                timeline[ts] = {"ts": ts, "time": datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M"),
+                                "success": 0, "fail": 0, "total": 0}
 
             bucket = timeline[ts]
-            bucket['total'] += cnt
 
-            if st in [Status.SUCCESS, Status.CACHED]:
-                bucket['valid'] += cnt
-            elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
-                bucket['fail'] += cnt
+            # 只统计成功/失败进 total，其他状态忽略
+            if st in success_set:
+                bucket["success"] += cnt
+                bucket["total"] += cnt
+            elif st in fail_set:
+                bucket["fail"] += cnt
+                bucket["total"] += cnt
+            else:
+                # PENDING/RUNNING/SKIPPED/IGNORED 等不进入柱图
+                pass
 
-        # Convert to sorted list
-        return sorted(timeline.values(), key=lambda x: x['ts'])
+        return [timeline[k] for k in sorted(timeline.keys())]
 
     def get_session_stats(self, since_time: datetime.datetime = None):
         """
