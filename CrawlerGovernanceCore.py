@@ -506,6 +506,18 @@ class GroupRoundContext:
 
         logger.info(f"[Round Start] {self.group_path} (Round #{self.round_id}, Plan: {expected_count})")
 
+    def reduce_expected(self, count: int = 1):
+        if self.expected_count >= count:
+            self.expected_count -= count
+        else:
+            self.expected_count = 0
+            logger.warning('Expected count is reduced under 0.')
+
+    def increase_progressed(self, count: int = 1):
+        self.processed_count += count
+        if self.processed_count > self.expected_count:
+            logger.warning('Progressed count is larger that expected.')
+
     def update(self, status: int):
         if self.phase != "RUNNING":
             return
@@ -513,9 +525,8 @@ class GroupRoundContext:
         if status in [Status.IGNORED, Status.CACHED]:
             return
 
-        self.processed_count += 1
+        self.increase_progressed()
         self.total_items_processed_session += 1
-
 
         if status in [Status.SUCCESS]:
             self.stats["success"] += 1
@@ -852,15 +863,27 @@ class GovernanceManager:
         """业务层调用：告诉系统这组任务开始了一轮"""
         group_path = _normalize_group_path(group_path)
         with self.stats_lock:
+            if ctx := self._get_round_context(group_path):
+                ctx.start(expected_count)
+
+    def skip_round_step(self, group_path: Union[str, List[str]], count: int = 1):
+        group_path = _normalize_group_path(group_path)
+        with self.stats_lock:
             ctx = self._get_round_context(group_path)
-            ctx.start(expected_count)
+            ctx.increase_progressed(count)
+
+    def reduce_round_step(self, group_path: Union[str, List[str]], count: int = 1):
+        group_path = _normalize_group_path(group_path)
+        with self.stats_lock:
+            if ctx := self._get_round_context(group_path):
+                ctx.reduce_expected(count)
 
     def finish_round(self, group_path: Union[str, List[str]], next_run_delay: int = 0):
         """业务层调用：告诉系统这组任务这一轮结束了"""
         group_path = _normalize_group_path(group_path)
         with self.stats_lock:
-            ctx = self._get_round_context(group_path)
-            ctx.finish(next_run_delay=next_run_delay)
+            if ctx := self._get_round_context(group_path):
+                ctx.finish(next_run_delay=next_run_delay)
 
     def get_group_round_status(self, group_path: str) -> Dict:
         """API 调用：获取实时轮次状态"""
