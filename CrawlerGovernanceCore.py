@@ -522,9 +522,6 @@ class GroupRoundContext:
         if self.phase != "RUNNING":
             return
 
-        if status in [Status.IGNORED, Status.CACHED]:
-            return
-
         self.increase_progressed()
         self.total_items_processed_session += 1
 
@@ -534,6 +531,8 @@ class GroupRoundContext:
             self.stats["failed"] += 1
         elif status in [Status.SKIPPED]:
             self.stats["skipped"] += 1
+        elif status in [Status.IGNORED, Status.CACHED]:
+            pass
         else:
             self.stats["other"] += 1
 
@@ -845,13 +844,7 @@ class GovernanceManager:
 
         return CrawlSession(self, url, spider_name, norm_group_path)
 
-    # Helper to safely get or create context
-    def _get_context(self, group_path: str) -> GroupRoundContext:
-        if group_path not in self.round_contexts or self.round_contexts[group_path] is None:
-            self.round_contexts[group_path] = GroupRoundContext(group_path)
-        return self.round_contexts[group_path]
-
-    # --- Round Management (新功能接口) ---
+    # --- Round Management ---
 
     def _get_round_context(self, group_path: str) -> GroupRoundContext:
         """获取或创建 Context，非线程安全，需外部加锁"""
