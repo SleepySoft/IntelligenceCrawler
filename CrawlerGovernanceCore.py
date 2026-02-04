@@ -108,7 +108,6 @@ class DatabaseHandler:
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         self._init_schema()
-        self._ensure_column("crawl_status", "updated_at TIMESTAMP")
 
     def _init_schema(self):
         with self.lock:
@@ -117,41 +116,37 @@ class DatabaseHandler:
             cur.execute("PRAGMA journal_mode=WAL;")
             cur.execute("PRAGMA synchronous=NORMAL;")
 
-            # 1. Task Groups (Metadata Registry)
-            # Used for UI aggregation. linking a group to a specific entry URL (list_url).
-            # 'list_url' serves as a logical foreign key to crawl_status.url
+            # 1. Task Groups
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS task_groups (
                     group_path TEXT PRIMARY KEY,
-                    list_url TEXT, 
+                    list_url TEXT,
                     name TEXT,
                     config_json TEXT DEFAULT '{}',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at INTEGER NOT NULL
                 )
             """)
 
-            # 2. Crawl Status (The "Dashboard" - Current State)
-            # Stores the LATEST known state of a URL.
-            # 'spider_name' is stored for fast filtering/stats, derived from group_path.
+            # 2. Crawl Status
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS crawl_status (
                     url TEXT PRIMARY KEY,
-                    url_hash TEXT NOT NULL, 
+                    url_hash TEXT NOT NULL,
                     group_path TEXT NOT NULL,
                     spider_name TEXT NOT NULL,
                     status INTEGER DEFAULT 0,
                     retry_count INTEGER DEFAULT 0,
                     http_code INTEGER,
                     file_path TEXT,
-                    last_run_at TIMESTAMP,
-                    next_run_at TIMESTAMP, 
+                    last_run_at INTEGER,     -- epoch seconds
+                    next_run_at INTEGER,     -- epoch seconds
+                    updated_at INTEGER,      -- epoch seconds
                     duration REAL,
                     state_msg TEXT
                 )
             """)
 
-            # 3. Crawl Log (The "Flow" - History)
-            # Records every attempt. Linked to Session via 'id'.
+            # 3. Crawl Log
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS crawl_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,39 +156,36 @@ class DatabaseHandler:
                     status INTEGER,
                     http_code INTEGER,
                     duration REAL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at INTEGER NOT NULL  -- epoch seconds
                 )
             """)
 
-            # 4. System Control (For persistent signaling)
+            # 4. System Control
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS sys_control (
                     key TEXT PRIMARY KEY,
                     signal TEXT DEFAULT 'NORMAL',
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at INTEGER NOT NULL
                 )
             """)
 
             # Initialize global control signal if not present
-            cur.execute("INSERT OR IGNORE INTO sys_control (key, signal) VALUES ('global', 'NORMAL')")
+            now_ts = int(time.time())
+            cur.execute(
+                "INSERT OR IGNORE INTO sys_control (key, signal, updated_at) VALUES ('global', 'NORMAL', ?)",
+                (now_ts,)
+            )
 
-            # Indexes for performance
+            # Indexes
             cur.execute("CREATE INDEX IF NOT EXISTS idx_status_group ON crawl_status(group_path)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_status_spider ON crawl_status(spider_name)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_status_updated ON crawl_status(updated_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_status_sched ON crawl_status(status, next_run_at)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_log_url ON crawl_log(url)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_log_created ON crawl_log(created_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_log_group_created ON crawl_log(group_path, created_at)")
 
             self.conn.commit()
-
-    def _ensure_column(self, table: str, column_def: str):
-        # column_def 例如 "updated_at TIMESTAMP"
-        try:
-            self.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
-            logger.info(f"Added column {column_def} to {table}")
-        except sqlite3.OperationalError as e:
-            # 重复添加会报 duplicate column name，直接忽略
-            if "duplicate column name" in str(e).lower():
-                return
-            raise
 
     def execute(self, sql: str, params: tuple = ()) -> int:
         """
@@ -227,8 +219,11 @@ class DatabaseHandler:
         return row['signal'] if row else "NORMAL"
 
     def set_control_signal(self, signal: str, key='global'):
-        self.execute("INSERT OR REPLACE INTO sys_control (key, signal, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                     (key, signal))
+        now_ts = int(time.time())
+        self.execute(
+            "INSERT OR REPLACE INTO sys_control (key, signal, updated_at) VALUES (?, ?, ?)",
+            (key, signal, now_ts)
+        )
 
 
 # --- File Storage Handler ---
@@ -409,10 +404,10 @@ class CrawlSession:
         This updates the 'next_run_at' field in crawl_status.
         """
         if interval_seconds > 0:
-            next_run = datetime.datetime.now() + datetime.timedelta(seconds=interval_seconds)
+            next_run = int(time.time()) + int(interval_seconds)
             self.manager.db.execute(
-                "UPDATE crawl_status SET next_run_at = ? WHERE url = ?",
-                (next_run, self.url)
+                "UPDATE crawl_status SET next_run_at = ?, updated_at = ? WHERE url = ?",
+                (next_run, int(time.time()), self.url)
             )
 
     def _finalize(self, status: Status):
@@ -696,13 +691,15 @@ class GovernanceManager:
 
         try:
             # 1. Update DB (Persistent Record)
+
+            now_ts = int(time.time())
             self.db.execute("""
-                        INSERT INTO task_groups (group_path, list_url, name)
-                        VALUES (?, ?, ?)
-                        ON CONFLICT(group_path) DO UPDATE SET
-                        list_url = excluded.list_url,
-                        name = excluded.name
-                    """, (norm_group_path, list_url, friendly_name))
+                INSERT INTO task_groups (group_path, list_url, name, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(group_path) DO UPDATE SET
+                    list_url = excluded.list_url,
+                    name = excluded.name
+            """, (norm_group_path, list_url, friendly_name, now_ts))
 
             # 2. Update Runtime Registry (UI Visibility) <--- KEY CHANGE
             with self.stats_lock:
@@ -780,27 +777,9 @@ class GovernanceManager:
 
         # 3. Schedule Check (Time-based Priority)
         # 无论是列表还是文章，只要设定了 next_run_at，就必须遵循时间调度
-        next_run_at = False # Temporary remove this logic
-        if next_run_at:
-            if isinstance(next_run_at, str):
-                # Handle varying SQLite timestamp formats
-                try:
-                    target_ts = datetime.datetime.fromisoformat(next_run_at)
-                except ValueError:
-                    # Fallback for simple space-separated DB timestamps if any
-                    target_ts = datetime.datetime.strptime(next_run_at, "%Y-%m-%d %H:%M:%S.%f")
-            else:
-                target_ts = next_run_at
-
-            now = datetime.datetime.now()
-
-            # 如果时间没到，坚决不抓
-            if now < target_ts:
-                return False
-
-            # 如果时间到了，允许抓取 (return True)
-            # 注意：这里我们隐式允许了即便 status=SUCCESS 也可以抓，只要时间到了
-            return True
+        next_run_at = False     # TODO: Temporary remove this logic
+        if next_run_at and int(time.time()) < int(next_run_at):
+            return False
 
         # 4. Logic for "Seed/List" URLs (Recurrent)
         # 如果它是种子，且没有设定 next_run_at (可能是初次运行或逻辑疏忽)
@@ -893,21 +872,28 @@ class GovernanceManager:
         Called when transaction starts.
         Updated: Now stores 'url' and 'spider' in memory for rich monitoring.
         """
+
+        now_ts = int(time.time())
+
         # 1. DB Insert (Log)
         log_id = self.db.execute("""
-                    INSERT INTO crawl_log (url, group_path, spider_name, status, created_at)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, (url, group, spider, Status.RUNNING))
+            INSERT INTO crawl_log (url, group_path, spider_name, status, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (url, group, spider, int(Status.RUNNING), now_ts))
 
-        if log_id is None: log_id = 0
+        if log_id is None:
+            log_id = 0
 
         # 2. DB Upsert (Status)
         self.db.execute("""
             INSERT INTO crawl_status (url, url_hash, group_path, spider_name, status, last_run_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(url) DO UPDATE SET
-                status = ?, spider_name = ?, last_run_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-        """, (url, self._hash(url), group, spider, Status.RUNNING, Status.RUNNING, spider))
+                status = excluded.status,
+                spider_name = excluded.spider_name,
+                last_run_at = excluded.last_run_at,
+                updated_at = excluded.updated_at
+        """, (url, self._hash(url), group, spider, int(Status.RUNNING), now_ts, now_ts))
 
         # 3. Memory Update (Rich Object)
         with self.stats_lock:
@@ -968,17 +954,18 @@ class GovernanceManager:
                 self.round_contexts[group_path].update(status)
 
     def _update_crawl_status_finish(self, url, spider, status, duration, http_code, state_msg, file_path):
+        now_ts = int(time.time())
         retry_inc = 1 if status == Status.TEMP_FAIL else 0
         retry_reset = "retry_count = 0," if status != Status.TEMP_FAIL else ""
         self.db.execute(
             f"""
-            UPDATE crawl_status 
+            UPDATE crawl_status
             SET status=?, duration=?, http_code=?, state_msg=?, file_path=?, spider_name=?,
-                updated_at=CURRENT_TIMESTAMP,
+                updated_at=?,
                 {retry_reset} retry_count = retry_count + ?
             WHERE url=?
             """,
-            (int(status), duration, http_code, state_msg, file_path, spider, retry_inc, url)
+            (int(status), duration, http_code, state_msg, file_path, spider, now_ts, retry_inc, url)
         )
 
     def _rollback_crawl_status(self, url: str, prev_exists: bool, prev_snapshot: dict):
@@ -1131,6 +1118,16 @@ class GovernanceManager:
 
     # --- 6. Dashboard Statistics (Unified Logic) ---
 
+    def _to_epoch(self, t: Optional[datetime.datetime]) -> int:
+        if not t:
+            return 0
+        if isinstance(t, (int, float)):
+            return int(t)
+        if isinstance(t, datetime.datetime):
+            # 若传入的是 naive datetime，按本地理解也没关系，最终只做过滤
+            return int(t.timestamp())
+        return int(t)
+
     def _get_aggregated_stats(self, since_time: Optional[datetime.datetime]) -> Dict[str, Dict]:
         """
         聚合统计核心函数。
@@ -1229,15 +1226,17 @@ class GovernanceManager:
 
         else:
             # === Path B: Database (Historical View) ===
+            since_ts = self._to_epoch(since_time)
+
             rows = self.db.fetch_all("""
-                SELECT 
+                SELECT
                     group_path, status, COUNT(*) as cnt,
                     MIN(duration) as min_dur, MAX(duration) as max_dur,
                     SUM(duration) as sum_dur, COUNT(CASE WHEN duration > 0 THEN 1 END) as dur_cnt
                 FROM crawl_log
                 WHERE created_at > ?
                 GROUP BY group_path, status
-            """, (since_time,))
+            """, (since_ts,))
 
             for r in rows:
                 gp = r['group_path']
@@ -1364,7 +1363,7 @@ class GovernanceManager:
             end_ts: float,
             bucket_minutes: int = 60,
             group_filter: str = None,
-            use_updated_at: bool = True,
+            use_updated_at: bool = False,
             include_cached_as_success: bool = False
     ) -> List[Dict]:
         """
@@ -1377,20 +1376,18 @@ class GovernanceManager:
         bucket_seconds = max(1, bucket_minutes) * 60
         time_col = "updated_at" if use_updated_at else "last_run_at"
 
-        # 注意：crawl_status 是快照表，一 URL 一行，所以统计是“唯一 URL 在该时间段发生更新”的结果分布
         sql = f"""
-            SELECT 
-                (CAST(strftime('%s', s.{time_col}) AS INTEGER) / ?) * ? as bucket_ts,
+            SELECT
+                (s.{time_col} / ?) * ? as bucket_ts,
                 s.status as status,
                 COUNT(*) as cnt
             FROM crawl_status s
             LEFT JOIN task_groups g ON s.url = g.list_url
             WHERE s.{time_col} IS NOT NULL
-              AND s.{time_col} BETWEEN datetime(?, 'unixepoch') AND datetime(?, 'unixepoch')
+              AND s.{time_col} BETWEEN ? AND ?
               AND g.list_url IS NULL
         """
-
-        params = [bucket_seconds, bucket_seconds, start_ts, end_ts]
+        params = [bucket_seconds, bucket_seconds, int(start_ts), int(end_ts)]
 
         if group_filter:
             sql += " AND s.group_path = ?"
@@ -1531,12 +1528,12 @@ class GovernanceManager:
             params.append(status)
 
         if since_time:
-            sql += " AND l.created_at >= datetime(?, 'unixepoch')"
-            params.append(since_time)
+            sql += " AND l.created_at >= ?"
+            params.append(int(since_time))
 
         if until_time:
-            sql += " AND l.created_at <= datetime(?, 'unixepoch')"
-            params.append(until_time)
+            sql += " AND l.created_at <= ?"
+            params.append(int(until_time))
 
         sql += " ORDER BY l.id DESC LIMIT ?"
         params.append(limit)
@@ -1612,15 +1609,15 @@ class GovernanceManager:
         # 1. Daily Stats
         # SQLite 'date' function extracts YYYY-MM-DD
         rows_daily = self.db.fetch_all("""
-            SELECT 
-                date(created_at) as day, 
-                status, 
+            SELECT
+                date(datetime(created_at, 'unixepoch')) as day,
+                status,
                 COUNT(*) as cnt
-            FROM crawl_log 
-            WHERE created_at >= date('now', ?)
+            FROM crawl_log
+            WHERE created_at >= ?
             GROUP BY day, status
             ORDER BY day ASC
-        """, (f'-{days} days',))
+        """, (int(time.time()) - days * 86400,))
 
         daily_map = {}
         for r in rows_daily:
