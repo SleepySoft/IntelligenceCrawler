@@ -55,7 +55,7 @@ class CrawlerGovernanceBackend:
                 def run_flask():
                     self.app.run(debug=False, host=self.host, port=self.port, use_reloader=False, threaded=True)
 
-                self.flask_thread = threading.Thread(target=run_flask, daemon=True)
+                self.flask_thread = threading.Thread(target=run_flask, daemon=True, name='CrawlerGovernanceBackend')
                 self.flask_thread.start()
                 time.sleep(1)
                 print(f"Flask server running in background.")
