@@ -338,6 +338,9 @@ class CrawlSession:
         self._has_prev_row = bool(existing)
         self._prev_row_snapshot = dict(existing) if existing else None
 
+        if existing and "status" in existing.keys():
+            self.original_status = Status(int(existing["status"]))
+
         # Unique ID for the specific log entry of this session
         self.log_id: Optional[int] = None
 
@@ -348,19 +351,32 @@ class CrawlSession:
         self._finished = False
 
     def __enter__(self):
+        # 1) 阻止同线程嵌套
+        cur = self.manager._get_tls_session()
+        if cur is not None:
+            raise RuntimeError(
+                f"Nested CrawlSession is not allowed in the same thread. "
+                f"Current={cur.url}, New={self.url}"
+            )
+
+        # 2) 先注册 TLS（让 should_crawl 在本 session 内可识别）
+        self.manager._set_tls_session(self)
+
         # Notify manager to start transaction (Insert Log, Update Status)
         self.log_id = self.manager._handle_task_start(self.url, self.spider, self.group_path)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if not self._finished:
-            if exc_type:
-                # Handle unhandled exceptions/crashes
-                self.fail_perm(http_code=500, state_msg=f"Exception: {str(exc_val)}")
-                logger.error(f"Session crashed for {self.url}: {exc_val}")
-            else:
-                # Handle context exit without explicit status
-                self.fail_temp(state_msg="Exited without explicit status")
+        try:
+            if not self._finished:
+                if exc_type:
+                    self.fail_perm(http_code=500, state_msg=f"Exception: {str(exc_val)}")
+                    logger.error(f"Session crashed for {self.url}: {exc_val}")
+                else:
+                    self.fail_temp(state_msg="Exited without explicit status")
+        finally:
+            # 关键：确保 TLS 释放，避免线程复用导致污染
+            self.manager._clear_tls_session(self)
 
     def save_file(self, content: Union[bytes, str], filename: str, sub_folder: str = ""):
         """
@@ -639,6 +655,9 @@ class GovernanceManager:
 
         self.known_anchors = set()
 
+        # Use TLS to record current context
+        self._tls = threading.local()
+
         logger.info(f"Governance Manager initialized. Signal: {self._control_signal}")
 
     # --- Helper: Path Normalization & Name Extraction ---
@@ -646,6 +665,15 @@ class GovernanceManager:
     def _hash(self, text: str) -> str:
         return hashlib.md5(text.encode()).hexdigest()
 
+    def _get_tls_session(self):
+        return getattr(self._tls, "current_session", None)
+
+    def _set_tls_session(self, sess):
+        self._tls.current_session = sess
+
+    def _clear_tls_session(self, sess):
+        if getattr(self._tls, "current_session", None) is sess:
+            self._tls.current_session = None
 
     def _recover_incomplete_running_tasks(self):
         """
@@ -749,8 +777,6 @@ class GovernanceManager:
         Returns:
             bool: True if the URL should be processed, False otherwise.
         """
-        # 我们通过 LEFT JOIN 检查这个 URL 是否是某个组的 list_url
-        # 结果集多了一列 is_seed (1 or 0)
         row = self.db.fetch_one("""
             SELECT 
                 s.status, 
@@ -762,7 +788,6 @@ class GovernanceManager:
             WHERE s.url = ?
         """, (url,))
 
-        # 1. New URL (Never seen) -> Crawl it
         if not row:
             return True
 
@@ -771,43 +796,37 @@ class GovernanceManager:
         next_run_at = row['next_run_at']
         is_seed = bool(row['is_seed'])
 
-        # 2. Running State: Always protect against concurrency
+        # RUNNING: protect concurrency, but allow self-check inside current session
         if status == Status.RUNNING:
-            return False
+            cur_sess = self._get_tls_session()
+            if cur_sess is None or cur_sess.url != url:
+                return False
 
-        # 3. Schedule Check (Time-based Priority)
-        # 无论是列表还是文章，只要设定了 next_run_at，就必须遵循时间调度
-        next_run_at = False     # TODO: Temporary remove this logic
-        if next_run_at and int(time.time()) < int(next_run_at):
-            return False
+            # self-owned RUNNING: use snapshot before entering session
+            if not cur_sess._has_prev_row or not cur_sess._prev_row_snapshot:
+                return True
 
-        # 4. Logic for "Seed/List" URLs (Recurrent)
-        # 如果它是种子，且没有设定 next_run_at (可能是初次运行或逻辑疏忽)
-        # 我们不能因为它 SUCCESS 了就停止抓取。
+            snap = cur_sess._prev_row_snapshot
+            status = int(snap.get("status", int(Status.PENDING)))
+            retry_count = int(snap.get("retry_count", 0))
+            next_run_at = snap.get("next_run_at")
+
+        # Schedule check (disabled temporarily)
+        # if next_run_at and int(time.time()) < int(next_run_at):
+        #     return False
+
         if is_seed:
-            # 种子页只有在 "RUNNING" 时才不抓 (上面已处理)
-            # 其他状态 (SUCCESS, FAIL) 都应该允许重试或下一轮
-            # 但为了防止死循环狂抓，建议业务逻辑必须设置 next_run_at。
-            # 这里作为兜底，允许抓取。
             return True
 
-        # 5. Logic for "Article/One-off" URLs
-        # 普通文章，一旦成功，就永久停止
         if status == Status.SUCCESS:
             return False
 
-            # Dead End States
         if status in [Status.PERM_FAIL, Status.SKIPPED, Status.STOPPED]:
             return False
 
-        # Retry Logic for Temp Fails
         if status == Status.TEMP_FAIL:
-            if retry_count < max_retries:
-                return True
-            else:
-                return False
+            return retry_count < max_retries
 
-        # Default (e.g. PENDING)
         return True
 
     # --- 3. Session Factory ---
