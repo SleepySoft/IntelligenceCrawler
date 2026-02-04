@@ -50,10 +50,10 @@ class CrawlerGovernanceBackend:
 
         if self.own_app:
             if blocking:
-                self.app.run(debug=True, host=self.host, port=self.port, use_reloader=False, threaded=True)
+                self.app.run(debug=False, host=self.host, port=self.port, use_reloader=False, threaded=True)
             else:
                 def run_flask():
-                    self.app.run(debug=True, host=self.host, port=self.port, use_reloader=False, threaded=True)
+                    self.app.run(debug=False, host=self.host, port=self.port, use_reloader=False, threaded=True)
 
                 self.flask_thread = threading.Thread(target=run_flask, daemon=True)
                 self.flask_thread.start()
