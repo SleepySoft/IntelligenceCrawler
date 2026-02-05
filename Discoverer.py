@@ -1082,7 +1082,7 @@ class ListPageDiscoverer(IDiscoverer):
             return None, []
         self._log(f"  [Parse] 正在解析 HTML (lxml)...", indent=1)
         soup = BeautifulSoup(content, 'lxml')
-        self._log(f"  [Analyze] 步骤 1: 生成结构化路径签名 (已改进)...", indent=1)
+        self._log(f"  [Analyze] 步骤 1: 生成结构化路径签名...", indent=1)
         fingerprints = self._generate_fingerprints(soup, url)
         self._log(f"  [Analyze] 步骤 2: 聚类链接...", indent=1)
         groups = self._cluster_fingerprints(fingerprints)

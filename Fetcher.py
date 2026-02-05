@@ -131,16 +131,20 @@ def fetcher_factory(name: str, init_params: dict) -> Fetcher:
     raise ValueError(f"Unknown fetcher: {name}")
 
 
+# def also_print(log_callback):
+#     """A helper wrapper to ensure logs are always printed to console."""
+#
+#     def wrapper(text):
+#         if log_callback != print:
+#             print(text)
+#         if log_callback:
+#             log_callback(text)
+#
+#     return wrapper
+
+
 def also_print(log_callback):
-    """A helper wrapper to ensure logs are always printed to console."""
-
-    def wrapper(text):
-        if log_callback != print:
-            print(text)
-        if log_callback:
-            log_callback(text)
-
-    return wrapper
+    return log_callback
 
 
 class RequestsFetcher(Fetcher):
