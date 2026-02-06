@@ -455,9 +455,78 @@
 
                 <!-- Chart -->
                 <div class="bg-gray-900/40 border border-gray-800 rounded p-3">
-                  <div class="flex items-center justify-between mb-2">
-                    <div class="text-xs text-gray-400 font-bold uppercase tracking-wider">Bars</div>
-                    <div class="flex items-center gap-3 text-[10px] text-gray-500">
+                  <!-- Header + Controls -->
+                  <div class="flex flex-wrap items-start justify-between gap-3 mb-3">
+                    <div class="flex flex-col gap-2 min-w-[520px]">
+                      <div class="flex items-center gap-2">
+                        <div class="text-xs text-gray-400 font-bold uppercase tracking-wider">Bars</div>
+
+                        <!-- Range Presets -->
+                        <div class="flex gap-1 bg-gray-950 rounded p-1 border border-gray-700">
+                          <button @click="setTrendRange('1H')"
+                                  class="text-xxs px-2 py-0.5 rounded transition"
+                                  :class="statsRange==='1H' ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'">1H</button>
+                          <button @click="setTrendRange('6H')"
+                                  class="text-xxs px-2 py-0.5 rounded transition"
+                                  :class="statsRange==='6H' ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'">6H</button>
+                          <button @click="setTrendRange('24H')"
+                                  class="text-xxs px-2 py-0.5 rounded transition"
+                                  :class="statsRange==='24H' ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'">24H</button>
+                          <button @click="setTrendRange('7D')"
+                                  class="text-xxs px-2 py-0.5 rounded transition"
+                                  :class="statsRange==='7D' ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'">7D</button>
+                          <button @click="setTrendRange('CUSTOM')"
+                                  class="text-xxs px-2 py-0.5 rounded transition"
+                                  :class="statsRange==='CUSTOM' ? 'bg-blue-900/50 text-blue-200' : 'text-gray-500 hover:text-gray-300'">Custom</button>
+                        </div>
+
+                        <!-- Granularity -->
+                        <div class="flex items-center bg-gray-950 rounded p-1 border border-gray-700">
+                          <span class="text-[10px] text-gray-500 px-2">Bucket</span>
+                          <select x-model="trendGranularity"
+                                  @change="fetchTrendData(statsRange==='CUSTOM')"
+                                  class="bg-transparent text-xs text-gray-300 border-none focus:ring-0 p-0 h-5 font-mono outline-none">
+                            <option value="AUTO">AUTO</option>
+                            <option value="1">1m</option>
+                            <option value="5">5m</option>
+                            <option value="15">15m</option>
+                            <option value="60">1h</option>
+                            <option value="360">6h</option>
+                            <option value="1440">1d</option>
+                          </select>
+                        </div>
+
+                        <!-- Align hint -->
+                        <span class="text-[10px] text-gray-600 hidden md:inline">
+                          (aligned to local time boundaries)
+                        </span>
+                      </div>
+
+                      <!-- Custom range inputs -->
+                      <div x-show="statsRange==='CUSTOM'" x-cloak class="flex flex-wrap items-center gap-2">
+                        <div class="flex items-center bg-gray-950 rounded p-1 border border-gray-700">
+                          <span class="text-[10px] text-gray-500 px-2">From</span>
+                          <input type="datetime-local" x-model="trendCustomFrom"
+                                 class="bg-transparent text-xs text-gray-300 border-none focus:ring-0 p-0 h-5 w-40 font-mono outline-none">
+                        </div>
+                        <div class="flex items-center bg-gray-950 rounded p-1 border border-gray-700">
+                          <span class="text-[10px] text-gray-500 px-2">To</span>
+                          <input type="datetime-local" x-model="trendCustomTo"
+                                 class="bg-transparent text-xs text-gray-300 border-none focus:ring-0 p-0 h-5 w-40 font-mono outline-none">
+                        </div>
+                        <button @click="fetchTrendData(true)"
+                                class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded border border-gray-700 transition h-[26px]">
+                          Apply
+                        </button>
+                        <button @click="setTrendRange('1H')"
+                                class="text-xs text-gray-500 hover:text-gray-300 px-2 py-1 rounded hover:bg-gray-800 transition h-[26px]">
+                          Reset
+                        </button>
+                      </div>
+                    </div>
+
+                    <!-- Legend (keep) -->
+                    <div class="flex items-center gap-3 text-[10px] text-gray-500 mt-1">
                       <div class="flex items-center gap-1">
                         <span class="w-2 h-2 bg-emerald-500 rounded-sm"></span> Valid
                       </div>
@@ -469,6 +538,34 @@
                       </div>
                     </div>
                   </div>
+
+                  <!-- Empty state -->
+                  <div x-show="!trendLoading && trendData.length === 0"
+                       class="text-xs text-gray-600 italic p-6 text-center">
+                    No trend data.
+                  </div>
+
+                  <!-- Bar area -->
+                  <div x-show="trendData.length > 0"
+                       class="h-56 flex items-end gap-1 overflow-x-auto pb-2">
+                    <template x-for="(pt, idx) in trendData" :key="(pt.bucket_ts ?? pt.ts ?? pt.time ?? idx)">
+                      <div class="flex flex-col items-center justify-end min-w-[10px]">
+                        <div class="relative w-3 rounded-t bg-emerald-600/70"
+                             :style="`height:${Math.max(2, Math.round(((pt.total || 0) / maxTrendValue) * 180))}px`"
+                             :title="trendTooltip(pt)">
+                          <div class="absolute bottom-0 left-0 w-full bg-red-500/80 rounded-t"
+                               :style="`height:${Math.round(((pt.fail || 0) / Math.max(1,(pt.total||0))) * 100)}%`">
+                          </div>
+                        </div>
+                        <!-- label (keep height to avoid baseline jump) -->
+                        <div class="mt-1 h-4 text-[9px] leading-4 text-gray-600 font-mono whitespace-nowrap transition-opacity"
+                             :class="shouldShowLabel(idx) ? 'opacity-100' : 'opacity-0'"
+                             x-text="formatTrendTick(pt)">
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
 
                   <!-- Empty state -->
                   <div x-show="!trendLoading && trendData.length === 0"
@@ -522,7 +619,6 @@
                 viewMode: 'LATEST', // LATEST, HISTORY, STATS
 
                 // --- Trend Chart State ---
-                statsRange: '1H',
                 trendData: [],
                 maxTrendValue: 1,
                 trendSummary: { total: 0, valid: 0, fail: 0, failRate: 0 },
@@ -530,6 +626,7 @@
                 trendReqId: 0,
 
                 // Trend controls
+                statsRange: '6H',
                 trendGranularity: 'AUTO',     // 'AUTO' or minutes number string: '5','15','60','1440',...
                 trendScope: 'AUTO',           // 'AUTO' | 'GROUP' | 'GLOBAL'
                 trendAdvancedOpen: false,     // Advanced panel collapse
@@ -574,6 +671,59 @@
 
                 // --- Trend helpers ---
 
+                alignLocalTs(tsSec, bucketSec, mode /* 'floor' | 'ceil' */) {
+                  // 对齐到“本地时钟边界”，而不是 UTC 边界
+                  // 原理：把 ts 按本地 offset 映射到“本地 epoch”，对齐后再映射回去
+                  const offsetSec = (new Date().getTimezoneOffset() * 60); // 注意：东八区为 -28800
+                  const local = tsSec - offsetSec;
+                  const q = Math.floor(local / bucketSec);
+                  const floored = q * bucketSec;
+                  const ceiled = (local % bucketSec === 0) ? local : (q + 1) * bucketSec;
+                  const alignedLocal = (mode === 'ceil') ? ceiled : floored;
+                  return alignedLocal + offsetSec;
+                },
+
+                pickAutoBucketMin(rangeKey, startTs, endTs) {
+                  // 你原本 AUTO 规则 + 对自定义按跨度粗略推导（保证点数不会爆炸）
+                  if (rangeKey === '1H') return 5;
+                  if (rangeKey === '6H') return 15;
+                  if (rangeKey === '24H') return 60;
+                  if (rangeKey === '7D') return 360;
+
+                  // CUSTOM：按跨度选择一个“合理桶”
+                  const span = Math.max(1, endTs - startTs);
+                  if (span <= 2 * 3600) return 5;        // <=2h
+                  if (span <= 12 * 3600) return 15;      // <=12h
+                  if (span <= 2 * 86400) return 60;      // <=2d
+                  if (span <= 10 * 86400) return 360;    // <=10d
+                  return 1440;                            // 更大 -> 天
+                },
+
+                setTrendRange(rangeKey) {
+                  this.statsRange = rangeKey;
+
+                  // 进入 CUSTOM 时，预填一个“最近 1h”并对齐（更好用）
+                  if (rangeKey === 'CUSTOM') {
+                    const now = Math.floor(Date.now() / 1000);
+                    // 先用当前 granularity 推导 bucket（AUTO 先按 1H 规则）
+                    const tempBucketMin = (this.trendGranularity !== 'AUTO')
+                      ? Math.max(1, parseInt(this.trendGranularity, 10) || 60)
+                      : 5;
+
+                    const bucketSec = tempBucketMin * 60;
+                    const end = this.alignLocalTs(now, bucketSec, 'ceil');
+                    const start = this.alignLocalTs(end - 3600, bucketSec, 'floor');
+
+                    // 填入 input（datetime-local 是本地时间）
+                    this.trendCustomFrom = this.formatForInput(new Date(start * 1000).toISOString());
+                    this.trendCustomTo   = this.formatForInput(new Date(end * 1000).toISOString());
+                    return;
+                  }
+
+                  // 非 CUSTOM：切范围后直接拉数据（forceApply=false）
+                  this.fetchTrendData(false);
+                },
+
                 formatTrendTick(pt) {
                   const ts = pt.bucket_ts ?? pt.ts ?? pt.time ?? pt.start_ts;
                   if (!ts) return '';
@@ -596,16 +746,17 @@
                   return `${d}\nTotal: ${t}\nValid: ${v}\nFail: ${f}\nFailRate: ${fr}%`;
                 },
 
-                // --- Trend helpers ---
                 computeTrendParams(forceApply = false) {
                   const now = Math.floor(Date.now() / 1000);
 
-                  // 1) Determine start/end
+                  // 1) Determine raw start/end
                   let start = now - 3600;
                   let end = now;
 
+                  const isCustomMode = (this.statsRange === 'CUSTOM');
                   const hasCustom = this.trendCustomFrom && this.trendCustomTo;
-                  if (hasCustom && forceApply) {
+
+                  if (isCustomMode && hasCustom && forceApply) {
                     const s = Math.floor(new Date(this.trendCustomFrom).getTime() / 1000);
                     const e = Math.floor(new Date(this.trendCustomTo).getTime() / 1000);
                     if (!isNaN(s) && !isNaN(e) && e > s) { start = s; end = e; }
@@ -614,34 +765,41 @@
                     else if (this.statsRange === '24H') start = now - 24 * 3600;
                     else if (this.statsRange === '7D') start = now - 7 * 24 * 3600;
                     else start = now - 3600;
+                    end = now;
                   }
 
                   // 2) Determine bucket (minutes)
-                  let bucketMin = 60;
+                  let bucketMin;
                   if (this.trendGranularity !== 'AUTO') {
                     bucketMin = Math.max(1, parseInt(this.trendGranularity, 10) || 60);
                   } else {
-                    // 简单 auto（你后续想更智能我再帮你升级）
-                    if (this.statsRange === '1H') bucketMin = 5;
-                    else if (this.statsRange === '6H') bucketMin = 15;
-                    else if (this.statsRange === '24H') bucketMin = 60;
-                    else if (this.statsRange === '7D') bucketMin = 360;
+                    bucketMin = this.pickAutoBucketMin(this.statsRange, start, end);
                   }
+                  const bucketSec = bucketMin * 60;
 
-                  // 3) scope -> group_filter
+                  // 3) Align start/end to integer time boundaries (LOCAL)
+                  //    - end 用 ceil：对齐到下一个边界，确保最后一桶完整
+                  //    - start 用 floor：对齐到边界，确保第一桶完整
+                  let alignedEnd = this.alignLocalTs(end, bucketSec, 'ceil');
+                  let alignedStart = this.alignLocalTs(start, bucketSec, 'floor');
+
+                  // 避免 start == end 导致后端返回空
+                  if (alignedEnd <= alignedStart) alignedEnd = alignedStart + bucketSec;
+
+                  // 4) scope -> group_filter
                   let useGroup = false;
                   if (this.trendScope === 'GROUP') useGroup = true;
                   else if (this.trendScope === 'GLOBAL') useGroup = false;
                   else useGroup = !!this.selectedGroup;
 
-                  // 4) timeField -> use_updated_at
+                  // 5) timeField -> use_updated_at
                   let useUpdatedAt = true;
                   if (this.trendTimeField === 'last_run_at') useUpdatedAt = false;
                   if (this.trendTimeField === 'last_finish_at') useUpdatedAt = true; // 后端不支持，退化
 
                   return {
-                    start_ts: start,
-                    end_ts: end,
+                    start_ts: alignedStart,
+                    end_ts: alignedEnd,
                     bucket_minutes: bucketMin,
                     group_filter: (useGroup ? this.selectedGroup : null),
                     use_updated_at: useUpdatedAt ? 1 : 0,
