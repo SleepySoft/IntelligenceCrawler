@@ -547,6 +547,7 @@
 
                   <!-- Bar area -->
                   <div x-show="trendData.length > 0"
+                       x-ref="trendBarArea"
                        class="h-56 flex items-end gap-1 overflow-x-auto pb-2">
                     <template x-for="(pt, idx) in trendData" :key="(pt.bucket_ts ?? pt.ts ?? pt.time ?? idx)">
                       <div class="flex flex-col items-center justify-end min-w-[10px]">
@@ -636,6 +637,9 @@
                 trendCustomTo: '',            // datetime-local string
                 trendLoading: false,          // loading flag
 
+                trendLabelEvery: 1,           // 隔 N 个点显示一个标签（自动计算）
+                trendLabelMinPx: 52,          // 标签最小间距（像素），稍密一点
+
                 // Log History Time Filters
                 historyStart: '',
                 historyEnd: '',
@@ -656,6 +660,9 @@
                 init() {
                     this.refreshData();
                     setInterval(() => this.refreshData(), 3000);
+
+                    // 自动根据可视宽度调整标签密度
+                    window.addEventListener('resize', () => this.recomputeTrendLabels());
                 },
 
                 // [NEW] View Switching Logic ---
@@ -736,6 +743,34 @@
                     return `${md} ${hh}:${mm}`;
                   }
                   return `${hh}:${mm}`;
+                },
+
+                // 根据范围决定标签最小间距（7D/CUSTOM 文本更长，需要更大间距）
+                getTrendLabelMinPx() {
+                  const longText = (this.statsRange === '7D' || this.statsRange === 'CUSTOM' || (this.trendCustomFrom && this.trendCustomTo));
+                  return longText ? 84 : this.trendLabelMinPx; // 稍密：短标签约 52px，长标签约 84px
+                },
+
+                // 根据容器可视宽度 & 数据点数自动计算“每隔 N 个点显示标签”
+                recomputeTrendLabels() {
+                  const el = this.$refs?.trendBarArea;
+                  const len = this.trendData?.length || 0;
+                  if (!el || len <= 0) { this.trendLabelEvery = 1; return; }
+
+                  const w = el.clientWidth || 600;
+                  const minPx = this.getTrendLabelMinPx();
+
+                  // 允许显示的最大标签数量（至少 2 个）
+                  const maxLabels = Math.max(2, Math.floor(w / minPx));
+
+                  // 每隔 N 个显示一个：N = ceil(len / maxLabels)
+                  this.trendLabelEvery = Math.max(1, Math.ceil(len / maxLabels));
+                },
+
+                // shouldShowLabel：改成用自动步进（更“稍密一点”）
+                shouldShowLabel(idx) {
+                  const every = this.trendLabelEvery || 1;
+                  return idx % every === 0;
                 },
 
                 trendTooltip(pt) {
@@ -853,6 +888,9 @@
 
                     this.trendData = normalized;
                     this.maxTrendValue = Math.max(...normalized.map(d => d.total || 0), 1);
+
+                    // 数据更新后，按可视宽度自动调标签密度
+                    this.$nextTick(() => this.recomputeTrendLabels());
 
                     let t = 0, s = 0, f = 0;
                     for (const d of normalized) { t += d.total; s += d.success; f += d.fail; }
