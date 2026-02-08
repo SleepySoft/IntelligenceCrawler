@@ -56,6 +56,10 @@ class FlowScheduler:
         # 正在休眠的任务集合 (仅用于监控显示) {key: Entry}
         self.sleeping_pool: Dict[str, SchedulerEntry] = {}
 
+        # 记录 Key 的上次结束时间 {key: timestamp}
+        # 如果 Key 无限多，这里需要用 LRU Cache 防止内存泄漏
+        self.last_finish_times: Dict[str, float] = {}
+
         # 调度状态
         self.last_dispatch_time = 0.0  # 上一次允许通过的时间
 
@@ -83,20 +87,30 @@ class FlowScheduler:
         阶段 1 & 2: 执行休眠，然后进入队列排队，直到获得运行资格。
         """
 
-        # === Phase 1: Cooldown (Sleep) ===
+        # === Phase 1: Cooldown (Smart Sleep) ===
         if interval > 0:
-            with self._lock:
-                entry.state = TaskState.SLEEPING
-                entry.enter_sleep_time = time.time()
-                entry.wake_up_time = entry.enter_sleep_time + interval
-                self.sleeping_pool[entry.key] = entry
+            last_finish = self.last_finish_times.get(entry.key, 0.0)
+            now = time.time()
+            time_since_last = now - last_finish
 
-            # 执行可中断的休眠 (不占锁)
-            self._interruptible_sleep(interval, stop_event)
+            # 核心逻辑：
+            # 如果是第一次运行 (last_finish=0)，time_since_last 很大，sleep_time < 0，变为 0。
+            # 如果是循环运行，time_since_last 很小，sleep_time = 剩余需要冷却的时间。
+            sleep_time = interval - time_since_last
 
-            with self._lock:
-                if entry.key in self.sleeping_pool:
-                    del self.sleeping_pool[entry.key]
+            if sleep_time > 0:
+                with self._lock:
+                    entry.state = TaskState.SLEEPING
+                    entry.enter_sleep_time = time.time()
+                    entry.wake_up_time = entry.enter_sleep_time + sleep_time
+                    self.sleeping_pool[entry.key] = entry
+
+                # 执行休眠
+                self._interruptible_sleep(sleep_time, stop_event)
+
+                with self._lock:
+                    if entry.key in self.sleeping_pool:
+                        del self.sleeping_pool[entry.key]
 
         # 检查是否被中断
         if stop_event and stop_event.is_set():
@@ -167,8 +181,11 @@ class FlowScheduler:
         with self._condition:
             if entry.key in self.running_pool:
                 del self.running_pool[entry.key]
+                # 录离场时间
+                self.last_finish_times[entry.key] = time.time()
+
                 duration = time.time() - entry.start_run_time
-                # logger.info(f"[{entry.key}] Released after {duration:.2f}s.")
+                logger.info(f"[{entry.key}] Released after {duration:.2f}s.")
 
                 # 关键：唤醒所有在排队的线程，让它们去争抢 (但会被 FIFO 逻辑过滤)
                 self._condition.notify_all()

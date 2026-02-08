@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from collections import defaultdict
 from typing import List, Optional, Callable, Any, Tuple, Dict
 
-from Tools.ProcessCotrolException import ProcessProblem
+from IntelligenceCrawler.ProcessCotrolException import ProcessProblem
 from IntelligenceCrawler.Persistence import save_extraction_result_as_md
 from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager
 from IntelligenceCrawler.Discoverer import IDiscoverer, discoverer_factory
@@ -244,6 +244,7 @@ class CrawlPipeline:
                         task.save_file(result.markdown_content, result.metadata.get('title', 'NoTitle'))
                         task.success()
                     except ProcessProblem as e:
+                        # TODO: DO NOT use revert dependency.
                         if exception_handler:
                             exception_handler(article_url, e)        # Pass URL and exception
                         if e.problem in ['commit_error']:

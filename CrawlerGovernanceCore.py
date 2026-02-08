@@ -12,6 +12,12 @@ from pathlib import Path
 from enum import IntEnum, Enum
 from typing import Optional, Union, List, Dict
 
+try:
+    from CrawlerFlowScheduler import FlowScheduler
+except Exception as e:
+    print(str(e))
+    from .CrawlerFlowScheduler import FlowScheduler
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("CrawlGovernance")
@@ -617,9 +623,15 @@ class GovernanceManager:
     - Falls back to DB if the time range exceeds memory history.
     """
 
-    def __init__(self, db_path: str = DEFAULT_DB_PATH, files_path: str = DEFAULT_FILES_PATH):
+    def __init__(
+            self,
+            db_path: str = DEFAULT_DB_PATH,
+            files_path: str = DEFAULT_FILES_PATH,
+            scheduler: Optional[FlowScheduler] = None
+    ):
         self.db = DatabaseHandler(db_path)
         self.storage = StorageHandler(files_path)
+        self.scheduler = scheduler
 
         self._recover_incomplete_running_tasks()
 
@@ -883,6 +895,13 @@ class GovernanceManager:
             if group_path in self.round_contexts:
                 return self.round_contexts[group_path].get_snapshot()
             return {}  # 或者返回一个默认空对象
+
+    def schedule_pace(
+            self,
+            key: str,
+            interval: float = 0.0,
+            stop_event: Optional[threading.Event] = None):
+        return self.scheduler.pace(key, interval, stop_event)
 
     # --- 4. Internal State Management (Called by Session) ---
 
