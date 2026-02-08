@@ -68,6 +68,7 @@ class CrawlPipeline:
     """
 
     def __init__(self,
+                 name: str,
                  d_fetcher: Fetcher,
                  discoverer: IDiscoverer,
                  e_fetcher: Fetcher,
@@ -84,6 +85,7 @@ class CrawlPipeline:
             extractor: IExtractor instance.
             log_callback: A function (like print or a GUI logger) to send logs to.
         """
+        self.name = name
         self.d_fetcher = d_fetcher
         self.discoverer = discoverer
         self.e_fetcher = e_fetcher
@@ -340,6 +342,7 @@ def save_article_to_disk(
 # ----------------------------------------------------------------------------------------------------------------------
 
 def build_pipeline(
+        name: str,
         config: dict,
         log_callback: Callable[..., None],
         crawler_governor: GovernanceManager
@@ -361,6 +364,7 @@ def build_pipeline(
     extractor = extractor_factory(extractor_name, extractor_init_param)
 
     pipeline = CrawlPipeline(
+        name = name,
         d_fetcher=d_fetcher,
         discoverer=discoverer,
         e_fetcher=e_fetcher,
@@ -376,50 +380,52 @@ def drive_pipeline(pipeline: CrawlPipeline, config: dict):
     start_date, end_date = config.get('period_filter', (None, None))
     d_fetcher_kwargs = config.get('d_fetcher_kwargs', {})
 
-    # ============== 1. Discover Channels ==============
+    with pipeline.crawler_governor.schedule_pace(pipeline.name, 15 * 60, None):
+        # ============== 1. Discover Channels ==============
 
-    pipeline.discover_channels(
-        entry_point=entry_points,
-        start_date=start_date,
-        end_date=end_date,
-        fetcher_kwargs=d_fetcher_kwargs)
+        pipeline.discover_channels(
+            entry_point=entry_points,
+            start_date=start_date,
+            end_date=end_date,
+            fetcher_kwargs=d_fetcher_kwargs)
 
-    # ============== 2. Discover Articles ==============
+        # ============== 2. Discover Articles ==============
 
-    # Only support channel_list_filter
-    channel_filter = config.get('channel_filter', {})
-    if channel_filter and 'channel_list_filter' in channel_filter:
-        channel_list_filter_params = channel_filter['channel_list_filter']
-        channel_filter = partial(common_channel_filter, channel_filter_list=channel_list_filter_params)
-    else:
-        channel_filter = None
+        # Only support channel_list_filter
+        channel_filter = config.get('channel_filter', {})
+        if channel_filter and 'channel_list_filter' in channel_filter:
+            channel_list_filter_params = channel_filter['channel_list_filter']
+            channel_filter = partial(common_channel_filter, channel_filter_list=channel_list_filter_params)
+        else:
+            channel_filter = None
 
-    pipeline.discover_articles(
-        channel_filter=channel_filter,
-        fetcher_kwargs=d_fetcher_kwargs)
+        pipeline.discover_articles(
+            channel_filter=channel_filter,
+            fetcher_kwargs=d_fetcher_kwargs)
 
-    # =============== 3. Extract Articles ===============
+        # =============== 3. Extract Articles ===============
 
-    article_filter = config.get('article_filter', None)
-    content_handler = config.get('content_handler', None)
-    exception_handler = config.get('exception_handler', None)
+        article_filter = config.get('article_filter', None)
+        content_handler = config.get('content_handler', None)
+        exception_handler = config.get('exception_handler', None)
 
-    e_fetcher_kwargs = config.get('e_fetcher_kwargs', { })
-    extractor_kwargs = config.get('extractor_kwargs', { })
+        e_fetcher_kwargs = config.get('e_fetcher_kwargs', { })
+        extractor_kwargs = config.get('extractor_kwargs', { })
 
-    pipeline.extract_articles(
-        article_filter=article_filter,
-        content_handler=content_handler,
-        exception_handler=exception_handler,
-        fetcher_kwargs=e_fetcher_kwargs,
-        extractor_kwargs=extractor_kwargs
-    )
+        pipeline.extract_articles(
+            article_filter=article_filter,
+            content_handler=content_handler,
+            exception_handler=exception_handler,
+            fetcher_kwargs=e_fetcher_kwargs,
+            extractor_kwargs=extractor_kwargs
+        )
 
 def run_pipeline(
         config: dict,
         log_callback: Callable[..., None] = print,
+        name: str = 'ic',
         crawler_governor: Optional[GovernanceManager] = None):
-    pipeline = build_pipeline(config, log_callback, crawler_governor)
+    pipeline = build_pipeline(name, config, log_callback, crawler_governor)
     drive_pipeline(pipeline, config)
 
 
