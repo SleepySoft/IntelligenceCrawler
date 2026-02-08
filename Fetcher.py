@@ -460,8 +460,8 @@ class PlaywrightFetcher(Fetcher):
 
             real_browser = self.playwright.chromium.launch(
                 headless=headless_mode,
-                args=launch_args
-                # 更推荐把 proxy 放这里（launch(proxy=...)），
+                args=launch_args,
+                proxy=self.proxy_config
             )
 
             # Use the user's custom wrapper
