@@ -5,11 +5,11 @@ import datetime
 import traceback
 import tldextract
 from functools import partial
+from contextlib import nullcontext
 from urllib.parse import urlparse
 from collections import defaultdict
 from typing import List, Optional, Callable, Any, Tuple, Dict
 
-from IntelligenceCrawler.ProcessCotrolException import ProcessProblem
 from IntelligenceCrawler.Persistence import save_extraction_result_as_md
 from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager
 from IntelligenceCrawler.Discoverer import IDiscoverer, discoverer_factory
@@ -165,14 +165,19 @@ class CrawlPipeline:
                 self.log(f"Skipping channel (filtered): {channel_url}")
                 continue
 
+            context = nullcontext()
             if self.crawler_governor:
                 self.crawler_governor.register_group_metadata(channel_group, channel_url)
+                context = self.crawler_governor.transaction(channel_url, channel_group)
 
             self.log(f"Processing Channel: {channel_url}")
-            with self.crawler_governor.transaction(channel_url, channel_group) as task:
+            with context as task:
                 try:
                     count_new = 0
                     articles_in_channel = self.discoverer.get_articles_for_channel(channel_url, fetcher_kwargs)
+
+                    if self.crawler_governor:
+                        self.crawler_governor.start_round(channel_group, len(articles_in_channel))
 
                     for article in articles_in_channel:
                         if article not in seen_articles:
@@ -180,10 +185,10 @@ class CrawlPipeline:
                             discovered_results.append((article, channel_group))
                             count_new += 1
 
-                    task.success()
+                    if task: task.success()
                     self.log(f"Found {count_new} articles in channel.")
                 except Exception as e:
-                    task.fail_temp(state_msg=f"Fail by exception: {str(e)}")
+                    if task: task.fail_temp(state_msg=f"Fail by exception: {str(e)}")
                     self.log(f"[Error] Failed to process channel {channel_url}: {e}\n")
                     # print(traceback.format_exc())
 
@@ -214,17 +219,22 @@ class CrawlPipeline:
 
         contents = []
         for channel_group, article_urls in grouped.items():
-            self.crawler_governor.start_round(channel_group, len(article_urls))
+            if self.crawler_governor:
+                self.crawler_governor.start_round(channel_group, len(article_urls))
 
             for article_url in article_urls:
-                with self.crawler_governor.transaction(article_url, channel_group) as task:
+                context = nullcontext
+                if self.crawler_governor:
+                    context = self.crawler_governor.transaction(article_url, channel_group)
+
+                with context as task:
                     if article_filter and not article_filter(article_url, channel_group):
-                        task.skip(state_msg='Skipped by filter')
+                        if task: task.skip(state_msg='Skipped by filter')
                         self.log(f"Skipping article (filtered): {article_url}")
                         continue
 
-                    if not self.crawler_governor.should_crawl(article_url):
-                        task.ignore(state_msg='Already fetched - Ignore.')
+                    if self.crawler_governor and not self.crawler_governor.should_crawl(article_url):
+                        if task: task.ignore(state_msg='Already fetched - Ignore.')
                         continue
 
                     self.log(f"Processing: {article_url}")
@@ -232,7 +242,7 @@ class CrawlPipeline:
                     try:
                         content = self.e_fetcher.get_content(article_url, **fetcher_kwargs)
                         if not content:
-                            task.skip(state_msg='Empty content')
+                            if task: task.skip(state_msg='Empty content')
                             self.log(f"Skipped (no content): {article_url}")
                             continue
 
@@ -243,21 +253,21 @@ class CrawlPipeline:
                         if content_handler:
                             content_handler(article_url, result)  # Pass full result to handler
 
-                        task.save_file(result.markdown_content, result.metadata.get('title', 'NoTitle'))
-                        task.success()
+                        if task: task.save_file(result.markdown_content, result.metadata.get('title', 'NoTitle'))
+                        if task: task.success()
                     except ProcessProblem as e:
                         # TODO: DO NOT use revert dependency.
                         if exception_handler:
                             exception_handler(article_url, e)        # Pass URL and exception
                         if e.problem in ['commit_error']:
-                            task.cached()
+                            if task: task.cached()
                         else:
-                            task.fail_temp(state_msg=f"Error: {str(e)}")
+                            if task: task.fail_temp(state_msg=f"Error: {str(e)}")
                     except Exception as e:
                         self.log(f"[Error] Failed to extract {article_url}: {e}")
                         if exception_handler:
                             exception_handler(article_url, e)        # Pass URL and exception
-                        task.fail_perm(state_msg=f"Fail by exception: {str(e)}")
+                        if task: task.fail_perm(state_msg=f"Fail by exception: {str(e)}")
 
             # TODO: Remove next_run_delay
             self.crawler_governor.finish_round(channel_group)
@@ -375,7 +385,53 @@ def build_pipeline(
     return pipeline
 
 
-def drive_pipeline(pipeline: CrawlPipeline, config: dict):
+def drive_pipeline_batch(pipeline: CrawlPipeline, config: dict):
+    entry_points = config.get('entry_points', [])
+    start_date, end_date = config.get('period_filter', (None, None))
+    d_fetcher_kwargs = config.get('d_fetcher_kwargs', {})
+
+    with pipeline.crawler_governor.schedule_pace(pipeline.name, 15 * 60, None):
+        # ============== 1. Discover Channels ==============
+
+        pipeline.discover_channels(
+            entry_point=entry_points,
+            start_date=start_date,
+            end_date=end_date,
+            fetcher_kwargs=d_fetcher_kwargs)
+
+        # ============== 2. Discover Articles ==============
+
+        # Only support channel_list_filter
+        channel_filter = config.get('channel_filter', {})
+        if channel_filter and 'channel_list_filter' in channel_filter:
+            channel_list_filter_params = channel_filter['channel_list_filter']
+            channel_filter = partial(common_channel_filter, channel_filter_list=channel_list_filter_params)
+        else:
+            channel_filter = None
+
+        pipeline.discover_articles(
+            channel_filter=channel_filter,
+            fetcher_kwargs=d_fetcher_kwargs)
+
+        # =============== 3. Extract Articles ===============
+
+        article_filter = config.get('article_filter', None)
+        content_handler = config.get('content_handler', None)
+        exception_handler = config.get('exception_handler', None)
+
+        e_fetcher_kwargs = config.get('e_fetcher_kwargs', { })
+        extractor_kwargs = config.get('extractor_kwargs', { })
+
+        pipeline.extract_articles(
+            article_filter=article_filter,
+            content_handler=content_handler,
+            exception_handler=exception_handler,
+            fetcher_kwargs=e_fetcher_kwargs,
+            extractor_kwargs=extractor_kwargs
+        )
+
+
+def drive_pipeline_steam(pipeline: CrawlPipeline, config: dict):
     entry_points = config.get('entry_points', [])
     start_date, end_date = config.get('period_filter', (None, None))
     d_fetcher_kwargs = config.get('d_fetcher_kwargs', {})

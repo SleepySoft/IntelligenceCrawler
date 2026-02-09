@@ -15,9 +15,11 @@ from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional
 
 try:
+    from MultiLineComboBox import MultiLinePopupComboBox
     from CrawlerCodeGenerator import CrawlerCodeGenerator
 except Exception as e:
     print(str(e))
+    from .MultiLineComboBox import MultiLinePopupComboBox
     from .CrawlerCodeGenerator import CrawlerCodeGenerator
 
 
@@ -360,44 +362,6 @@ class FetcherConfigWidget(QWidget):
             self.wait_until_combo.setCurrentText(runtime_kwargs.get('wait_until', 'networkidle'))
             self.wait_selector_input.setText(runtime_kwargs.get('wait_for_selector') or "")
             self.scroll_pages_spin.setValue(runtime_kwargs.get('scroll_pages', 0))
-
-
-class AdjustableWidthComboBox(QComboBox):
-    """
-    修正版：确保下拉列表宽度不小于 QComboBox 自身宽度，并限制最大宽度。
-    """
-
-    def __init__(self, parent=None, max_dropdown_width=800):
-        super().__init__(parent)
-        self.max_dropdown_width = max_dropdown_width
-
-        list_view = QListView()
-        self.setView(list_view)
-
-        # 启用水平滚动条
-        list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        # 关键设置：限制下拉列表的最大宽度
-        # 这样即使内容超长，列表也不会溢出屏幕
-        list_view.setMaximumWidth(self.max_dropdown_width)
-
-    def showPopup(self):
-        """
-        覆盖 showPopup 方法，在下拉列表弹出前动态设置其最小宽度。
-        """
-        # 1. 获取 QComboBox 自身的当前宽度
-        combobox_width = self.width()
-
-        # 2. 获取下拉列表的视图
-        list_view = self.view()
-
-        # 3. 【关键修正】设置最小宽度：
-        #    确保下拉列表至少和 QComboBox 自身一样宽。
-        #    如果 QComboBox 很长，列表就会跟着长。
-        list_view.setMinimumWidth(combobox_width)
-
-        # 4. 调用基类的 showPopup 方法
-        super().showPopup()
 
 
 class SignatureInspectorDialog(QDialog):
@@ -928,10 +892,14 @@ class CrawlerPlaygroundApp(QMainWindow):
         top_bar_row1_layout = QHBoxLayout()
         top_bar_row1_layout.setSpacing(10)
 
-        self.url_input = AdjustableWidthComboBox(max_dropdown_width=1200)
+        self.url_input = MultiLinePopupComboBox(max_dropdown_width=1200)
         self.url_input.setEditable(True)
         self.url_input.setMaximumWidth(1200)
-        self.url_input.setPlaceholderText("Enter website homepage URL (e.g., https://www.example.com)")
+        self.url_input.setPlaceholderText(
+            "Enter one or more URLs (e.g., a home page, RSS feed, or article list page).\n"
+            "Separate multiple URLs with spaces or commas.\n"
+            "Recommended: provide a JSON array or JSON object."
+        )
         self.url_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.url_input.lineEdit().returnPressed.connect(self.start_channel_discovery)
         self.url_input.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1265,7 +1233,7 @@ class CrawlerPlaygroundApp(QMainWindow):
     def connect_signals(self):
         """Centralize all signal/slot connections."""
         # Top Bar
-        self.url_input.lineEdit().returnPressed.connect(self.start_channel_discovery)
+        # self.url_input.lineEdit().returnPressed.connect(self.start_channel_discovery)
         self.url_input.lineEdit().textChanged.connect(self.on_url_input_changed)
         self.analyze_button.clicked.connect(self.start_channel_discovery)
         self.discoverer_combo.currentTextChanged.connect(self._update_discoverer_options_ui)
