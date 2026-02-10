@@ -495,7 +495,8 @@ class CrawlSession:
                         "Exceptions raised after the context exits cannot update the session status."
                     )
                 )
-            logger.exception(f"Session crashed for {self.url}: {exc_val}")
+            logger.exception(f"Session crashed for {self.url}: {exc_val}"
+                             f"You should catch inside the 'with' block and convert to a CrawlSession outcome.")
 
             return False
 

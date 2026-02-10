@@ -37,7 +37,7 @@ if __name__ == "__main__":
     import traceback
     try:
         from IntelligenceCrawler.CrawlPipeline import run_pipeline
-        run_pipeline(CRAWLER_CONFIG)
+        run_pipeline('default', CRAWLER_CONFIG)
     except Exception as e:
         print(str(e))
         print(traceback.format_exc())

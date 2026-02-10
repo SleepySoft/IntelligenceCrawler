@@ -65,7 +65,7 @@ class IDiscoverer(ABC):
 
     @abstractmethod
     def discover_channels(self,
-                          entry_point: Any,  # <-- [MODIFIED] 更改为 Any
+                          entry_point: Any,
                           start_date: Optional[datetime.datetime] = None,
                           end_date: Optional[datetime.datetime] = None,
                           fetcher_kwargs: Optional[Dict[str, Any]] = None
@@ -394,7 +394,6 @@ class SitemapDiscoverer(IDiscoverer):
             return []
 
         homepage_url = entry_point
-        # --- [END NEW] ---
 
         self._log(f"--- STAGE 1: Discovering Channels for {homepage_url} ---")
         if start_date or end_date:
@@ -439,7 +438,6 @@ class SitemapDiscoverer(IDiscoverer):
 
             parse_result = self._parse_sitemap_xml(xml_content, sitemap_url)
 
-            # --- UPDATED: This is the core filtering logic ---
             if parse_result['sub_sitemaps']:
                 self._log(f"  > Found {len(parse_result['sub_sitemaps'])} sub-indexes. Filtering by date...", 2)
 
@@ -458,7 +456,6 @@ class SitemapDiscoverer(IDiscoverer):
                     f"  > Queuing {len(valid_sitemaps_to_queue)} out of {len(parse_result['sub_sitemaps'])} sub-indexes.",
                     2)
                 self.to_process_queue.extend(valid_sitemaps_to_queue)
-            # --- END UPDATED BLOCK ---
 
             if parse_result['pages']:
                 self._log(f"  > Found {len(parse_result['pages'])} pages. Marking as 'Channel'.", 2)
