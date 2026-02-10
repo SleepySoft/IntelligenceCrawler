@@ -8,6 +8,7 @@ import hashlib
 import datetime
 import threading
 import collections
+from dataclasses import dataclass
 from pathlib import Path
 from enum import IntEnum, Enum
 from typing import Optional, Union, List, Dict
@@ -322,11 +323,70 @@ class StorageHandler:
 
 class CrawlSession:
     """
-    Manages the lifecycle of a single URL crawl.
-    1. Start: Updates DB to RUNNING, creates a Log entry (gets ID).
-    2. Execution: Allows saving files and marking intermediate states.
-    3. End: Updates Log entry (by ID) and Status table (by URL).
+    Manages the lifecycle of a single URL crawl and persists the final outcome.
+
+    Contract / Usage Rules
+    ----------------------
+    This context manager only treats *control-flow outcomes* as valid ways to end a crawl.
+    Control-flow outcomes MUST be produced explicitly by the caller from inside the `with`
+    block, either by calling one of the terminal methods:
+
+        - success(), skip(), fail_temp(), fail_perm(), cached(), ignore()
+
+    or by raising the corresponding control-flow exception type (if provided by this class).
+
+    IMPORTANT:
+    - Any non-control-flow exception raised inside the `with` block is considered a
+      programming error or an unclassified runtime failure.
+    - Callers are required to catch such exceptions *inside the `with` block* and convert
+      them into a standard control-flow outcome (e.g., map a TimeoutError to fail_temp()).
+      Do NOT rely on raising exceptions outside the `with` block to set the session status:
+      once the context exits, the session is finalized and cannot be updated.
+
+    Default behavior for unhandled exceptions
+    ----------------------------------------
+    If a non-control-flow exception escapes the `with` block, the session will be finalized
+    as PERM_FAIL (http_code=500) with a diagnostic message instructing the caller to handle
+    and map the exception inside the `with` block. The original exception will still be
+    re-raised (i.e., it is not suppressed) to preserve the stack trace for debugging.
+
+    Notes
+    -----
+    - Nested CrawlSession usage in the same thread is not allowed.
+    - KeyboardInterrupt/SystemExit are not treated as crawl failures and are allowed to
+      propagate.
     """
+    class Flow(Exception):
+        """Base class for control-flow outcomes."""
+        pass
+
+    @dataclass
+    class Success(Flow):
+        reason: str = "OK"
+
+    @dataclass
+    class Skip(Flow):
+        reason: str = "Skipped"
+
+    @dataclass
+    class Cached(Flow):
+        reason: str = "Cached"
+
+    @dataclass
+    class Ignore(Flow):
+        reason: str = "Ignored"
+
+    @dataclass
+    class FailTemp(Flow):
+        reason: str = "Retryable Error"
+        http_code: int = 0
+        next_run_in: int = 0  # 可选：多少秒后再跑（0 表示不改）
+
+    @dataclass
+    class FailPerm(Flow):
+        reason: str = "Permanent Error"
+        http_code: int = 0
+
 
     def __init__(self, manager, url: str, spider: str, group_path: Union[str, List[str], None]):
         self.manager = manager
@@ -374,14 +434,72 @@ class CrawlSession:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
-            if not self._finished:
-                if exc_type:
-                    self.fail_perm(http_code=500, state_msg=f"Exception: {str(exc_val)}")
-                    logger.error(f"Session crashed for {self.url}: {exc_val}")
-                else:
+            # A) 正常退出（没有异常）
+            if exc_type is None:
+                if not self._finished:
+                    # 你原本的策略：如果用户没显式 success/skip/... 则当成 temp fail
                     self.fail_temp(state_msg="Exited without explicit status")
+                return False  # 没异常，返回值无所谓；False 更直观（不吞任何东西）
+
+            # B) 不要把中断/退出当业务失败（可选但强烈建议）
+            if exc_type in (KeyboardInterrupt, SystemExit):
+                # 如果你希望 Ctrl+C 也记录成某种状态，可以在这里自定义
+                return False
+
+            # C) 如果是你的控制流异常：映射到 finalize，并吞掉异常
+            if issubclass(exc_type, CrawlSession.Flow):
+                e = exc_val  # type: ignore
+
+                # 已经完成了就不要重复 finalize，但依然吞掉该控制流异常
+                if self._finished:
+                    return True
+
+                if isinstance(e, CrawlSession.Success):
+                    self.success(state_msg=e.reason)
+
+                elif isinstance(e, CrawlSession.Skip):
+                    self.skip(state_msg=e.reason)
+
+                elif isinstance(e, CrawlSession.Cached):
+                    self.cached(state_msg=e.reason)
+
+                elif isinstance(e, CrawlSession.Ignore):
+                    self.ignore(state_msg=e.reason)
+
+                elif isinstance(e, CrawlSession.FailTemp):
+                    if getattr(e, "next_run_in", 0):
+                        self.set_next_run(e.next_run_in)
+                    self.fail_temp(http_code=e.http_code, state_msg=e.reason)
+
+                elif isinstance(e, CrawlSession.FailPerm):
+                    self.fail_perm(http_code=e.http_code, state_msg=e.reason)
+
+                else:
+                    # 理论上不会走到这；兜底
+                    self.fail_perm(http_code=500, state_msg=f"Unknown Flow: {e}")
+
+                return True  # 吞掉控制流异常
+
+            # D) 真实异常（bug / 未预期异常）
+            #    规则：如果没 finished，则记录为 perm_fail；如果已 finished，不覆盖状态。
+            if not self._finished:
+                exc_name = getattr(exc_type, "__name__", str(exc_type))
+                self.fail_perm(
+                    http_code=500,
+                    state_msg=(
+                        f"UNHANDLED EXCEPTION ({exc_name}): {exc_val}. "
+                        "This CrawlSession only accepts explicit control-flow outcomes. "
+                        "Catch this exception INSIDE the 'with CrawlSession(...)' block and "
+                        "convert it to a standard outcome (success/skip/fail_temp/fail_perm), "
+                        "e.g. 'except TimeoutError: raise CrawlSession.FailTemp(...)'. "
+                        "Exceptions raised after the context exits cannot update the session status."
+                    )
+                )
+            logger.exception(f"Session crashed for {self.url}: {exc_val}")
+
+            return False
+
         finally:
-            # 关键：确保 TLS 释放，避免线程复用导致污染
             self.manager._clear_tls_session(self)
 
     def save_file(self, content: Union[bytes, str], filename: str, sub_folder: str = ""):
