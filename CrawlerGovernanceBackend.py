@@ -71,6 +71,8 @@ class CrawlerGovernanceBackend:
         # Data APIs (GET)
         self.app.add_url_rule(build_url('/api/dashboard/stats'), 'get_dashboard_stats',
                               maybe_wrap(self.get_dashboard_stats), methods=['GET'])
+        self.app.add_url_rule(build_url('/api/flow/snapshot'), 'get_flow_snapshot',
+                              maybe_wrap(self.get_flow_snapshot), methods=['GET'])
         self.app.add_url_rule(build_url('/api/groups'), 'get_groups', maybe_wrap(self.get_groups), methods=['GET'])
         self.app.add_url_rule(build_url('/api/logs'), 'get_logs', maybe_wrap(self.get_logs), methods=['GET'])
         self.app.add_url_rule(build_url('/api/status/recent'), 'get_recent_statuses',
@@ -135,6 +137,10 @@ class CrawlerGovernanceBackend:
         # 2. Pending Count (Persistent State via Governor Interface)
         pending_count = self.governor.get_pending_count()
 
+        # sched = session_stats.get("scheduler") or {}
+        # sched_stats = sched.get("stats") or {}
+        # sched_cfg = sched.get("config") or {}
+
         return jsonify({
             "active_spiders": 0,  # Placeholder, or use len(governor.group_stats)
             "success_rate": session_stats['success_rate'],
@@ -142,8 +148,21 @@ class CrawlerGovernanceBackend:
             "network_errors": session_stats['failed'],
             "running_count": session_stats.get('running', 0),  # Added running count
             "pending_count": pending_count,
-            "session_start": session_stats['session_start']
+            "session_start": session_stats['session_start'],
+
+            # "flow_running": sched_stats.get("running", 0),
+            # "flow_queued": sched_stats.get("queued", 0),
+            # "flow_sleeping": sched_stats.get("sleeping", 0),
+            # "flow_max_concurrency": sched_cfg.get("max_concurrency"),
+            # "flow_startup_stagger": sched_cfg.get("startup_stagger"),
         })
+
+    def get_flow_snapshot(self):
+        if not self.governor or not self.governor.scheduler:
+            return jsonify({}), 500
+        limit = int(request.args.get("limit", "50"))
+        snap = self.governor.get_scheduler_snapshot(max_items_per_state=limit)
+        return jsonify(snap)
 
     def get_groups(self):
         """

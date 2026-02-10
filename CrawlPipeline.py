@@ -388,7 +388,7 @@ def drive_pipeline_batch(pipeline: CrawlPipeline, config: dict):
         channel_tables = {}
         entry_points_list = entry_points
 
-    with pipeline.crawler_governor.schedule_pace(pipeline.name, 15 * 60, None):
+    with pipeline.crawler_governor.schedule_pace(f"{pipeline.name}_Channel", 15 * 60, None):
 
         # ============== 1. Discover Channels ==============
 
@@ -412,6 +412,8 @@ def drive_pipeline_batch(pipeline: CrawlPipeline, config: dict):
             channel_tables=channel_tables,
             channel_filter=channel_filter,
             fetcher_kwargs=d_fetcher_kwargs)
+
+    with pipeline.crawler_governor.schedule_pace(f"{pipeline.name}_Article", 0, None):
 
         # =============== 3. Extract Articles ===============
 

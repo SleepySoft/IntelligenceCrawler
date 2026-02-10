@@ -1612,6 +1612,19 @@ class GovernanceManager:
 
         return [timeline[k] for k in sorted(timeline.keys())]
 
+    def get_scheduler_snapshot(self, max_items_per_state: int = 50) -> Optional[Dict]:
+        """
+        Safe getter for scheduler status.
+        Important: Do NOT call this while holding stats_lock to avoid lock ordering risk.
+        """
+        if not self.scheduler:
+            return None
+        try:
+            return self.scheduler.get_status_snapshot(max_items_per_state)
+        except Exception as e:
+            logger.error(f"Failed to get scheduler snapshot: {e}")
+            return None
+
     def get_session_stats(self, since_time: datetime.datetime = None):
         """
         Returns global statistics.
@@ -1621,11 +1634,8 @@ class GovernanceManager:
         stats_map = self._get_aggregated_stats(since_time)
 
         # Flatten the grouped map into global totals (using TRAFFIC data)
-        total = 0
-        success = 0
-        failed = 0
-        running = 0
 
+        total = success = failed = running = 0
         for gp_data in stats_map.values():
             # Extract traffic dict, defaulting to empty if missing
             t = gp_data.get('traffic', {})
@@ -1644,13 +1654,16 @@ class GovernanceManager:
             with self.stats_lock:
                 ref_time = self.session_start_time
 
+        # sched = self.get_scheduler_snapshot()
+
         return {
             'total': total,
             'success': success,
             'failed': failed,
             'running': running,
             'success_rate': rate,
-            'session_start': ref_time
+            'session_start': ref_time,
+            # 'scheduler': sched
         }
 
     # --- 7. Data Access Interfaces for Backend (New) ---

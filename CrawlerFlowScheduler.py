@@ -27,6 +27,10 @@ class SchedulerEntry:
     enter_queue_time: float = 0.0
     start_run_time: float = 0.0
 
+    wait_reason: str = ""          # "FIFO" | "CAPACITY" | "STAGGER" | ""
+    wait_until: float = 0.0        # meaningful mainly for STAGGER
+    last_state_ts: float = 0.0     # state change timestamp
+
 
 # --- 2. 调度器核心类 ---
 
@@ -101,7 +105,8 @@ class FlowScheduler:
             if sleep_time > 0:
                 with self._lock:
                     entry.state = TaskState.SLEEPING
-                    entry.enter_sleep_time = time.time()
+                    entry.last_state_ts = time.time()
+                    entry.enter_sleep_time = entry.last_state_ts
                     entry.wake_up_time = entry.enter_sleep_time + sleep_time
                     self.sleeping_pool[entry.key] = entry
 
@@ -119,7 +124,10 @@ class FlowScheduler:
         # === Phase 2: Enqueue (Join FIFO) ===
         with self._condition:
             entry.state = TaskState.QUEUED
-            entry.enter_queue_time = time.time()
+            entry.last_state_ts = time.time()
+            entry.enter_queue_time = entry.last_state_ts
+            entry.wait_reason = ""
+            entry.wait_until = 0.0
             self.ready_queue.append(entry)
             # logger.debug(f"[{entry.key}] Enqueued. Position: {len(self.ready_queue)}")
             self._condition.notify_all()  # 通知可能在等待队列非空的监控线程
@@ -131,16 +139,21 @@ class FlowScheduler:
                     # 退出前把自己从队列清理掉
                     if entry in self.ready_queue:
                         self.ready_queue.remove(entry)
+                        self._condition.notify_all()  # Avoid others stuck behind head removal
                     raise InterruptedError(f"Task {entry.key} stopped during queue.")
 
                 # 1. FIFO Check: 必须是队首
                 if not self.ready_queue or self.ready_queue[0] is not entry:
+                    entry.wait_reason = "FIFO"
+                    entry.wait_until = 0.0
                     self._condition.wait()
                     continue
 
                 # 2. Capacity Check: 必须有空位
                 if len(self.running_pool) >= self.max_concurrency:
                     self._condition.wait()
+                    entry.wait_reason = "CAPACITY"
+                    entry.wait_until = 0.0
                     continue
 
                 # 3. Stagger Check: 错峰检查
@@ -149,6 +162,8 @@ class FlowScheduler:
                 if time_since_last < self.startup_stagger:
                     wait_time = self.startup_stagger - time_since_last
                     # logger.debug(f"[{entry.key}] Staggering for {wait_time:.2f}s...")
+                    entry.wait_reason = "STAGGER"
+                    entry.wait_until = now + wait_time
                     self._condition.wait(timeout=wait_time)
                     continue  # 醒来后重新检查所有条件
 
@@ -159,7 +174,10 @@ class FlowScheduler:
 
                 # 加入运行池
                 entry.state = TaskState.RUNNING
-                entry.start_run_time = time.time()
+                entry.last_state_ts = time.time()
+                entry.wait_reason = ""
+                entry.wait_until = 0.0
+                entry.start_run_time = entry.last_state_ts
                 self.running_pool[entry.key] = entry
 
                 # 更新全局时间
@@ -199,34 +217,67 @@ class FlowScheduler:
 
     # --- 监控接口 ---
 
-    def get_status_snapshot(self) -> Dict:
-        """
-        获取全量状态快照，用于前端大盘展示。
-        """
+    def get_status_snapshot(self, max_items_per_state: int = 50) -> Dict:
+        now = time.time()
         with self._lock:
+            running_list = list(self.running_pool.values())
+            queued_list = list(self.ready_queue)
+            sleeping_list = list(self.sleeping_pool.values())
+
+            def limit(lst):
+                if max_items_per_state and len(lst) > max_items_per_state:
+                    return lst[:max_items_per_state]
+                return lst
+
+            running_out = []
+            for e in limit(running_list):
+                running_out.append({
+                    "key": e.key,
+                    "duration": round(now - e.start_run_time, 3) if e.start_run_time else 0.0,
+                    "started_at": e.start_run_time,
+                    "state_age": round(now - e.last_state_ts, 3) if e.last_state_ts else 0.0
+                })
+
+            queued_out = []
+            # position: 1-based
+            for idx, e in enumerate(limit(queued_list), start=1):
+                wait_remaining = 0.0
+                if e.wait_reason == "STAGGER" and e.wait_until:
+                    wait_remaining = max(0.0, e.wait_until - now)
+
+                queued_out.append({
+                    "key": e.key,
+                    "position": idx,
+                    "wait": round(now - e.enter_queue_time, 3) if e.enter_queue_time else 0.0,
+                    "wait_reason": e.wait_reason or ("HEAD_READY" if idx == 1 else "FIFO"),
+                    "wait_remaining": round(wait_remaining, 3) if wait_remaining else 0.0,
+                    "wait_until": e.wait_until if e.wait_until else None,
+                })
+
+            sleeping_out = []
+            for e in limit(sleeping_list):
+                sleeping_out.append({
+                    "key": e.key,
+                    "remaining": round(max(0.0, e.wake_up_time - now), 3) if e.wake_up_time else 0.0,
+                    "wake_up_at": e.wake_up_time if e.wake_up_time else None,
+                    "state_age": round(now - e.last_state_ts, 3) if e.last_state_ts else 0.0
+                })
+
             return {
+                "ts": now,
                 "config": {
                     "max_concurrency": self.max_concurrency,
                     "startup_stagger": self.startup_stagger
                 },
                 "stats": {
-                    "running": len(self.running_pool),
-                    "queued": len(self.ready_queue),
-                    "sleeping": len(self.sleeping_pool)
+                    "running": len(running_list),
+                    "queued": len(queued_list),
+                    "sleeping": len(sleeping_list)
                 },
                 "details": {
-                    "running": [
-                        {"key": e.key, "duration": round(time.time() - e.start_run_time, 1)}
-                        for e in self.running_pool.values()
-                    ],
-                    "queued": [
-                        {"key": e.key, "wait": round(time.time() - e.enter_queue_time, 1)}
-                        for e in self.ready_queue
-                    ],
-                    "sleeping": [
-                        {"key": e.key, "remaining": round(e.wake_up_time - time.time(), 1)}
-                        for e in self.sleeping_pool.values()
-                    ]
+                    "running": running_out,
+                    "queued": queued_out,
+                    "sleeping": sleeping_out
                 }
             }
 
