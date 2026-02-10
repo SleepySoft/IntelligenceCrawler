@@ -7,9 +7,14 @@ A GUI application for discovering, fetching, and extracting web content
 using various strategies and libraries.
 """
 import os
+import re
+import ast
 import sys
+import json
 import datetime
 import traceback
+import posixpath
+import tldextract
 from collections import deque
 from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional
@@ -124,6 +129,258 @@ except ImportError:
 
 SETTING_ORG = 'SleepySoft'
 SETTING_APP = 'CrawlerPlayground'
+
+
+def _is_probably_json(text: str) -> bool:
+    t = text.strip()
+    return (t.startswith("[") and t.endswith("]")) or (t.startswith("{") and t.endswith("}"))
+
+def _normalize_url(url: str, auto_scheme=True) -> str:
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if auto_scheme and "://" not in u:
+        u = "https://" + u
+    return u
+
+def _is_valid_url(url: str) -> bool:
+    try:
+        p = urlparse(url)
+        return bool(p.scheme) and bool(p.netloc)
+    except Exception:
+        return False
+
+def _smart_channel_names_for_list(url_list, group_by="domain"):
+    """
+    给 URL list 生成 channel names（不带域名，去公共路径前缀）
+    返回：names(list[str]) 与 url_list 对齐
+    """
+    items = []
+    for idx, url in enumerate(url_list):
+        p = urlparse(url)
+        ext = tldextract.extract(url)
+
+        if group_by == "registered_domain":
+            group_key = ".".join([x for x in [ext.domain, ext.suffix] if x])  # e.g. nhk.or.jp
+            domain_label = ext.domain  # e.g. nhk
+        else:
+            group_key = ext.domain      # e.g. nhk
+            domain_label = ext.domain
+
+        path = p.path or "/"
+        if not path.startswith("/"):
+            path = "/" + path
+
+        items.append({
+            "idx": idx,
+            "url": url,
+            "group": group_key,
+            "domain_label": domain_label,
+            "path": path,
+        })
+
+    groups = {}
+    for it in items:
+        groups.setdefault(it["group"], []).append(it)
+
+    names = [None] * len(url_list)
+
+    for group_key, group_items in groups.items():
+        paths = [it["path"] for it in group_items]
+
+        if len(paths) > 1:
+            common = posixpath.commonpath(paths)  # 按路径段计算，避免 commonprefix 的误切
+            if common != "/" and not common.endswith("/"):
+                common += "/"
+        else:
+            # 单个 URL：只去掉目录前缀，保留最后一级做区分
+            only = paths[0]
+            common = posixpath.dirname(only)
+            if not common.endswith("/"):
+                common += "/"
+            if common == "//":
+                common = "/"
+
+        for it in group_items:
+            path = it["path"]
+            if common != "/" and path.startswith(common):
+                short = path[len(common):]
+            elif common == "/":
+                short = path.lstrip("/")
+            else:
+                short = path.lstrip("/")
+
+            short = short.strip("/")
+
+            # short 为空时给兜底
+            if not short:
+                short = posixpath.basename(path.strip("/")) or "root"
+
+            names[it["idx"]] = short
+
+    return names
+
+def _resolve_name_conflicts(name_to_url_items, strategy="suffix"):
+    """
+    name_to_url_items: list of (name, url, domain_label)
+    strategy:
+      - "suffix": 重名就 name_2, name_3...
+      - "domain_prefix": 重名就 domain/name
+      - "domain_then_suffix": 先 domain/name，仍冲突再加后缀
+    """
+    result = {}
+    used = set()
+    counters = {}
+
+    for name, url, domain_label in name_to_url_items:
+        candidate = name
+
+        if candidate not in used:
+            result[candidate] = url
+            used.add(candidate)
+            continue
+
+        if strategy == "domain_prefix":
+            candidate = f"{domain_label}/{name}"
+            # 仍然冲突就再 suffix
+            if candidate in used:
+                counters.setdefault(candidate, 1)
+                counters[candidate] += 1
+                candidate = f"{candidate}_{counters[candidate]}"
+        elif strategy == "domain_then_suffix":
+            candidate = f"{domain_label}/{name}"
+            if candidate in used:
+                counters.setdefault(candidate, 1)
+                counters[candidate] += 1
+                candidate = f"{candidate}_{counters[candidate]}"
+        else:
+            # suffix
+            counters.setdefault(name, 1)
+            counters[name] += 1
+            candidate = f"{name}_{counters[name]}"
+
+        result[candidate] = url
+        used.add(candidate)
+
+    return result
+
+
+def _try_parse_json_or_py_literal(text: str):
+    """
+    尝试把 text 解析成 Python 的 list/dict（优先 JSON，其次 Python 字面量）。
+    成功返回对象；失败返回 None。
+    """
+    t = text.strip()
+
+    # 0) 有些人会把整个内容再包一层引号： "['a','b']"
+    # 这里做一轮“剥壳”，只剥一层，避免误伤内容
+    if (len(t) >= 2) and ((t[0] == t[-1]) and t[0] in ("'", '"')):
+        t = t[1:-1].strip()
+
+    # 1) JSON 优先（更规范）
+    if _is_probably_json(t):
+        try:
+            return json.loads(t)
+        except json.JSONDecodeError:
+            # JSON 失败继续尝试 Python 字面量
+            pass
+
+    # 2) Python 字面量（兼容单引号、True/False/None 等）
+    # 仅在“看起来像容器”时尝试，避免把普通字符串误解析
+    if t.startswith(("[", "{", "(")) and t.endswith(("]", "}", ")")):
+        try:
+            obj = ast.literal_eval(t)  # 安全：只解析字面量，不执行代码
+            # tuple 也支持：把 tuple 当作 list 用
+            if isinstance(obj, tuple):
+                obj = list(obj)
+            return obj
+        except (ValueError, SyntaxError):
+            pass
+
+    return None
+
+
+def parse_input_to_channel_dict(
+    raw_text: str,
+    *,
+    auto_scheme=True,
+    group_by="domain",                 # "domain" or "registered_domain"
+    conflict_strategy="domain_then_suffix"  # 推荐：跨域/同域重名都稳
+):
+    """
+    无论输入是什么格式，最终返回 dict[channel_name] = url
+    支持：
+      - 单个 URL
+      - 空格/逗号分隔多个 URL
+      - JSON array: ["url1", "url2"]
+      - JSON object: {"name1":"url1", "name2":"url2"}
+    """
+    text = (raw_text or "").strip()
+    if not text:
+        raise ValueError("Empty input.")
+
+    parsed = _try_parse_json_or_py_literal(text)
+
+    if parsed is None:
+        # 非 JSON / 非 Python literal：按逗号/空白拆分
+        parts = re.split(r"[\s,，]+", text.strip('\"\''))
+        parsed = [p for p in parts if p.strip()]
+
+    # ---- 2) dict 输入：直接校验并返回 ----
+    if isinstance(parsed, dict):
+        out = {}
+        for k, v in parsed.items():
+            if not isinstance(k, str) or not k.strip():
+                raise ValueError("JSON object keys must be non-empty strings (channel names).")
+            if not isinstance(v, str):
+                raise ValueError("JSON object values must be strings (URLs).")
+
+            url = _normalize_url(v, auto_scheme=auto_scheme)
+            if not _is_valid_url(url):
+                raise ValueError(f"Invalid URL for channel '{k}': {v}")
+
+            name = k.strip()
+            if name in out:
+                # 用户输入 dict 有重复 key 不太可能，但还是防一下
+                raise ValueError(f"Duplicate channel name in JSON object: {name}")
+            out[name] = url
+
+        if not out:
+            raise ValueError("No channels found in JSON object.")
+        return out
+
+    # ---- 3) list 输入：生成 channel names -> dict ----
+    if isinstance(parsed, list):
+        urls = []
+        for item in parsed:
+            if not isinstance(item, str):
+                raise ValueError("URL list must contain only strings.")
+            url = _normalize_url(item, auto_scheme=auto_scheme)
+            if url:
+                urls.append(url)
+
+        if not urls:
+            raise ValueError("No URLs found after parsing.")
+
+        invalid = [u for u in urls if not _is_valid_url(u)]
+        if invalid:
+            raise ValueError("Invalid URL(s): " + ", ".join(invalid))
+
+        # 生成 names（去域名 + 去公共前缀）
+        names = _smart_channel_names_for_list(urls, group_by=group_by)
+
+        # 提取 domain_label 供冲突消歧使用
+        items = []
+        for name, url in zip(names, urls):
+            ext = tldextract.extract(url)
+            domain_label = ext.domain or "site"
+            items.append((name, url, domain_label))
+
+        # 冲突处理，得到最终 dict
+        out = _resolve_name_conflicts(items, strategy=conflict_strategy)
+        return out
+
+    raise ValueError("Unsupported input type. Use JSON array/object or URL(s).")
 
 
 # =============================================================================
@@ -524,7 +781,7 @@ class ChannelDiscoveryWorker(QRunnable):
             runtime_kwargs = self.config.get('fetcher_kwargs', {})
 
             channel_list = discoverer.discover_channels(
-                self.entry_point,
+                list(self.entry_point),     # 20260210 - It may be a dict.
                 start_date=self.start_date,
                 end_date=self.end_date,
                 fetcher_kwargs=runtime_kwargs
@@ -1234,7 +1491,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         """Centralize all signal/slot connections."""
         # Top Bar
         # self.url_input.lineEdit().returnPressed.connect(self.start_channel_discovery)
-        self.url_input.lineEdit().textChanged.connect(self.on_url_input_changed)
+        # self.url_input.lineEdit().textChanged.connect(self.on_url_input_changed)
         self.analyze_button.clicked.connect(self.start_channel_discovery)
         self.discoverer_combo.currentTextChanged.connect(self._update_discoverer_options_ui)
         self.inspect_signature_button.clicked.connect(self.start_signature_inspection)
@@ -1329,7 +1586,6 @@ class CrawlerPlaygroundApp(QMainWindow):
     def start_channel_discovery(self):
         """Slot for 'Discover Channels' button. (Refactored: Uniform List Input)"""
 
-        # 1. 获取 UI 输入
         raw_text = self.url_input.currentText().strip()
         self.discoverer_name = self.discoverer_combo.currentText()
 
@@ -1337,10 +1593,24 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.status_bar.showMessage("Error: Please enter a URL or list of URLs.")
             return
 
-        # 2. 解析输入
-        entry_point_urls = raw_text.split()
+        try:
+            channel_dict = parse_input_to_channel_dict(
+                raw_text,
+                auto_scheme=True,
+                group_by="domain",  # 或 "registered_domain"
+                conflict_strategy="domain_then_suffix"
+            )
+        except ValueError as e:
+            self.status_bar.showMessage(f"Error: {e}")
+            self.append_log_history(f"[Error] URL input parse failed: {e}")
+            return
 
-        self.append_log_history(f"[Info] Dispatching {len(entry_point_urls)} URL(s) to {self.discoverer_name}...")
+        self.append_log_history(
+            f"[Info] Dispatching {len(channel_dict)} channel(s) to {self.discoverer_name}..."
+        )
+        # 可选：把 dict 打印出来
+        for ch, url in channel_dict.items():
+            self.append_log_history(f"  - {ch} -> {url}")
 
         # 3. 清理 UI 和保存历史
         self.clear_all_controls()
@@ -1351,7 +1621,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         # 这样 _build_config_dict() 才能读到最新的值，
         # 从而保证 Worker 和 代码生成器 都能拿到这次提交的 URL。
         # =========================================================
-        self.last_used_entry_point = entry_point_urls
+        self.last_used_entry_point = channel_dict
 
         # 4. 现在可以安全地生成配置了
         full_config = self._build_config_dict()
@@ -1524,7 +1794,8 @@ class CrawlerPlaygroundApp(QMainWindow):
 
     def on_channel_discovery_result(self, channel_list: List[str]):
         """Slot for ChannelDiscoveryWorker 'result' signal."""
-        self.last_used_entry_point = channel_list
+        # 20260210 - Do not update last_used_entry_point with channel_list because it may lose channel name information.
+        # self.last_used_entry_point = channel_list
         if not channel_list:
             self.status_bar.showMessage("No channels found.")
             return
@@ -1640,30 +1911,30 @@ class CrawlerPlaygroundApp(QMainWindow):
 
     # --- UI Event Handlers ---
 
-    def on_url_input_changed(self, text: str):
-        """
-        Slot to normalize multi-line pastes in the URL bar *only* for RSS mode.
-        (槽函数：仅在 RSS 模式下规范化 URL 栏中的多行粘贴。)
-        """
-
-        # 仅当 "RSS" 被选中时才启用此功能
-        if self.discoverer_combo.currentText() != "RSS":
-            return
-
-        # 检查是否存在换行符，这通常意味着多行粘贴
-        if '\n' in text or '\r' in text:
-            self.append_log_history("[Info] Multi-line paste detected. Normalizing to space-separated list.")
-
-            # 规范化：按任何空白（包括换行）拆分，然后用单个空格连接
-            normalized_text = " ".join(text.split())
-
-            # 阻止信号以防止无限递归
-            self.url_input.lineEdit().blockSignals(True)
-            self.url_input.lineEdit().setText(normalized_text)
-            self.url_input.lineEdit().blockSignals(False)
-
-            # 将光标移到末尾
-            self.url_input.lineEdit().end(False)
+    # def on_url_input_changed(self, text: str):
+    #     """
+    #     Slot to normalize multi-line pastes in the URL bar *only* for RSS mode.
+    #     (槽函数：仅在 RSS 模式下规范化 URL 栏中的多行粘贴。)
+    #     """
+    #
+    #     # 仅当 "RSS" 被选中时才启用此功能
+    #     if self.discoverer_combo.currentText() != "RSS":
+    #         return
+    #
+    #     # 检查是否存在换行符，这通常意味着多行粘贴
+    #     if '\n' in text or '\r' in text:
+    #         self.append_log_history("[Info] Multi-line paste detected. Normalizing to space-separated list.")
+    #
+    #         # 规范化：按任何空白（包括换行）拆分，然后用单个空格连接
+    #         normalized_text = " ".join(text.split())
+    #
+    #         # 阻止信号以防止无限递归
+    #         self.url_input.lineEdit().blockSignals(True)
+    #         self.url_input.lineEdit().setText(normalized_text)
+    #         self.url_input.lineEdit().blockSignals(False)
+    #
+    #         # 将光标移到末尾
+    #         self.url_input.lineEdit().end(False)
 
     def on_tree_item_expanded(self, item: QTreeWidgetItem):
         """

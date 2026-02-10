@@ -567,6 +567,9 @@ class MultiLinePopupComboBox(AdjustableWidthComboBox):
     def fullText(self) -> str:
         return self._full_text or self.currentText()
 
+    def currentText(self):
+        return self._full_text
+
     def setPlaceholderText(self, text: str):
         self._preview.setPlaceholderText(text)
 

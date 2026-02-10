@@ -163,16 +163,14 @@ class CrawlerCodeGenerator:
         """Generate entry points configuration."""
         entry_point = args.get('entry_point')
 
-        # [FIX 3] entry_point 现在已经是 List[str] 了，不需要再包一层列表
-        # 如果是 None 或空列表，返回 []
         if not entry_point:
-            return "[]"
+            return "{}"
 
-        if isinstance(entry_point, list):
+        if isinstance(entry_point, dict):
             return repr(entry_point)
 
-        # Fallback (尽管现在的逻辑应该总是 list)
-        return repr([entry_point])
+        # Fallback (尽管现在的逻辑应该总是 dict)
+        return repr({'default': entry_point})
 
     def _generate_period_filter_code(self, date_filter_config: dict) -> str:
         """Generate period filter configuration."""
