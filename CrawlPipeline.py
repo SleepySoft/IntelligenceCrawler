@@ -1,14 +1,16 @@
-# CrawlPipeline.py
+from __future__ import annotations
 
 import os
 import datetime
 import traceback
 import tldextract
 from functools import partial
+from dataclasses import dataclass
 from contextlib import nullcontext
 from urllib.parse import urlparse
 from collections import defaultdict
-from typing import List, Optional, Callable, Any, Tuple, Dict
+from typing import List, Optional, Callable, Any, Tuple, Dict, Iterator
+from typing import Callable, Dict, Iterator, List, Optional, Tuple, DefaultDict
 
 from IntelligenceCrawler.Persistence import save_extraction_result_as_md
 from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager, CrawlSession
@@ -16,49 +18,53 @@ from IntelligenceCrawler.Discoverer import IDiscoverer, discoverer_factory
 from IntelligenceCrawler.Extractor import IExtractor, ExtractionResult, extractor_factory
 from IntelligenceCrawler.Fetcher import Fetcher, fetcher_factory
 
-log_cb = print
-
 
 # --- Configuration ---
 # Define the root directory where all articles will be saved
 BASE_OUTPUT_DIR = "CRAWLER_OUTPUT"
 
 
-# def smart_shorten_urls(url_list):
-#     # 1. 分组数据结构: { 'nhk': {'domain': 'nhk', 'paths': [...]}, ... }
-#     groups = {}
-#
-#     for url in url_list:
-#         # 使用 tldextract 提取精准的 domain (如 'nhk')
-#         extracted = tldextract.extract(url)
-#         domain_label = extracted.domain  # 这里只取 'nhk'，丢弃 .or.jp
-#
-#         parsed_path = urlparse(url).path
-#
-#         if domain_label not in groups:
-#             groups[domain_label] = []
-#         groups[domain_label].append(parsed_path)
-#
-#     final_list = []
-#
-#     # 2. 处理公共路径
-#     for domain, paths in groups.items():
-#         # 技巧：使用 os.path.commonprefix 找出最长公共路径
-#         if len(paths) > 1:
-#             common = os.path.commonprefix(paths)
-#             # 回退到最后一个 '/'，防止切割单词 (比如 /new 和 /news 可能会被切成 /new)
-#             if '/' in common:
-#                 common = common[:common.rfind('/') + 1]
-#         else:
-#             # 如果只有一个链接，我们假设只保留所在文件夹作为上下文，或者不去除
-#             common = os.path.dirname(paths[0]) + '/'
-#
-#         for path in paths:
-#             # 替换掉公共部分
-#             short_path = path.replace(common, "", 1).lstrip('/')
-#             final_list.append(f"{domain}/{short_path}")
-#
-#     return final_list
+def format_exception_with_traceback(exception: Exception) -> str:
+    if exception.__traceback__ is None:
+        return f"{type(exception).__name__}: {exception}\n(No traceback)"
+
+    tb_lines = traceback.format_exception(
+        type(exception),
+        exception,
+        exception.__traceback__,
+        limit=None
+    )
+    return ''.join(tb_lines)
+
+
+def format_exception_compact(exception: Exception, max_frames: int = 5) -> str:
+    if exception.__traceback__ is None:
+        return f"{type(exception).__name__}: {exception}"
+
+    tb_lines = traceback.format_exception(
+        type(exception),
+        exception,
+        exception.__traceback__,
+        limit=max_frames
+    )
+    return ''.join(tb_lines)
+
+
+@dataclass(frozen=True)
+class ChannelJob:
+    """A deferred unit of work keyed by channel_url."""
+    channel_url: str
+    run: Callable[[], Tuple[List[str], Optional[Exception]]]
+    # run() returns: (items, exception)
+
+
+@dataclass(frozen=True)
+class ArticleJob:
+    """A deferred unit of work keyed by article_url (with its channel_group)."""
+    article_url: str
+    channel_group: str
+    run: Callable[[], Tuple[Optional["ExtractionResult"], Optional[Exception]]]
+    # run() returns: (result_or_none, exception)
 
 
 class CrawlPipeline:
@@ -98,6 +104,11 @@ class CrawlPipeline:
         self.articles: List[str] = []
         self.contents: List[Tuple[str, ExtractionResult]] = []
 
+    def reset(self):
+        self.channels = []
+        self.articles = []
+        self.contents = []
+
     def shutdown(self):
         """Gracefully closes both fetcher instances."""
         self.log("--- 5. Shutting down fetchers ---")
@@ -113,158 +124,264 @@ class CrawlPipeline:
         except Exception as e:
             self.log(f"[Error] Failed to close extraction fetcher: {e}")
 
-    def discover_channels(self,
-                          entry_point: str | List[str],
-                          start_date: Optional[datetime.datetime] = None,
-                          end_date: Optional[datetime.datetime] = None,
-                          fetcher_kwargs: Optional[dict] = None) -> List[str]:
+
+    def discover_channel_jobs(
+        self,
+        entry_point: str | List[str],
+        start_date: Optional[datetime.datetime] = None,
+        end_date: Optional[datetime.datetime] = None,
+        fetcher_kwargs: Optional[dict] = None
+    ) -> Iterator[ChannelJob]:
+        """Yield deferred jobs that discover channels for each entry point URL."""
+        if isinstance(entry_point, str):
+            entry_point = [entry_point]
+
+        fetcher_kwargs = fetcher_kwargs or {}
+
+        for channel_url in entry_point:
+            # Create a runner bound to the current loop variables (avoid late binding).
+
+            _url = channel_url
+            _sd, _ed = start_date, end_date
+            _kwargs_snapshot = dict(fetcher_kwargs)
+
+            def _runner(url=_url, sd=_sd, ed=_ed, kwargs=_kwargs_snapshot):
+                try:
+                    channels_found = self.discoverer.discover_channels(
+                        entry_point=url,
+                        start_date=sd,
+                        end_date=ed,
+                        fetcher_kwargs=kwargs
+                    )
+                    return channels_found, None
+                except Exception as e:
+                    return [], e
+
+            yield ChannelJob(channel_url=channel_url, run=_runner)
+
+    def discover_channels(
+        self,
+        entry_point: str | List[str],
+        start_date: Optional[datetime.datetime] = None,
+        end_date: Optional[datetime.datetime] = None,
+        fetcher_kwargs: Optional[dict] = None
+    ) -> List[str]:
         """
         Step 1: Discovers all channels from a list of entry point URLs.
         Clears all internal state.
         """
+        self.reset()
+
         if isinstance(entry_point, str):
             entry_point = [entry_point]
 
         self.log(f"--- 1. Discovering Channels from {len(entry_point)} entry point(s) ---")
 
-        channels = []
-        for url in entry_point:
-            self.log(f"Scanning entry point: {url}")
-            try:
-                channels_found = self.discoverer.discover_channels(
-                    entry_point=url,
-                    start_date=start_date,
-                    end_date=end_date,
-                    fetcher_kwargs=fetcher_kwargs
-                )
-                channels.extend(channels_found)
-                self.log(f"Found {len(channels_found)} channels from this entry point.")
-            except Exception as e:
-                self.log(f"[Error] Failed to discover from {url}: {e}\n{traceback.format_exc()}")
+        channels: List[str] = []
 
-        # De-duplicate the list while preserving order
+        for job in self.discover_channel_jobs(entry_point, start_date, end_date, fetcher_kwargs):
+            channel_url = job.channel_url
+            channels_found, exception = job.run()
+
+            if exception is None:
+                channels.extend(channels_found)
+                self.log(f"Found {len(channels_found)} channels from {channel_url}")
+            else:
+                full_traceback = format_exception_with_traceback(exception)
+                self.log(f"[Error] Failed to discover from {channel_url}: \n{full_traceback}")
+
+        # De-duplicate while preserving order
         self.channels = list(dict.fromkeys(channels))
         self.log(f"Found {len(self.channels)} unique channels in total.")
         return self.channels
 
-    def discover_articles(self,
-                          channel_tables: Optional[Dict] = None,
-                          channel_filter: Optional[Callable[[str], bool]] = None,
-                          fetcher_kwargs: Optional[dict] = None) -> List[Tuple[str, str]]:
-        """
-        Step 2: Discovers article URLs from channels and fetches their content.
-        Populates self.contents.
-        """
-        self.log(f"--- 2. Discovering & Articles from {len(self.channels)} Channels ---")
+    def discover_articles_jobs(
+        self,
+        channel_urls: List[str],
+        fetcher_kwargs: Optional[dict] = None
+    ) -> Iterator[ChannelJob]:
+        """Yield deferred jobs that discover article URLs for each channel URL."""
+        fetcher_kwargs = fetcher_kwargs or {}
 
-        seen_articles = set()
-        discovered_results = []
+        for channel_url in channel_urls:
+            _url = channel_url
+            _kwargs_snapshot = dict(fetcher_kwargs)
+            def _runner(url=_url, kwargs=_kwargs_snapshot):
+                try:
+                    self.log(f"Processing Channel: {url}")
+                    articles_in_channel = self.discoverer.get_articles_for_channel(
+                        channel_url=url, fetcher_kwargs=kwargs)
+                    # De-duplicate within the channel
+                    articles_in_channel = list(dict.fromkeys(articles_in_channel))
+                    self.log(f"Found {len(articles_in_channel)} articles in channel.")
+                    return articles_in_channel, None
+                except Exception as e:
+                    return [], e
+
+            yield ChannelJob(channel_url=channel_url, run=_runner)
+
+    def discover_articles(
+        self,
+        channel_tables: Optional[Dict] = None,
+        channel_filter: Optional[Callable[[str], bool]] = None,
+        fetcher_kwargs: Optional[dict] = None
+    ) -> List[Tuple[str, str]]:
+        """
+        Step 2: Discovers article URLs from channels.
+        Populates self.articles as [(article_url, channel_group), ...].
+        """
+        self.log(f"--- 2. Discovering Articles from {len(self.channels)} Channels ---")
+
+        seen_articles: set[str] = set()
+        discovered_results: List[Tuple[str, str]] = []
         channel_tables = channel_tables or {}
 
+        filtered_channels: List[str] = []
         for channel_url in self.channels:
             if channel_filter and not channel_filter(channel_url):
                 self.log(f"Skipping channel (filtered): {channel_url}")
                 continue
+            filtered_channels.append(channel_url)
 
-            channel_group = channel_tables.get(channel_url, 'default')
+        for job in self.discover_articles_jobs(filtered_channels, fetcher_kwargs):
+            channel_url = job.channel_url
+            channel_group = channel_tables.get(channel_url, "default")
 
             context = nullcontext()
             if self.crawler_governor:
                 self.crawler_governor.register_group_metadata(channel_group, channel_url)
                 context = self.crawler_governor.transaction(channel_url, channel_group)
 
-            self.log(f"Processing Channel: {channel_url}")
-            try:
-                with context as task:
-                    articles_in_channel = self.discoverer.get_articles_for_channel(channel_url, fetcher_kwargs)
-
-                if self.crawler_governor:
-                    self.crawler_governor.start_round(channel_group, len(articles_in_channel))
-
-                count_new = 0
-                for article in articles_in_channel:
-                    if article not in seen_articles:
-                        seen_articles.add(article)
-                        discovered_results.append((article, channel_group))
-                        count_new += 1
-                if task: task.success()
-                self.log(f"Found {count_new} articles in channel.")
-            except Exception as e:
-                if task: task.fail_temp(state_msg=f"Fail by exception: {str(e)}")
-                self.log(f"[Error] Failed to process channel {channel_url}: {e}\n")
-                # print(traceback.format_exc())
+            with context as task:
+                articles_in_channel, exception = job.run()
+                if exception is None:
+                    count_new = 0
+                    for article_url in articles_in_channel:
+                        if article_url not in seen_articles:
+                            seen_articles.add(article_url)
+                            discovered_results.append((article_url, channel_group))
+                            count_new += 1
+                    if task: task.success()
+                    self.log(f"Found {count_new} new articles in channel {channel_url}.")
+                else:
+                    if task: task.fail_temp(state_msg=f"Fail by exception: {str(exception)}")
+                    full_traceback = format_exception_with_traceback(exception)
+                    self.log(f"[Error] Failed to discover articles from {channel_url}: \n{full_traceback}")
 
         self.articles = discovered_results
         self.log(f"Discovered {len(self.articles)} unique articles.")
         return self.articles
 
-    def extract_articles(self,
-                         article_filter: Optional[Callable[[str, str], bool]] = None,
-                         content_handler: Optional[Callable[[str, ExtractionResult], None]] = None,
-                         exception_handler: Optional[Callable[[str, Exception], None]] = None,
-                         fetcher_kwargs: Optional[dict] = None,
-                         extractor_kwargs: Optional[dict] = None) -> List[Tuple[str, ExtractionResult]]:
+    def extract_articles_jobs(
+        self,
+        article_urls: List[str],
+        channel_group: str,
+        fetcher_kwargs: Optional[dict] = None,
+        extractor_kwargs: Optional[dict] = None
+    ) -> Iterator[ArticleJob]:
+        """Yield deferred jobs that fetch and extract content for each article URL."""
+        fetcher_kwargs = fetcher_kwargs or {}
+        extractor_kwargs = extractor_kwargs or {}
+
+        for article_url in article_urls:
+            _url = article_url
+            _f_kwargs_snapshot = dict(fetcher_kwargs)
+            _e_kwargs_snapshot = dict(extractor_kwargs)
+            def _runner(url=article_url, fk=_f_kwargs_snapshot, ek=_e_kwargs_snapshot):
+                try:
+                    self.log(f"Processing: {url}")
+                    content = self.e_fetcher.get_content(url, **fk)
+                    if not content:
+                        self.log(f"Skipped (no content): {url}")
+                        return None, None
+
+                    self.log(f"Fetched {len(content)} bytes. Extracting...")
+                    result = self.extractor.extract(content, url, **ek)
+                    return result, None
+
+                except Exception as e:
+                    return None, e
+            yield ArticleJob(article_url=article_url, channel_group=channel_group, run=_runner)
+
+    def extract_articles(
+        self,
+        article_filter: Optional[Callable[[str, str], bool]] = None,
+        content_handler: Optional[Callable[[str, "ExtractionResult"], bool]] = None,
+        exception_handler: Optional[Callable[[str, Exception], None]] = None,
+        fetcher_kwargs: Optional[dict] = None,
+        extractor_kwargs: Optional[dict] = None
+    ) -> List[Tuple[str, "ExtractionResult"]]:
         """
-        Step 3: Extracts content from all fetched articles.
-        Populates self.articles and calls optional handlers.
+        Step 3: Fetches and extracts content from all discovered articles.
+        Populates self.contents and calls optional handlers.
         """
-        if fetcher_kwargs is None: fetcher_kwargs = {}
-        if extractor_kwargs is None: extractor_kwargs = {}
+        fetcher_kwargs = fetcher_kwargs or {}
+        extractor_kwargs = extractor_kwargs or {}
 
         self.log(f"--- 3. Fetching & Extracting {len(self.articles)} Articles ---")
 
-        grouped = defaultdict(list)
+        # Group article URLs by channel_group
+        grouped: DefaultDict[str, List[str]] = defaultdict(list)
         for article_url, channel_group in self.articles:
             grouped[channel_group].append(article_url)
 
-        contents = []
+        contents: List[Tuple[str, "ExtractionResult"]] = []
+
         for channel_group, article_urls in grouped.items():
+            # Apply per-group filtering
+            extract_article_urls: List[str] = []
             for article_url in article_urls:
+                if article_filter and not article_filter(article_url, channel_group):
+                    self.log(f"Skipping article (filtered): {article_url}")
+                    continue
+                extract_article_urls.append(article_url)
 
-                context = nullcontext
+            if self.crawler_governor:
+                self.crawler_governor.start_round(channel_group, len(extract_article_urls))
+
+            for job in self.extract_articles_jobs(
+                extract_article_urls,
+                channel_group,
+                fetcher_kwargs=fetcher_kwargs,
+                extractor_kwargs=extractor_kwargs
+            ):
+                article_url = job.article_url
+
+                ctx = nullcontext()
                 if self.crawler_governor:
-                    context = self.crawler_governor.transaction(article_url, channel_group)
+                    ctx = self.crawler_governor.transaction(article_url, channel_group)
 
-                with context as task:
-                    if article_filter and not article_filter(article_url, channel_group):
-                        if task: task.skip(state_msg='Skipped by filter')
-                        self.log(f"Skipping article (filtered): {article_url}")
-                        continue
-
+                with ctx as task:
                     if self.crawler_governor and not self.crawler_governor.should_crawl(article_url):
-                        if task: task.ignore(state_msg='Already fetched - Ignore.')
+                        task.ignore()
                         continue
 
-                    self.log(f"Processing: {article_url}")
+                    result, exception = job.run()
 
-                    try:
-                        content = self.e_fetcher.get_content(article_url, **fetcher_kwargs)
-                        if not content:
-                            if task: task.skip(state_msg='Empty content')
-                            self.log(f"Skipped (no content): {article_url}")
-                            continue
+                    if exception is None:
+                        if result:
+                            contents.append((article_url, result))
+                            if content_handler:
+                                content_handler(article_url, result)
+                            if task: task.success()
+                        else:
+                            # No content is not an error; it is a skip.
+                            if task: task.skip()
+                    else:
+                        if isinstance(exception, CrawlSession.Flow): raise exception        # Handled by context
 
-                        self.log(f"  -> Fetched {len(content)} bytes. Extracting...")
-                        result = self.extractor.extract(content, article_url, **extractor_kwargs)
-                        contents.append((article_url, result))  # Store the final result
+                        full_traceback = format_exception_with_traceback(exception)
+                        self.log(f"[Error] Failed to extract {article_url}: \n{full_traceback}")
 
-                        if content_handler:
-                            content_handler(article_url, result)  # Pass full result to handler
+                        # External exception handler does not exist or returns False causes permanent fail.
+                        if not exception_handler or not exception_handler(article_url, exception):
+                            if task: task.fail_perm(state_msg=f"Fail by exception: {str(exception)}")
 
-                        if task: task.save_file(result.markdown_content, result.metadata.get('title', 'NoTitle'))
-                        if task: task.success()
-
-                    except Exception as e:
-                        if task and isinstance(e, CrawlSession.Flow): raise e       # Handled by context
-                        self.log(f"[Error] Failed to extract {article_url}: {e}")
-                        if exception_handler: exception_handler(article_url, e)
-                        if task: task.fail_perm(state_msg=f"Fail by exception: {str(e)}")
-
-            self.crawler_governor.finish_round(channel_group)
+            if self.crawler_governor:
+                self.crawler_governor.finish_round(channel_group)
 
         self.contents = contents
         self.log(f"Extracted {len(self.contents)} articles successfully.")
-
         return self.contents
 
 
@@ -292,7 +409,7 @@ def common_channel_filter(channel_url: str, channel_filter_list: List[str]) -> b
         parsed_url = urlparse(channel_url)
         path = parsed_url.path
 
-        # [FIX] If path is just '/' or empty, this is a root URL.
+        # If path is just '/' or empty, this is a root URL.
         # Use the netloc (domain) as the key.
         if not path or path == '/':
             key_to_check = parsed_url.netloc or channel_url  # Fallback
@@ -388,7 +505,7 @@ def drive_pipeline_batch(pipeline: CrawlPipeline, config: dict):
         channel_tables = {}
         entry_points_list = entry_points
 
-    with pipeline.crawler_governor.schedule_pace(f"{pipeline.name}_Channel", 15 * 60, None):
+    with pipeline.crawler_governor.schedule_pace(f"{pipeline.name}:Channel", 15 * 60, None):
 
         # ============== 1. Discover Channels ==============
 
@@ -413,7 +530,7 @@ def drive_pipeline_batch(pipeline: CrawlPipeline, config: dict):
             channel_filter=channel_filter,
             fetcher_kwargs=d_fetcher_kwargs)
 
-    with pipeline.crawler_governor.schedule_pace(f"{pipeline.name}_Article", 0, None):
+    with pipeline.crawler_governor.schedule_pace(f"{pipeline.name}:Article", 0, None):
 
         # =============== 3. Extract Articles ===============
 
