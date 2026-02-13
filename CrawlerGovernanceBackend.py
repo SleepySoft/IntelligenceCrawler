@@ -9,8 +9,13 @@ from urllib.parse import urljoin
 from flask_cors import CORS
 from flask import Flask, jsonify, request, send_file, render_template
 
-from IntelligenceCrawler.GovernanceDataEngine import GovernanceDataEngine
-from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager
+try:
+    from CrawlerGovernanceCore import GovernanceManager
+    from GovernanceDataEngine import GovernanceDataEngine
+except Exception as e:
+    print(str(e))
+    from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager
+    from IntelligenceCrawler.GovernanceDataEngine import GovernanceDataEngine
 
 self_path = os.path.dirname(os.path.abspath(__file__))
 
@@ -109,6 +114,12 @@ class CrawlerGovernanceBackend:
                               maybe_wrap(self.rpc_report_result), methods=['POST'])
         self.app.add_url_rule(build_url('/rpc/round/lifecycle'), 'rpc_round_lifecycle',
                               maybe_wrap(self.rpc_round_lifecycle), methods=['POST'])
+
+        # 给所有 API 响应添加禁止缓存头
+        @self.app.after_request
+        def add_header(response):
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            return response
 
     # --- Helper: Time Parsing ---
 

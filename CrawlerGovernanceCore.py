@@ -8,6 +8,7 @@ import hashlib
 import datetime
 import threading
 import collections
+import traceback
 from pathlib import Path
 from enum import IntEnum, Enum
 from typing import Optional, Union, List, Dict, Any
@@ -124,6 +125,8 @@ class DatabaseHandler:
             cur.execute("PRAGMA journal_mode=WAL;")
             cur.execute("PRAGMA synchronous=NORMAL;")
 
+            # --- 1. 创建表 (针对新用户) ---
+
             # 1. Task Groups
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS task_groups (
@@ -136,19 +139,20 @@ class DatabaseHandler:
             """)
 
             # 2. Crawl Status
+            # 注意：如果是旧库，这句话会被忽略
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS crawl_status (
                     url TEXT PRIMARY KEY,
-                    url_hash TEXT NOT NULL,
+                    url_hash TEXT NOT NULL, 
                     group_path TEXT NOT NULL,
                     spider_name TEXT NOT NULL,
                     status INTEGER DEFAULT 0,
                     retry_count INTEGER DEFAULT 0,
                     http_code INTEGER,
                     file_path TEXT,
-                    last_run_at INTEGER,     -- epoch seconds
-                    next_run_at INTEGER,     -- epoch seconds
-                    updated_at INTEGER,      -- epoch seconds
+                    last_run_at INTEGER,
+                    next_run_at INTEGER,
+                    updated_at INTEGER,
                     duration REAL,
                     state_msg TEXT
                 )
@@ -164,7 +168,7 @@ class DatabaseHandler:
                     status INTEGER,
                     http_code INTEGER,
                     duration REAL,
-                    created_at INTEGER NOT NULL  -- epoch seconds
+                    created_at INTEGER NOT NULL
                 )
             """)
 
@@ -177,7 +181,25 @@ class DatabaseHandler:
                 )
             """)
 
-            # Initialize global control signal if not present
+            # --- 2. 自动迁移 (针对老用户) ---
+
+            # 检查 crawl_status 表是否缺少 url_hash 字段
+            cur.execute("PRAGMA table_info(crawl_status)")
+            # 结果是一个列表，每行的第2列(索引1)是字段名
+            columns = {row[1] for row in cur.fetchall()}
+
+            if "url_hash" not in columns:
+                # 只有当表存在且缺少字段时才执行
+                # 注意：添加 NOT NULL 列必须指定 DEFAULT 值
+                logger.info("Migrating DB: Adding 'url_hash' column to crawl_status...")
+                try:
+                    cur.execute("ALTER TABLE crawl_status ADD COLUMN url_hash TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError as e:
+                    # 防止极少数情况表其实不存在
+                    logger.warning(f"Migration warning: {e}")
+
+            # --- 3. 初始化数据与索引 ---
+
             now_ts = int(time.time())
             cur.execute(
                 "INSERT OR IGNORE INTO sys_control (key, signal, updated_at) VALUES ('global', 'NORMAL', ?)",
@@ -665,6 +687,7 @@ class CrawlSession:
             group_path=self.group_path,
             status=status,
             duration=duration,
+            http_code=self.http_code,
             state_msg=self.state_msg,
             prev_exists=self._has_prev_row,
             prev_snapshot=self._prev_row_snapshot
@@ -883,6 +906,8 @@ class GovernanceManager:
         # Use TLS to record current context
         self._tls = threading.local()
 
+        self._start_background_maintenance()
+
         logger.info(f"Governance Manager initialized. Signal: {self._control_signal}")
 
     # --- Helper: Path Normalization & Name Extraction ---
@@ -924,6 +949,70 @@ class GovernanceManager:
         except Exception as e:
             logger.error(f"Failed to recover RUNNING tasks: {e}")
 
+    def _start_background_maintenance(self):
+        """
+        启动后台守护线程，执行非关键的维护任务（如数据回填）。
+        使用局部导入避免循环依赖，使用全捕获 try-except 确保不崩主程。
+        """
+
+        def _maintenance_task():
+            # 1. 稍微等待一下，让主程序完成初始化，避免争抢资源
+            time.sleep(3)
+
+            try:
+                try:
+                    from GovernanceDataEngine import GovernanceDataEngine
+                except ImportError as e:
+                    print(str(e))
+                    traceback.print_exc()
+                    from IntelligenceCrawler.GovernanceDataEngine import GovernanceDataEngine
+                    print("Import GovernanceDataEngine from IntelligenceCrawler successful.")
+
+                # 实例化临时 Engine
+                # 注意：这里传入 self (GovernanceManager)，形成了临时的闭环引用，
+                # 但因为是在函数内部且是临时的，Python 的垃圾回收能处理，或者函数结束引用释放。
+                engine = GovernanceDataEngine(self)
+
+                # 2. 执行回填逻辑
+                # 这里会检查是否有 url_hash 为空的行，如果有则计算并填入
+                logger.info("Maintenance: Checking for necessary data backfills (url_hash)...")
+
+                # 循环执行直到全部处理完（防止一次 batch 没跑完），或者你信任一次跑完
+                # 这里简单起见，调用一次。如果你的 backfill 函数只处理一个 batch，
+                # 你可能需要在这里写个 while 循环。
+                # 建议让 backfill 函数内部处理循环，或者在这里简单循环几次。
+
+                total_updated = 0
+                while True:
+                    # 假设 backfill_crawl_status_url_hash 返回 {'ok': True, 'changed': True, 'updated': 100}
+                    res = engine.backfill_crawl_status_url_hash(batch_size=2000)
+
+                    if not res.get("ok"):
+                        logger.warning(f"Maintenance: Backfill reported error: {res.get('error')}")
+                        break
+
+                    count = res.get("updated", 0)
+                    total_updated += count
+
+                    # 如果本次没有更新任何数据，说明全弄完了，退出
+                    if count == 0:
+                        break
+
+                    # 稍微歇一下，防止占满 CPU
+                    time.sleep(0.1)
+
+                if total_updated > 0:
+                    logger.info(f"Maintenance: Backfill complete. Total rows updated: {total_updated}")
+
+            except ImportError as e:
+                logger.warning(f"Maintenance: Skipped backfill. Could not import GovernanceDataEngine: {e}")
+            except Exception as e:
+                # [关键] 捕获所有异常，绝不让主程序崩溃
+                logger.error(f"Maintenance: Background task encountered an error: {e}", exc_info=True)
+
+        # 设置为 daemon=True，这样主程序退出时，这个线程会自动结束，不会卡死进程
+        t = threading.Thread(target=_maintenance_task, name="GovMaintenanceThread", daemon=True)
+        t.start()
 
     # --- 1. Metadata Registration (UI & Entry Points) ---
 
@@ -1226,7 +1315,7 @@ class GovernanceManager:
                 (url, group_path, spider, int(status), http_code, duration, now_ts)
             )
 
-    def _finalize_event_in_memory(self, log_id, url, spider, group_path, status, duration, state_msg):
+    def _finalize_event_in_memory(self, log_id, url, spider, group_path, status, duration, http_code, state_msg):
         with self.stats_lock:
             if log_id and log_id not in self.active_events_map:
                 logger.warning(f"Orphaned Finish Task: {url} (ID: {log_id}). Start event not found in active map.")
@@ -1236,7 +1325,7 @@ class GovernanceManager:
                 event_obj["status"] = int(status)
                 event_obj["duration"] = duration
                 event_obj["state_msg"] = state_msg
-                event_obj["http_code"] = 0
+                event_obj["http_code"] = http_code
                 event_obj["updated_ts"] = time.time()
                 del self.active_events_map[log_id]
             else:
@@ -1248,7 +1337,7 @@ class GovernanceManager:
                     "spider": spider,
                     "group_path": group_path,
                     "status": int(status),
-                    "http_code": 0,
+                    "http_code": http_code,
                     "duration": duration,
                     "state_msg": state_msg,
                     "is_anchor": url in self.known_anchors
@@ -1343,7 +1432,7 @@ class GovernanceManager:
         self._update_crawl_status_finish(url, spider, status, duration, http_code, state_msg, file_path)
 
         # 3) 内存事件 + round context
-        self._finalize_event_in_memory(log_id, url, spider, group_path, status, duration, state_msg)
+        self._finalize_event_in_memory(log_id, url, spider, group_path, status, duration, http_code, state_msg)
 
     def _handle_task_memory_only_finish(
             self, log_id, url, spider, group_path,
@@ -1362,7 +1451,7 @@ class GovernanceManager:
             logger.error(f"Memory-only rollback failed for {url}: {e}")
 
         # 3) 内存事件 + round context
-        self._finalize_event_in_memory(log_id, url, spider, group_path, status, duration, state_msg)
+        self._finalize_event_in_memory(log_id, url, spider, group_path, status, duration, http_code, state_msg)
 
     def reset_statistics(self):
         """

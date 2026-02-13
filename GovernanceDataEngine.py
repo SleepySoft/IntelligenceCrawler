@@ -830,32 +830,39 @@ class GovernanceDataEngine:
     def backfill_crawl_status_url_hash(self, batch_size: int = 2000) -> Dict[str, Any]:
         """
         Backfill crawl_status.url_hash for rows where url_hash is NULL/empty.
-
-        Note:
-        - Uses md5(url) by default (or governor._hash(url) if available).
-        - Batch update to reduce transaction cost.
+        Optimized for bulk updates using executemany.
         """
         if not getattr(self.gov, "db", None):
             return {"ok": False, "error": "db not available"}
 
         try:
+            # 1. 查找需要修复的行
+            # 注意：如果 url_hash 已经有索引，这个查询会非常快
             rows = self.gov.db.fetch_all_dict(
                 "SELECT url FROM crawl_status WHERE url_hash IS NULL OR url_hash = '' LIMIT ?",
                 (int(batch_size),),
             ) or []
+
             if not rows:
                 return {"ok": True, "changed": False, "updated": 0}
 
-            updated = 0
+            # 2. 内存计算 Hash
+            updates = []
             for r in rows:
                 url = r.get("url")
                 if not url:
                     continue
                 h = self._url_hash(url)
-                self.gov.db.execute("UPDATE crawl_status SET url_hash = ? WHERE url = ?", (h, url))
-                updated += 1
+                updates.append((h, url))
 
-            return {"ok": True, "changed": True, "updated": updated}
+            # 3. 批量写入 DB (原子操作，速度快)
+            if updates:
+                # 使用事务上下文确保数据一致性
+                with self.gov.db.transaction() as cur:
+                    cur.executemany("UPDATE crawl_status SET url_hash = ? WHERE url = ?", updates)
+
+            return {"ok": True, "changed": True, "updated": len(updates)}
+
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

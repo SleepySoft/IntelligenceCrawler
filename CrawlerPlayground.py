@@ -24,8 +24,8 @@ try:
     from CrawlerCodeGenerator import CrawlerCodeGenerator
 except Exception as e:
     print(str(e))
-    from .MultiLineComboBox import MultiLinePopupComboBox
-    from .CrawlerCodeGenerator import CrawlerCodeGenerator
+    from IntelligenceCrawler.MultiLineComboBox import MultiLinePopupComboBox
+    from IntelligenceCrawler.CrawlerCodeGenerator import CrawlerCodeGenerator
 
 
 # --- Core Component Imports ---
