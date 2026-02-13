@@ -8,10 +8,11 @@ import hashlib
 import datetime
 import threading
 import collections
-from dataclasses import dataclass
 from pathlib import Path
 from enum import IntEnum, Enum
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Any
+from dataclasses import dataclass
+from contextlib import contextmanager
 
 try:
     from CrawlerFlowScheduler import FlowScheduler
@@ -221,6 +222,49 @@ class DatabaseHandler:
             cur.execute(sql, params)
             return cur.fetchall()
 
+    def fetch_one_dict(self, sql: str, params: tuple = ()) -> Optional[dict]:
+        """
+        Fetch one row and convert sqlite3.Row -> dict.
+        Returns None if no row found.
+
+        Note:
+        - Keeps the original fetch_one() behavior intact.
+        - This method is recommended for service/engine layers to avoid Row/.get() incompatibility.
+        """
+        row = self.fetch_one(sql, params)
+        return dict(row) if row else None
+
+    def fetch_all_dict(self, sql: str, params: tuple = ()) -> List[dict]:
+        """
+        Fetch all rows and convert sqlite3.Row -> dict for each row.
+
+        Note:
+        - Keeps the original fetch_all() behavior intact.
+        """
+        rows = self.fetch_all(sql, params)
+        return [dict(r) for r in rows] if rows else []
+
+    def executemany(self, sql: str, seq_params: List[tuple]) -> int:
+        """
+        Execute a parameterized SQL statement against all parameter sequences.
+
+        Returns:
+            int: cursor.rowcount (may be -1 for some statements in sqlite).
+
+        Note:
+        - Runs under lock and commits once for the whole batch.
+        - Prefer this for backfill/migration to avoid per-row commit overhead.
+        """
+        with self.lock:
+            try:
+                cur = self.conn.cursor()
+                cur.executemany(sql, seq_params)
+                self.conn.commit()
+                return cur.rowcount
+            except sqlite3.Error as e:
+                logger.error(f"DB Error: {e} | SQL: {sql}")
+                raise
+
     def get_control_signal(self, key='global') -> str:
         row = self.fetch_one("SELECT signal FROM sys_control WHERE key = ?", (key,))
         return row['signal'] if row else "NORMAL"
@@ -231,6 +275,36 @@ class DatabaseHandler:
             "INSERT OR REPLACE INTO sys_control (key, signal, updated_at) VALUES (?, ?, ?)",
             (key, signal, now_ts)
         )
+
+    @contextmanager
+    def transaction(self):
+        """
+        A simple transaction context manager.
+
+        Usage:
+            with db.transaction() as cur:
+                cur.execute(...)
+                cur.executemany(...)
+                ...
+
+        Guarantees:
+        - BEGIN -> COMMIT on success
+        - ROLLBACK on exception
+
+        Note:
+        - The lock is held for the whole transaction scope.
+        - Avoid nested transactions unless you extend this to SAVEPOINT.
+        """
+        with self.lock:
+            cur = self.conn.cursor()
+            try:
+                # Use a plain BEGIN for sqlite; WAL mode works fine with it.
+                cur.execute("BEGIN")
+                yield cur
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
 
 
 # --- File Storage Handler ---
@@ -733,13 +807,20 @@ class GroupRoundContext:
 
 class GovernanceManager:
     """
-    Central Controller for Spider Governance.
-    Manages State, Storage, and Flow Control.
+    GovernanceManager
+    -----------------
+    Central controller for spider governance.
 
-    Refactored Logic:
-    - Uses a Ring Buffer (deque) to cache the latest N task events in memory.
-    - Queries use Memory if the time range is covered by the buffer.
-    - Falls back to DB if the time range exceeds memory history.
+    Runtime Data Model:
+    - LIVE endpoints read from in-memory hot data only (event_buffer, runtime_groups,
+      round_contexts, anchor_status_cache). No DB access, no time windows.
+    - QUERY endpoints read from database only, and only when the caller specifies
+      a time range. QUERY never mixes memory and DB data.
+
+    Rules:
+    - If the caller does NOT specify a time range → LIVE mode (pure memory).
+    - If the caller specifies a time range → QUERY mode (pure DB).
+    - No hybrid/mixed strategy. Memory is NOT used to satisfy time-window queries.
     """
 
     def __init__(
@@ -785,6 +866,19 @@ class GovernanceManager:
         self.round_contexts: Dict[str, GroupRoundContext] = {}
 
         self.known_anchors = set()
+
+        # --- Anchor status cache (LIVE, memory-only) ---
+        # Key: list_url (str)
+        # Value: {
+        #   'url': str,
+        #   'status': int,
+        #   'http_code': int|None,
+        #   'state_msg': str|None,
+        #   'last_run_at': int|None,    # epoch seconds
+        #   'next_run_at': int|None,    # epoch seconds (can be from round next_run)
+        #   'updated_ts': float         # epoch seconds, memory timestamp
+        # }
+        self.anchor_status_cache: Dict[str, Dict[str, Any]] = {}
 
         # Use TLS to record current context
         self._tls = threading.local()
@@ -870,6 +964,18 @@ class GovernanceManager:
 
                 if list_url:
                     self.known_anchors.add(list_url)
+
+                    # Initialize anchor LIVE cache (memory-only)
+                    # Note: This avoids DB reads in LIVE summary.
+                    self.anchor_status_cache[list_url] = {
+                        "url": list_url,
+                        "status": int(Status.PENDING),
+                        "http_code": None,
+                        "state_msg": None,
+                        "last_run_at": None,
+                        "next_run_at": None,
+                        "updated_ts": time.time(),
+                    }
 
             # 3. Ensure Status Entry in DB
             if list_url:
@@ -1015,6 +1121,22 @@ class GovernanceManager:
                 return self.round_contexts[group_path].get_snapshot()
             return {}  # 或者返回一个默认空对象
 
+    def get_pending_count(self) -> int:
+        row = self.db.fetch_one("SELECT COUNT(1) AS c FROM crawl_status WHERE status=?", (int(Status.PENDING),))
+        return int(row["c"]) if row else 0
+
+    def get_scheduler_snapshot(self, max_items_per_state: int = 50):
+        """
+        Unified scheduler snapshot access for backend/UI.
+        """
+        if not self.scheduler:
+            return {}
+
+        try:
+            return self.scheduler.get_status_snapshot(max_items_per_state=max_items_per_state)
+        except Exception as e:
+            return {"error": f"scheduler snapshot failed: {e}"}
+
     def schedule_pace(
             self,
             key: str,
@@ -1055,17 +1177,36 @@ class GovernanceManager:
         # 3. Memory Update (Rich Object)
         with self.stats_lock:
             event_obj = {
-                'id': log_id,           # Track ID
-                'ts': time.time(),
-                'url': url,             # <--- Added for display
-                'spider': spider,       # <--- Added for filtering
-                'group_path': group,
-                'status': int(Status.RUNNING),
-                'duration': 0.0,  # Placeholder
-                'is_anchor': url in self.known_anchors
+                "id": log_id,
+                "ts": time.time(),          # start time (seconds)
+                "updated_ts": time.time(),  # last update time (seconds) - equals start at begin
+                "url": url,
+                "spider": spider,
+                "group_path": group,
+                "status": int(Status.RUNNING),
+                "http_code": 0,          # will be filled on finish
+                "duration": 0.0,
+                "state_msg": None,          # will be filled on finish
+                "is_anchor": url in self.known_anchors,
             }
 
             self.event_buffer.append(event_obj)
+
+            # Update anchor LIVE cache (memory-only) on start
+            if event_obj["is_anchor"]:
+                # For anchor, we treat "last_run_at" as start time
+                now_s = int(time.time())
+                self.anchor_status_cache[url] = {
+                    "url": url,
+                    "status": int(Status.RUNNING),
+                    "http_code": 0,
+                    "state_msg": None,
+                    "last_run_at": now_s,
+                    # next_run_at can be updated when round finishes (see finish hook)
+                    "next_run_at": self.anchor_status_cache.get(url, {}).get("next_run_at"),
+                    "updated_ts": time.time(),
+                }
+
             # 只有有效的 ID 才放入 Map
             if log_id > 0:
                 self.active_events_map[log_id] = event_obj
@@ -1079,9 +1220,10 @@ class GovernanceManager:
                 (int(status), duration, http_code, log_id)
             )
         else:
+            now_ts = int(time.time())
             self.db.execute(
-                "INSERT INTO crawl_log (url, group_path, spider_name, status, http_code, duration) VALUES (?,?,?,?,?,?)",
-                (url, group_path, spider, int(status), http_code, duration)
+                "INSERT INTO crawl_log (url, group_path, spider_name, status, http_code, duration, created_at) VALUES (?,?,?,?,?,?,?)",
+                (url, group_path, spider, int(status), http_code, duration, now_ts)
             )
 
     def _finalize_event_in_memory(self, log_id, url, spider, group_path, status, duration, state_msg):
@@ -1094,18 +1236,46 @@ class GovernanceManager:
                 event_obj["status"] = int(status)
                 event_obj["duration"] = duration
                 event_obj["state_msg"] = state_msg
+                event_obj["http_code"] = 0
+                event_obj["updated_ts"] = time.time()
                 del self.active_events_map[log_id]
             else:
                 self.event_buffer.append({
+                    "id": 0,
                     "ts": time.time(),
+                    "updated_ts": time.time(),
                     "url": url,
                     "spider": spider,
                     "group_path": group_path,
                     "status": int(status),
+                    "http_code": 0,
                     "duration": duration,
                     "state_msg": state_msg,
                     "is_anchor": url in self.known_anchors
                 })
+
+            # Update anchor LIVE cache (memory-only) on finish
+            if url in self.known_anchors:
+                now_s = int(time.time())
+
+                # Best-effort: use round_context next_run_ts if available for this group
+                next_run_at = None
+                ctx = self.round_contexts.get(group_path)
+                if ctx and getattr(ctx, "next_run_ts", None):
+                    try:
+                        next_run_at = int(ctx.next_run_ts)
+                    except Exception:
+                        next_run_at = None
+
+                self.anchor_status_cache[url] = {
+                    "url": url,
+                    "status": int(status),
+                    "http_code": 0,
+                    "state_msg": state_msg,
+                    "last_run_at": now_s,
+                    "next_run_at": next_run_at,
+                    "updated_ts": time.time(),
+                }
 
             if group_path in self.round_contexts:
                 self.round_contexts[group_path].update(status)
@@ -1272,608 +1442,3 @@ class GovernanceManager:
             # 3. Sleep Chunk
             remaining = end_time - time.time()
             time.sleep(min(0.1, remaining))
-
-    # --- 6. Dashboard Statistics (Unified Logic) ---
-
-    def _to_epoch(self, t: Optional[datetime.datetime]) -> int:
-        if not t:
-            return 0
-        if isinstance(t, (int, float)):
-            return int(t)
-        if isinstance(t, datetime.datetime):
-            # 若传入的是 naive datetime，按本地理解也没关系，最终只做过滤
-            return int(t.timestamp())
-        return int(t)
-
-    def _get_aggregated_stats(self, since_time: Optional[datetime.datetime]) -> Dict[str, Dict]:
-        """
-        聚合统计核心函数。
-        Refactored: 提取了公共计数逻辑。
-        """
-
-        # --- 1. 内部 Helper：核心计数逻辑 (DRY Principle) ---
-        def accumulate_counts(target_dict: Dict, status: int, count: int = 1):
-            """
-            统一处理 Traffic 和 Results 的计数规则。
-            在此处修改规则，所有统计视图都会自动生效。
-            """
-            if status == Status.RUNNING:
-                target_dict['running'] += count
-
-            # === 核心过滤规则 ===
-            elif status in [Status.PENDING, Status.SKIPPED, Status.IGNORED, Status.CACHED]:
-                return
-
-
-            else:
-                # 只有明确的 Success 或 Fail 才计入 Total
-                target_dict['total'] += count
-
-                if status in [Status.SUCCESS]:
-                    target_dict['success'] += count
-                elif status in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
-                    target_dict['failed'] += count
-
-        # --- 2. 数据结构初始化 ---
-        stats_map = {}
-
-        def get_group_stats(group_path):
-            if group_path not in stats_map:
-                stats_map[group_path] = {
-                    'results': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
-                    'traffic': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
-                    'perf': {'min': 999999, 'max': 0, 'sum': 0, 'count': 0, 'avg': 0},
-                    '_unique_urls': {}  # 仅内存模式使用
-                }
-            return stats_map[group_path]
-
-        # --- 3. 确定数据源 ---
-        use_db = False
-        target_ts = since_time.timestamp() if since_time else 0
-        events_source = []
-
-        with self.stats_lock:
-            if not since_time:
-                events_source = list(self.event_buffer)
-            elif len(self.event_buffer) == 0:
-                use_db = True
-            else:
-                if target_ts >= self.event_buffer[0]['ts']:
-                    events_source = [e for e in self.event_buffer if e['ts'] > target_ts]
-                else:
-                    use_db = True
-
-        # --- 4. 执行聚合 ---
-
-        if not use_db:
-            # === Path A: In-Memory (Live View) ===
-            for e in events_source:
-                gp = e['group_path']
-                st = e['status']
-                dur = e.get('duration', 0) or 0
-
-                s_dict = get_group_stats(gp)
-
-                # A1. Traffic 统计 (流水账)
-                accumulate_counts(s_dict['traffic'], st, count=1)
-
-                # A2. 性能统计 (仅针对有效耗时)
-                # 排除 Pending/Running/Skipped/Ignored 对平均耗时的影响
-                if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED, Status.IGNORED] and dur > 0:
-                    p = s_dict['perf']
-                    if dur < p['min']: p['min'] = dur
-                    if dur > p['max']: p['max'] = dur
-                    p['sum'] += dur
-                    p['count'] += 1
-
-                # A3. 记录 Unique 状态 (覆盖写)
-                if e.get('url'):
-                    s_dict['_unique_urls'][e['url']] = st
-
-            # A4. Finalize Unique Results (修正后的逻辑)
-            for gp, data in stats_map.items():
-                r = data['results']
-                # 遍历去重后的 URL 字典
-                for u_st in data['_unique_urls'].values():
-                    # 调用同一个 helper，确保逻辑一致！
-                    accumulate_counts(r, u_st, count=1)
-
-                # 清理临时内存
-                del data['_unique_urls']
-
-        else:
-            # === Path B: Database (Historical View) ===
-            since_ts = self._to_epoch(since_time)
-
-            rows = self.db.fetch_all("""
-                SELECT
-                    group_path, status, COUNT(*) as cnt,
-                    MIN(duration) as min_dur, MAX(duration) as max_dur,
-                    SUM(duration) as sum_dur, COUNT(CASE WHEN duration > 0 THEN 1 END) as dur_cnt
-                FROM crawl_log
-                WHERE created_at > ?
-                GROUP BY group_path, status
-            """, (since_ts,))
-
-            for r in rows:
-                gp = r['group_path']
-                st = r['status']
-                count = r['cnt']
-
-                s_dict = get_group_stats(gp)
-
-                # B1. Traffic 统计
-                accumulate_counts(s_dict['traffic'], st, count=count)
-
-                # B2. 性能统计
-                if st not in [Status.PENDING, Status.RUNNING, Status.SKIPPED, Status.IGNORED]:
-                    p = s_dict['perf']
-                    row_min = r['min_dur'] or 0
-                    row_max = r['max_dur'] or 0
-                    row_cnt = r['dur_cnt'] or 0
-
-                    if row_cnt > 0:
-                        if row_min < p['min'] and row_min > 0: p['min'] = row_min
-                        if row_max > p['max']: p['max'] = row_max
-                        p['sum'] += (r['sum_dur'] or 0)
-                        p['count'] += row_cnt
-
-            # B3. DB 模式下的 Results 妥协 (Results = Traffic)
-            for data in stats_map.values():
-                data['results'] = data['traffic'].copy()
-                if '_unique_urls' in data: del data['_unique_urls']
-
-        # --- 5. 计算平均值 (收尾) ---
-        for data in stats_map.values():
-            p = data['perf']
-            if p['count'] > 0:
-                p['avg'] = round(p['sum'] / p['count'], 3)
-                if p['min'] == 999999: p['min'] = 0
-            else:
-                p['min'] = 0
-
-        return stats_map
-
-    def get_dashboard_summary(self, spider_filter: str = None, since_time: datetime.datetime = None) -> List[Dict]:
-        """
-        Constructs the dashboard view.
-        Source of 'groups' is now self.runtime_groups (Memory), not DB.
-        """
-
-        # 1. Fetch Structure (FROM MEMORY) <--- CHANGED
-        # Only groups explicitly registered in this session appear.
-        with self.stats_lock:
-            # Sort by path for consistent UI
-            sorted_paths = sorted(self.runtime_groups.keys())
-            active_groups = [
-                {'group_path': p, **self.runtime_groups[p]}
-                for p in sorted_paths
-            ]
-
-        # If no groups registered yet, return empty list immediately
-        if not active_groups:
-            return []
-
-        # 2. Get Dynamic Statistics
-        # This returns stats for ALL groups found in logs/buffer.
-        # We will map them to our active_groups.
-        stats_map = self._get_aggregated_stats(since_time)
-
-        # 3. Fetch Anchor/List URL Status
-        list_urls = [g['list_url'] for g in active_groups if g['list_url']]
-        list_url_map = {}
-
-        if list_urls:
-            placeholders = ','.join(['?'] * len(list_urls))
-            params = list(list_urls)
-
-            sql = """
-                SELECT url, status, last_run_at, next_run_at, http_code, state_msg 
-                FROM crawl_status 
-                WHERE url IN ({})
-            """
-
-            if since_time:
-                sql += " AND last_run_at > ?"
-                params.append(since_time)
-
-            url_rows = self.db.fetch_all(sql.format(placeholders), tuple(params))
-            list_url_map = {row['url']: dict(row) for row in url_rows}
-
-        # 4. Assemble Final Result
-        result = []
-        for g in active_groups:
-            g_path = g['group_path']
-
-            if spider_filter and not g_path.startswith(spider_filter):
-                continue
-
-            # Retrieve stats
-            # Note: Even if stats_map has data for old groups, we only grab the ones for active_groups
-            default_stats = {
-                'results': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
-                'traffic': {'total': 0, 'success': 0, 'failed': 0, 'running': 0},
-                'perf': {'min': 0, 'max': 0, 'avg': 0, 'count': 0}
-            }
-            current_stats = stats_map.get(g_path, default_stats)
-
-            l_url = g['list_url']
-            l_status = list_url_map.get(l_url)
-
-            current_round_id = 0
-            if g_path in self.round_contexts:
-                current_round_id = self.round_contexts[g_path].round_id
-
-            result.append({
-                'group_path': g_path,
-                'name': g['name'],
-                'stats': current_stats,
-                'list_url_status': l_status,
-                'round_id': current_round_id
-            })
-
-        return result
-
-    def get_log_trend_stats(
-            self,
-            start_ts: float,
-            end_ts: float,
-            bucket_minutes: int = 60,
-            group_filter: str = None,
-            use_updated_at: bool = False,
-            include_cached_as_success: bool = False
-    ) -> List[Dict]:
-        """
-        Trend stats from crawl_status (Outcome-oriented, unique URL snapshot)。
-        Bucket by crawl_status.updated_at (default) or last_run_at。
-        Excludes group list_url anchors (task_groups.list_url)。
-        Returns buckets with success/fail/total for stacked bar chart.
-        """
-
-        bucket_seconds = max(1, bucket_minutes) * 60
-        time_col = "updated_at" if use_updated_at else "last_run_at"
-
-        sql = f"""
-            SELECT
-                (s.{time_col} / ?) * ? as bucket_ts,
-                s.status as status,
-                COUNT(*) as cnt
-            FROM crawl_status s
-            LEFT JOIN task_groups g ON s.url = g.list_url
-            WHERE s.{time_col} IS NOT NULL
-              AND s.{time_col} BETWEEN ? AND ?
-              AND g.list_url IS NULL
-        """
-        params = [bucket_seconds, bucket_seconds, int(start_ts), int(end_ts)]
-
-        if group_filter:
-            sql += " AND s.group_path = ?"
-            params.append(group_filter)
-
-        sql += """
-            GROUP BY bucket_ts, status
-            ORDER BY bucket_ts ASC
-        """
-
-        rows = self.db.fetch_all(sql, tuple(params))
-
-        # 1) 先准备完整桶，补齐空桶
-        def floor_bucket(ts: float) -> int:
-            return int(ts // bucket_seconds) * bucket_seconds
-
-        start_bucket = floor_bucket(start_ts)
-        end_bucket = floor_bucket(end_ts)
-        timeline = {}
-
-        # 生成所有桶
-        cur = start_bucket
-        while cur <= end_bucket:
-            # label 你可按 bucket 粒度自定义显示
-            dt = datetime.datetime.fromtimestamp(cur)
-            if bucket_seconds >= 86400:
-                label = dt.strftime("%Y-%m-%d")
-            elif bucket_seconds >= 3600:
-                label = dt.strftime("%m-%d %H:00")
-            else:
-                label = dt.strftime("%H:%M")
-
-            timeline[cur] = {"ts": cur, "time": label, "success": 0, "fail": 0, "total": 0}
-            cur += bucket_seconds
-
-        # 2) 回填统计
-        success_set = {Status.SUCCESS}
-        if include_cached_as_success:
-            success_set.add(Status.CACHED)
-
-        fail_set = {Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED}
-
-        for r in rows:
-            ts = r["bucket_ts"]
-            st = r["status"]
-            cnt = r["cnt"]
-
-            if ts not in timeline:
-                # 极端情况下（边界/时区）保护一下
-                timeline[ts] = {"ts": ts, "time": datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M"),
-                                "success": 0, "fail": 0, "total": 0}
-
-            bucket = timeline[ts]
-
-            # 只统计成功/失败进 total，其他状态忽略
-            if st in success_set:
-                bucket["success"] += cnt
-                bucket["total"] += cnt
-            elif st in fail_set:
-                bucket["fail"] += cnt
-                bucket["total"] += cnt
-            else:
-                # PENDING/RUNNING/SKIPPED/IGNORED 等不进入柱图
-                pass
-
-        return [timeline[k] for k in sorted(timeline.keys())]
-
-    def get_scheduler_snapshot(self, max_items_per_state: int = 50) -> Optional[Dict]:
-        """
-        Safe getter for scheduler status.
-        Important: Do NOT call this while holding stats_lock to avoid lock ordering risk.
-        """
-        if not self.scheduler:
-            return None
-        try:
-            return self.scheduler.get_status_snapshot(max_items_per_state)
-        except Exception as e:
-            logger.error(f"Failed to get scheduler snapshot: {e}")
-            return None
-
-    def get_session_stats(self, since_time: datetime.datetime = None):
-        """
-        Returns global statistics.
-        UPDATED: Aggregates 'traffic' stats from the nested structure.
-        """
-        # Get the nested stats map: { group: { 'traffic': {...}, 'results': {...} } }
-        stats_map = self._get_aggregated_stats(since_time)
-
-        # Flatten the grouped map into global totals (using TRAFFIC data)
-
-        total = success = failed = running = 0
-        for gp_data in stats_map.values():
-            # Extract traffic dict, defaulting to empty if missing
-            t = gp_data.get('traffic', {})
-
-            total += t.get('total', 0)
-            success += t.get('success', 0)
-            failed += t.get('failed', 0)
-            running += t.get('running', 0)
-
-        rate = round((success / total) * 100, 1) if total > 0 else 0
-
-        # Determine the effective start time
-        if since_time:
-            ref_time = since_time
-        else:
-            with self.stats_lock:
-                ref_time = self.session_start_time
-
-        # sched = self.get_scheduler_snapshot()
-
-        return {
-            'total': total,
-            'success': success,
-            'failed': failed,
-            'running': running,
-            'success_rate': rate,
-            'session_start': ref_time,
-            # 'scheduler': sched
-        }
-
-    # --- 7. Data Access Interfaces for Backend (New) ---
-
-    def get_pending_count(self) -> int:
-        """Get the current depth of the queue (Persistent State)."""
-        row = self.db.fetch_one("SELECT count(*) as cnt FROM crawl_status WHERE status=?", (Status.PENDING,))
-        return row['cnt'] if row else 0
-
-    def get_logs(self, spider_name=None, status=None, limit=100, since_time=None, until_time=None):
-        """
-        Retrieves recent logs with filters.
-        Fixes 'ambiguous column name' error by specifying table alias 'l.'.
-        """
-        # 基础 SQL 包含别名 l (log) 和 s (status)
-        sql = """
-            SELECT l.*, s.url_hash 
-            FROM crawl_log l
-            LEFT JOIN crawl_status s ON l.url = s.url
-            WHERE 1=1
-        """
-        params = []
-
-        if spider_name:
-            # 这里必须写 l.group_path，不能只写 group_path
-            sql += " AND l.group_path LIKE ?"
-            params.append(f"{spider_name}%")
-
-        if status is not None:
-            # 这里的 status 虽然通常只有 log 表有，但为了规范也建议加 l.
-            sql += " AND l.status = ?"
-            params.append(status)
-
-        if since_time:
-            sql += " AND l.created_at >= ?"
-            params.append(int(since_time))
-
-        if until_time:
-            sql += " AND l.created_at <= ?"
-            params.append(int(until_time))
-
-        sql += " ORDER BY l.id DESC LIMIT ?"
-        params.append(limit)
-
-        rows = self.db.fetch_all(sql, tuple(params))
-
-        # 转为字典
-        return [dict(row) for row in rows]
-
-    def get_snapshot_path(self, url_hash: str) -> Optional[str]:
-        """Retrieve file path by URL hash."""
-        row = self.db.fetch_one("SELECT file_path FROM crawl_status WHERE url_hash = ?", (url_hash,))
-        return row['file_path'] if row else None
-
-    def get_recent_statuses(self, limit: int = 100, spider: Optional[str] = None, status: Optional[int] = None) -> List[
-        Dict]:
-        """
-        Fetch 'Live' statuses directly from Memory Buffer.
-        No DB access. No Time parameter needed.
-
-        Logic:
-        1. Iterate Memory Buffer in Reverse (Newest first).
-        2. Deduplicate by URL (Show only the LATEST state of a URL).
-        3. Apply Filters.
-        """
-        result = []
-        seen_urls = set()
-
-        with self.stats_lock:
-            # Iterate backwards to get the most recent events first
-            # list(reversed(deque)) is efficient enough for typical buffer sizes (e.g. 5k)
-            for event in reversed(self.event_buffer):
-                if len(result) >= limit:
-                    break
-
-                url = event.get('url')
-
-                # Deduplication: Only show the latest status for a specific URL
-                if url in seen_urls:
-                    continue
-
-                # Filters
-                if spider and event.get('spider') != spider:
-                    continue
-                if status is not None and event.get('status') != status:
-                    continue
-
-                seen_urls.add(url)
-
-                # Create a clean copy for the view
-                view_item = {
-                    'url': url,
-                    'status': event['status'],
-                    'spider_name': event.get('spider'),
-                    'group_path': event['group_path'],
-                    'last_run_at': datetime.datetime.fromtimestamp(event['ts']).isoformat(),
-                    # Convert timestamp to ISO for Frontend
-                    'duration': event.get('duration', 0),
-                    'state_msg': event.get('state_msg')
-                }
-                result.append(view_item)
-
-        return result
-
-    def get_db_history_stats(self, days: int = 7) -> Dict:
-        """
-        NEW: Queries DB for long-term historical statistics.
-        Returns data for:
-        1. Daily Bar Chart (Date vs Valid/Fail)
-        2. Status Breakdown Pie Chart
-        """
-
-        # 1. Daily Stats
-        # SQLite 'date' function extracts YYYY-MM-DD
-        rows_daily = self.db.fetch_all("""
-            SELECT
-                date(datetime(created_at, 'unixepoch')) as day,
-                status,
-                COUNT(*) as cnt
-            FROM crawl_log
-            WHERE created_at >= ?
-            GROUP BY day, status
-            ORDER BY day ASC
-        """, (int(time.time()) - days * 86400,))
-
-        daily_map = {}
-        for r in rows_daily:
-            day = r['day']
-            st = r['status']
-            cnt = r['cnt']
-
-            if day not in daily_map:
-                daily_map[day] = {'date': day, 'valid': 0, 'fail': 0, 'total': 0}
-
-            daily_map[day]['total'] += cnt
-
-            if st in [Status.SUCCESS, Status.CACHED]:
-                daily_map[day]['valid'] += cnt
-            elif st in [Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED]:
-                daily_map[day]['fail'] += cnt
-
-        # 2. Overall DB Status Distribution (Snapshot of crawl_status table)
-        rows_status = self.db.fetch_all("""
-            SELECT status, COUNT(*) as cnt FROM crawl_status GROUP BY status
-        """)
-        status_dist = {r['status']: r['cnt'] for r in rows_status}
-
-        return {
-            'daily_trend': list(daily_map.values()),
-            'current_status_dist': status_dist
-        }
-
-    def get_export_csv(self, export_type: str, group_path: str = None) -> str:
-        """生成 CSV 格式的字符串"""
-        import io
-        import csv
-
-        output = io.StringIO()
-        writer = csv.writer(output)
-
-        if export_type == 'global_stats':
-            # 导出全局统计
-            # Header
-            writer.writerow(['Group', 'Spider', 'Round ID', 'Phase', 'Total Items', 'Success', 'Failed', 'Skipped',
-                             'Avg Duration (s)', 'List URL Status'])
-
-            # Data
-            summary = self.get_dashboard_summary()  # 复用现有的聚合逻辑
-            for item in summary:
-                # 获取更详细的 round context
-                ctx = self.round_contexts.get(item['group_path'])
-                phase = ctx.phase if ctx else "IDLE"
-
-                stats = item['stats']['results']  # 使用结果统计
-                perf = item['stats']['perf']
-                list_st = item['list_url_status']['status'] if item.get('list_url_status') else -1
-
-                writer.writerow([
-                    item['group_path'],
-                    item.get('spider', ''),  # summary里可能需要补充spider字段，或者从path解析
-                    item.get('round_id', 0),
-                    phase,
-                    stats.get('total', 0),
-                    stats.get('success', 0),
-                    stats.get('failed', 0),
-                    stats.get('skipped', 0),  # 需要确保 dashboard summary 的 stats 里有 skipped，如果没有需从 traffic 或 ctx 取
-                    perf.get('avg', 0),
-                    list_st
-                ])
-
-        elif export_type == 'group_status':
-            # 导出当前组的状态快照 (crawl_status)
-            writer.writerow(['URL', 'Status', 'HTTP Code', 'Retry Count', 'Last Run', 'Next Run', 'Error Msg'])
-            if group_path:
-                rows = self.db.fetch_all(
-                    "SELECT url, status, http_code, retry_count, last_run_at, next_run_at, state_msg FROM crawl_status WHERE group_path = ?",
-                    (group_path,))
-                for r in rows:
-                    writer.writerow(
-                        [r['url'], r['status'], r['http_code'], r['retry_count'], r['last_run_at'], r['next_run_at'],
-                         r['state_msg']])
-
-        elif export_type == 'group_logs':
-            # 导出当前组的日志历史 (crawl_log)
-            writer.writerow(['ID', 'Time', 'URL', 'Status', 'HTTP Code', 'Duration'])
-            if group_path:
-                rows = self.db.fetch_all(
-                    "SELECT id, created_at, url, status, http_code, duration FROM crawl_log WHERE group_path = ? ORDER BY id DESC LIMIT 10000",
-                    (group_path,))
-                for r in rows:
-                    writer.writerow([r['id'], r['created_at'], r['url'], r['status'], r['http_code'], r['duration']])
-
-        return output.getvalue()

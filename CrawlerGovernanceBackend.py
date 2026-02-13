@@ -9,15 +9,15 @@ from urllib.parse import urljoin
 from flask_cors import CORS
 from flask import Flask, jsonify, request, send_file, render_template
 
-# Import the core logic (Assuming relative import or package structure)
-# from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager, Status
+from IntelligenceCrawler.GovernanceDataEngine import GovernanceDataEngine
+from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager
 
 self_path = os.path.dirname(os.path.abspath(__file__))
 
 
 class CrawlerGovernanceBackend:
     def __init__(self,
-                 governor,  # Type: GovernanceManager
+                 governor: GovernanceManager,
                  host: Optional[str] = "0.0.0.0",
                  port: Optional[int] = 8002,
                  app: Optional[Flask] = None,
@@ -35,6 +35,8 @@ class CrawlerGovernanceBackend:
 
         self.own_app = not app
         self.flask_thread = None
+
+        self.data_engine = GovernanceDataEngine(governor)
 
     def start_service(self, blocking: bool = False):
         """Start the Flask web service."""
@@ -61,6 +63,7 @@ class CrawlerGovernanceBackend:
                 print(f"Flask server running in background.")
 
     def _register_routes(self, wrapper):
+
         def maybe_wrap(fn): return wrapper(fn) if wrapper else fn
 
         def build_url(endpoint: str) -> str: return urljoin(self.base_url, endpoint)
@@ -73,12 +76,14 @@ class CrawlerGovernanceBackend:
                               maybe_wrap(self.get_dashboard_stats), methods=['GET'])
         self.app.add_url_rule(build_url('/api/flow/snapshot'), 'get_flow_snapshot',
                               maybe_wrap(self.get_flow_snapshot), methods=['GET'])
-        self.app.add_url_rule(build_url('/api/groups'), 'get_groups', maybe_wrap(self.get_groups), methods=['GET'])
-        self.app.add_url_rule(build_url('/api/logs'), 'get_logs', maybe_wrap(self.get_logs), methods=['GET'])
+        self.app.add_url_rule(build_url('/api/groups'), 'get_groups',
+                              maybe_wrap(self.get_groups), methods=['GET'])
+        self.app.add_url_rule(build_url('/api/logs'), 'get_logs',
+                              maybe_wrap(self.get_logs), methods=['GET'])
         self.app.add_url_rule(build_url('/api/status/recent'), 'get_recent_statuses',
                               maybe_wrap(self.get_recent_statuses), methods=['GET'])
-        self.app.add_url_rule(build_url('/api/snapshot/<url_hash>'), 'get_snapshot', maybe_wrap(self.get_snapshot),
-                              methods=['GET'])
+        self.app.add_url_rule(build_url('/api/snapshot/<url_hash>'), 'get_snapshot',
+                              maybe_wrap(self.get_snapshot), methods=['GET'])
         self.app.add_url_rule(build_url('/api/dashboard/chart'), 'get_trend_chart',
                               maybe_wrap(self.get_trend_chart), methods=['GET'])
 
@@ -90,18 +95,18 @@ class CrawlerGovernanceBackend:
                               maybe_wrap(self.export_data), methods=['GET'])
 
         # Control APIs (POST)
-        self.app.add_url_rule(build_url('/api/control/<action>'), 'system_control', maybe_wrap(self.system_control),
-                              methods=['POST'])
-        self.app.add_url_rule(build_url('/api/control/reset_stats'), 'reset_stats', maybe_wrap(self.reset_stats),
-                              methods=['POST'])
+        self.app.add_url_rule(build_url('/api/control/<action>'), 'system_control',
+                              maybe_wrap(self.system_control), methods=['POST'])
+        self.app.add_url_rule(build_url('/api/control/reset_stats'), 'reset_stats',
+                              maybe_wrap(self.reset_stats), methods=['POST'])
 
         # RPC APIs (POST)
         self.app.add_url_rule(build_url('/rpc/register_group'), 'rpc_register_group',
                               maybe_wrap(self.rpc_register_group), methods=['POST'])
-        self.app.add_url_rule(build_url('/rpc/should_crawl'), 'rpc_should_crawl', maybe_wrap(self.rpc_should_crawl),
-                              methods=['POST'])
-        self.app.add_url_rule(build_url('/rpc/report_result'), 'rpc_report_result', maybe_wrap(self.rpc_report_result),
-                              methods=['POST'])
+        self.app.add_url_rule(build_url('/rpc/should_crawl'), 'rpc_should_crawl',
+                              maybe_wrap(self.rpc_should_crawl), methods=['POST'])
+        self.app.add_url_rule(build_url('/rpc/report_result'), 'rpc_report_result',
+                              maybe_wrap(self.rpc_report_result), methods=['POST'])
         self.app.add_url_rule(build_url('/rpc/round/lifecycle'), 'rpc_round_lifecycle',
                               maybe_wrap(self.rpc_round_lifecycle), methods=['POST'])
 
@@ -124,38 +129,28 @@ class CrawlerGovernanceBackend:
 
     def get_dashboard_stats(self):
         """
-        Aggregated Global Statistics.
-        Supports 'since' parameter for incremental updates.
+        Aggregated Global + Groups summary (LIVE only).
+        Query:
+          - spider: optional
+          - group_path: optional
+          - include_round: optional int (1/0), default 1
+          - limit_groups: optional int
         """
-        if not self.governor: return jsonify({}), 500
+        if not self.governor:
+            return jsonify({"error": "Init failed"}), 500
 
-        since_time = self._get_since_time()
+        spider = request.args.get('spider')
+        group_path = request.args.get('group_path')
+        include_round = request.args.get('include_round', default=1, type=int)
+        limit_groups = request.args.get('limit_groups', type=int)
 
-        # 1. Session Stats (Memory or DB Aggregation via Governor)
-        session_stats = self.governor.get_session_stats(since_time=since_time)
-
-        # 2. Pending Count (Persistent State via Governor Interface)
-        pending_count = self.governor.get_pending_count()
-
-        # sched = session_stats.get("scheduler") or {}
-        # sched_stats = sched.get("stats") or {}
-        # sched_cfg = sched.get("config") or {}
-
-        return jsonify({
-            "active_spiders": 0,  # Placeholder, or use len(governor.group_stats)
-            "success_rate": session_stats['success_rate'],
-            "total_requests": session_stats['total'],
-            "network_errors": session_stats['failed'],
-            "running_count": session_stats.get('running', 0),  # Added running count
-            "pending_count": pending_count,
-            "session_start": session_stats['session_start'],
-
-            # "flow_running": sched_stats.get("running", 0),
-            # "flow_queued": sched_stats.get("queued", 0),
-            # "flow_sleeping": sched_stats.get("sleeping", 0),
-            # "flow_max_concurrency": sched_cfg.get("max_concurrency"),
-            # "flow_startup_stagger": sched_cfg.get("startup_stagger"),
-        })
+        payload = self.data_engine.live_summary(
+            spider=spider,
+            group_path=group_path,
+            include_round=bool(include_round),
+            limit_groups=limit_groups
+        )
+        return jsonify(payload)
 
     def get_flow_snapshot(self):
         if not self.governor or not self.governor.scheduler:
@@ -166,62 +161,114 @@ class CrawlerGovernanceBackend:
 
     def get_groups(self):
         """
-        Group Hierarchy & Statistics.
-        Supports 'since' parameter.
-        Only returns groups registered in the current runtime session.
+        Group registry + per-group stats (LIVE only).
+        Returns only the 'groups' array from live_summary to keep endpoint semantics.
         """
-        if not self.governor: return jsonify({"error": "Init failed"}), 500
+        if not self.governor:
+            return jsonify({"error": "Init failed"}), 500
 
-        spider_filter = request.args.get('spider')
-        since_time = self._get_since_time()
+        spider = request.args.get('spider')
+        group_path = request.args.get('group_path')
+        include_round = request.args.get('include_round', default=1, type=int)
+        limit_groups = request.args.get('limit_groups', type=int)
 
-        # Delegate to Governor's smart aggregation
-        summary = self.governor.get_dashboard_summary(spider_filter=spider_filter, since_time=since_time)
-        return jsonify(summary)
+        summary = self.data_engine.live_summary(
+            spider=spider,
+            group_path=group_path,
+            include_round=bool(include_round),
+            limit_groups=limit_groups
+        )
+        return jsonify(summary.get("groups", []))
 
     def get_logs(self):
         """
-        Streaming Logs.
-        Supports 'since' parameter to fetch new logs only.
+        Logs:
+          - LIVE: no time window -> latest memory events with optional filters
+          - QUERY: with start_ts & end_ts -> DB logs
+        Query:
+          - limit: int (LIVE only, default 100)
+          - status: int (optional)
+          - spider: str (optional)
+          - group_path: str (optional)
+          - start_ts: float seconds (QUERY only)
+          - end_ts: float seconds (QUERY only)
         """
-        if not self.governor: return jsonify({"error": "Init failed"}), 500
+        if not self.governor:
+            return jsonify({"error": "Init failed"}), 500
 
+        # Filters
         limit = request.args.get('limit', 100, type=int)
         status = request.args.get('status', type=int)
         spider = request.args.get('spider')
+        group_path = request.args.get('group_path')
 
-        since = request.args.get('since', type=float)
-        until = request.args.get('until', type=float)
+        # Time window -> QUERY
+        start_ts = request.args.get('start_ts', type=float)
+        end_ts = request.args.get('end_ts', type=float)
 
-        # Delegate to Governor
-        logs = self.governor.get_logs(spider_name=spider, status=status, limit=limit, since_time=since, until_time=until)
-        return jsonify(logs)
+        if start_ts is not None and end_ts is not None:
+            if end_ts <= start_ts:
+                end_ts = start_ts + 1.0
+            payload = self.data_engine.query_logs(
+                start_ts=float(start_ts),
+                end_ts=float(end_ts),
+                group_path=group_path,
+                spider=spider,
+                status=status,
+                limit=max(1, int(limit))
+            )
+            return jsonify(payload)
+
+        # No window -> LIVE
+        payload = self.data_engine.live_logs(
+            group_path=group_path,
+            spider=spider,
+            status=status,
+            limit=max(1, int(limit))
+        )
+        return jsonify(payload)
 
     def get_recent_statuses(self):
         """
-        Latest URL Statuses (Live Memory View).
-        Fetch the latest activity directly from memory.
-        NO 'since' parameter used here as it returns a snapshot of the current state.
+        Latest URL statuses (LIVE-only, dedup by URL).
+        Query:
+          - limit: int (default 100)
+          - spider: str (optional)
+          - group_path: str (optional)
+          - status: int (optional)
         """
-        if not self.governor: return jsonify({"error": "Init failed"}), 500
+        if not self.governor:
+            return jsonify({"error": "Init failed"}), 500
 
         limit = request.args.get('limit', 100, type=int)
         spider = request.args.get('spider')
+        group_path = request.args.get('group_path')
         status = request.args.get('status', type=int)
 
-        # Removed 'since_time' logic as this is a memory snapshot
-        # Delegate to Governor (Memory Only)
-        statuses = self.governor.get_recent_statuses(limit=limit, spider=spider, status=status)
-        return jsonify(statuses)
+        payload = self.data_engine.live_statuses(
+            group_path=group_path,
+            spider=spider,
+            status=status,
+            limit=max(1, int(limit))
+        )
+        return jsonify(payload)
 
     def get_snapshot(self, url_hash: str):
         """
-        Serve file content.
+        Serve snapshot file by url_hash.
+        Requires Engine to resolve hash -> file path via DB crawl_status.url_hash.
         """
-        if not url_hash.isalnum(): return jsonify({"error": "Invalid hash"}), 400
+        if not self.governor:
+            return jsonify({"error": "Init failed"}), 500
 
-        # Delegate path lookup to Governor
-        file_path = self.governor.get_snapshot_path(url_hash)
+        if not url_hash.isalnum():
+            return jsonify({"error": "Invalid hash"}), 400
+
+        try:
+            file_path = self.data_engine.resolve_snapshot_path(url_hash)
+        except AttributeError:
+            # Engine 尚未实现该方法
+            return jsonify({"error": "Engine missing resolve_snapshot_path(url_hash)"}), 501
 
         if not file_path:
             return jsonify({"error": "Snapshot not found"}), 404
@@ -233,99 +280,56 @@ class CrawlerGovernanceBackend:
 
     def get_trend_chart(self):
         """
-        Trend chart API adapter.
-
-        Supports BOTH:
-          - new params (frontend): start_ts, end_ts, bucket_minutes, group_filter, use_updated_at, include_cached_as_success
-          - legacy params (backend old): start, end, bucket, group, time_field
-
-        Returns:
-          List[ {ts, time, success, fail, total} ]
+        Trend chart (QUERY-only).
+        Query:
+          - start_ts, end_ts: float seconds
+          - bucket_minutes: int (default 60)
+          - group_filter: str (optional)
+          - use_updated_at: int 1/0 (default 1)
+          - include_cached_as_success: int 1/0 (default 0)
         """
         if not self.governor:
             return jsonify({"error": "Init failed"}), 500
 
         now = time.time()
 
-        # --- 1) Parse time range (seconds) ---
-        # Prefer new param names used by frontend
         start_ts = request.args.get('start_ts', type=float)
         end_ts = request.args.get('end_ts', type=float)
 
-        # Fallback to legacy names
-        if start_ts is None:
-            start_ts = request.args.get('start', type=float)
-        if end_ts is None:
-            end_ts = request.args.get('end', type=float)
-
-        # Defaults
         if start_ts is None:
             start_ts = now - 3600
         if end_ts is None:
             end_ts = now
-
-        # Guard
         if end_ts <= start_ts:
-            # swap or clamp
-            end_ts = start_ts + 1
+            end_ts = start_ts + 1.0
 
-        # --- 2) Parse bucket size (minutes) ---
         bucket_minutes = request.args.get('bucket_minutes', type=int)
-        if bucket_minutes is None:
-            bucket_minutes = request.args.get('bucket', type=int)
         if bucket_minutes is None or bucket_minutes <= 0:
             bucket_minutes = 60
 
-        # --- 3) Parse group filter ---
         group_filter = request.args.get('group_filter', type=str)
-        if group_filter is None:
-            group_filter = request.args.get('group', type=str)
 
-        # --- 4) Parse time field selector ---
-        # Frontend uses use_updated_at=1/0
-        # Legacy backend uses time_field=updated_at/last_run_at
-        use_updated_at = request.args.get('use_updated_at', type=int)
-        if use_updated_at is None:
-            time_field = request.args.get('time_field', default='updated_at', type=str)
-            use_updated_at = 0 if (time_field or '').lower() == 'last_run_at' else 1
+        use_updated_at = request.args.get('use_updated_at', default=1, type=int)
+        include_cached = request.args.get('include_cached_as_success', default=0, type=int)
 
-        use_updated_at_bool = bool(int(use_updated_at))
-
-        # --- 5) Cached-as-success flag ---
-        include_cached = request.args.get('include_cached_as_success', type=int)
-        if include_cached is None:
-            # Optional legacy alias if you ever used it:
-            include_cached = request.args.get('include_cached', type=int)
-        include_cached_bool = bool(int(include_cached or 0))
-
-        # --- 6) Call core ---
-        try:
-            data = self.governor.get_log_trend_stats(
-                start_ts=float(start_ts),
-                end_ts=float(end_ts),
-                bucket_minutes=int(bucket_minutes),
-                group_filter=group_filter,
-                use_updated_at=use_updated_at_bool,
-                include_cached_as_success=include_cached_bool
-            )
-            return jsonify(data)
-        except TypeError as e:
-            # Most common: core signature mismatch
-            return jsonify({"error": f"Trend API signature mismatch: {str(e)}"}), 500
-        except Exception as e:
-            return jsonify({"error": f"Trend API error: {str(e)}"}), 500
+        payload = self.data_engine.query_trend(
+            start_ts=float(start_ts),
+            end_ts=float(end_ts),
+            bucket_minutes=int(bucket_minutes),
+            group_filter=group_filter,
+            use_updated_at=bool(int(use_updated_at)),
+            include_cached_as_success=bool(int(include_cached))
+        )
+        return jsonify(payload)
 
     def get_history_stats(self):
         """
-        API for Historical Stats Sub-page.
-        Query Params:
-          - days: int (default 7)
+        Deprecated: no Engine counterpart for 'history stats' yet.
+        Please use:
+          - /api/dashboard/chart   for trend (QUERY)
+          - /api/logs              for logs (LIVE / QUERY)
         """
-        if not self.governor: return jsonify({"error": "Init failed"}), 500
-
-        days = request.args.get('days', 7, type=int)
-        data = self.governor.get_db_history_stats(days=days)
-        return jsonify(data)
+        return jsonify({"error": "deprecated endpoint; use /api/dashboard/chart or /api/logs"}), 410
 
     def get_group_round_status(self):
         """
@@ -346,33 +350,43 @@ class CrawlerGovernanceBackend:
 
     def export_data(self, target):
         """
-        导出数据接口。
-        Target: 'global', 'group_status', 'group_logs'
-        Query: group (当 target 不是 global 时必填)
+        CSV export.
+        target: 'global' | 'group_logs' | 'group_status' (reserved)
+        Query:
+          - group: str (for group_* targets)
+          - start_ts, end_ts: float seconds (optional; if provided and target == group_logs -> QUERY)
         """
-        from flask import Response  # 确保引入 Response
+        from flask import Response
 
-        if not self.governor: return jsonify({"error": "Init failed"}), 500
+        if not self.governor:
+            return jsonify({"error": "Init failed"}), 500
 
         group = request.args.get('group')
-        csv_content = ""
-        filename = f"export_{target}_{int(time.time())}.csv"
+        start_ts = request.args.get('start_ts', type=float)
+        end_ts = request.args.get('end_ts', type=float)
 
         if target == 'global':
-            csv_content = self.governor.get_export_csv('global_stats')
-        elif target == 'group_status':
-            if not group: return jsonify({"error": "Missing group"}), 400
-            csv_content = self.governor.get_export_csv('group_status', group_path=group)
-            filename = f"status_{group.replace('/', '_')}.csv"
+            csv_content = self.data_engine.export_csv('global')
+            filename = f"global_{int(time.time())}.csv"
+
         elif target == 'group_logs':
-            if not group: return jsonify({"error": "Missing group"}), 400
-            csv_content = self.governor.get_export_csv('group_logs', group_path=group)
+            if not group:
+                return jsonify({"error": "Missing group"}), 400
+            # 如果提供了时间窗 -> 传给 Engine 走 QUERY；否则 Engine 会走 LIVE
+            csv_content = self.data_engine.export_csv(
+                'group_logs', group_path=group, start_ts=start_ts, end_ts=end_ts
+            )
             filename = f"logs_{group.replace('/', '_')}.csv"
+
+        elif target == 'group_status':
+            # Engine 里目前是 reserved/未实现；直接返回错误更明确
+            return jsonify({"error": "export type 'group_status' not supported yet"}), 400
+
         else:
             return jsonify({"error": "Invalid export target"}), 400
 
         return Response(
-            csv_content,
+            csv_content or "",
             mimetype="text/csv",
             headers={"Content-disposition": f"attachment; filename={filename}"}
         )
@@ -466,7 +480,7 @@ class CrawlerGovernanceBackend:
 
         elif action == "finish":
             delay = float(data.get('next_run_delay', 0))
-            self.governor.finish_round(group, next_run_delay=delay)
+            self.governor.finish_round(group, next_run_delay=int(delay))
             return jsonify({"status": "finished", "group": group})
 
         else:
