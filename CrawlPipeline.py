@@ -97,7 +97,7 @@ class CrawlPipeline:
         self.e_fetcher = e_fetcher
         self.extractor = extractor
         self.log = log_callback
-        self.crawler_governor = crawler_governor or GovernanceManager()
+        self.crawler_governor = crawler_governor
 
             # --- State Properties ---
         self.channels: List[str] = []
@@ -305,8 +305,8 @@ class CrawlPipeline:
 
     def extract_articles(
         self,
-        article_filter: Optional[Callable[[str, str], bool]] = None,
-        content_handler: Optional[Callable[[str, "ExtractionResult"], bool]] = None,
+        article_filter: Optional[Callable[[str], bool]] = None,
+        content_handler: Optional[Callable[[str, str, "ExtractionResult"], bool]] = None,
         exception_handler: Optional[Callable[[str, Exception], None]] = None,
         fetcher_kwargs: Optional[dict] = None,
         extractor_kwargs: Optional[dict] = None
@@ -325,13 +325,13 @@ class CrawlPipeline:
         for article_url, channel_group in self.articles:
             grouped[channel_group].append(article_url)
 
-        contents: List[Tuple[str, "ExtractionResult"]] = []
+        contents: List[Tuple[str, str, "ExtractionResult"]] = []
 
         for channel_group, article_urls in grouped.items():
             # Apply per-group filtering
             extract_article_urls: List[str] = []
             for article_url in article_urls:
-                if article_filter and not article_filter(article_url, channel_group):
+                if article_filter and not article_filter(article_url):
                     self.log(f"Skipping article (filtered): {article_url}")
                     continue
                 extract_article_urls.append(article_url)
@@ -353,16 +353,16 @@ class CrawlPipeline:
 
                 with ctx as task:
                     if self.crawler_governor and not self.crawler_governor.should_crawl(article_url):
-                        task.ignore()
+                        task.ignore(state_msg='Already fetched - Ignore.')
                         continue
 
                     result, exception = job.run()
 
                     if exception is None:
                         if result:
-                            contents.append((article_url, result))
+                            contents.append((article_url, channel_group, result))
                             if content_handler:
-                                content_handler(article_url, result)
+                                content_handler(article_url, channel_group, result)
                             if task: task.success()
                         else:
                             # No content is not an error; it is a skip.
