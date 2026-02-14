@@ -505,49 +505,45 @@ def drive_pipeline_batch(pipeline: CrawlPipeline, config: dict):
         channel_tables = {}
         entry_points_list = entry_points
 
-    with pipeline.crawler_governor.schedule_pace(f"{pipeline.name}:Channel", 15 * 60, None):
+    # ============== 1. Discover Channels ==============
 
-        # ============== 1. Discover Channels ==============
+    pipeline.discover_channels(
+        entry_point=entry_points_list,
+        start_date=start_date,
+        end_date=end_date,
+        fetcher_kwargs=d_fetcher_kwargs)
 
-        pipeline.discover_channels(
-            entry_point=entry_points_list,
-            start_date=start_date,
-            end_date=end_date,
-            fetcher_kwargs=d_fetcher_kwargs)
+    # ============== 2. Discover Articles ==============
 
-        # ============== 2. Discover Articles ==============
+    # Only support channel_list_filter
+    channel_filter = config.get('channel_filter', {})
+    if channel_filter and 'channel_list_filter' in channel_filter:
+        channel_list_filter_params = channel_filter['channel_list_filter']
+        channel_filter = partial(common_channel_filter, channel_filter_list=channel_list_filter_params)
+    else:
+        channel_filter = None
 
-        # Only support channel_list_filter
-        channel_filter = config.get('channel_filter', {})
-        if channel_filter and 'channel_list_filter' in channel_filter:
-            channel_list_filter_params = channel_filter['channel_list_filter']
-            channel_filter = partial(common_channel_filter, channel_filter_list=channel_list_filter_params)
-        else:
-            channel_filter = None
+    pipeline.discover_articles(
+        channel_tables=channel_tables,
+        channel_filter=channel_filter,
+        fetcher_kwargs=d_fetcher_kwargs)
 
-        pipeline.discover_articles(
-            channel_tables=channel_tables,
-            channel_filter=channel_filter,
-            fetcher_kwargs=d_fetcher_kwargs)
+    # =============== 3. Extract Articles ===============
 
-    with pipeline.crawler_governor.schedule_pace(f"{pipeline.name}:Article", 0, None):
+    article_filter = config.get('article_filter', None)
+    content_handler = config.get('content_handler', None)
+    exception_handler = config.get('exception_handler', None)
 
-        # =============== 3. Extract Articles ===============
+    e_fetcher_kwargs = config.get('e_fetcher_kwargs', { })
+    extractor_kwargs = config.get('extractor_kwargs', { })
 
-        article_filter = config.get('article_filter', None)
-        content_handler = config.get('content_handler', None)
-        exception_handler = config.get('exception_handler', None)
-
-        e_fetcher_kwargs = config.get('e_fetcher_kwargs', { })
-        extractor_kwargs = config.get('extractor_kwargs', { })
-
-        pipeline.extract_articles(
-            article_filter=article_filter,
-            content_handler=content_handler,
-            exception_handler=exception_handler,
-            fetcher_kwargs=e_fetcher_kwargs,
-            extractor_kwargs=extractor_kwargs
-        )
+    pipeline.extract_articles(
+        article_filter=article_filter,
+        content_handler=content_handler,
+        exception_handler=exception_handler,
+        fetcher_kwargs=e_fetcher_kwargs,
+        extractor_kwargs=extractor_kwargs
+    )
 
 
 def run_pipeline(
