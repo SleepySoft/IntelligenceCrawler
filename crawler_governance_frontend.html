@@ -205,7 +205,11 @@
                     </div>
                 </div>
 
-                <div x-show="viewMode === 'CHART'" class="flex-1 flex flex-col min-h-0 bg-gray-950 relative" x-cloak>
+                <div x-show="viewMode === 'CHART'"
+                     class="flex-1 flex flex-col min-h-0 bg-gray-950 relative"
+                     x-data="{ mouseX: 0, mouseY: 0 }"
+                     @mousemove="mouseX = $event.clientX; mouseY = $event.clientY"
+                     x-cloak>
 
                     <div class="px-4 py-2 border-b border-gray-800 flex justify-between items-center shrink-0 bg-gray-900/80 z-20">
                         <div class="flex gap-2">
@@ -218,24 +222,15 @@
                             <button @click="fetchChart()" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 px-3 rounded text-gray-300 transition-colors">Refresh</button>
                         </div>
 
-                        <div class="flex items-center gap-4 text-xs font-mono h-6">
-                            <div x-show="!hoverBar" class="text-gray-600 italic flex items-center gap-2">
-                                <span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span> Success
-                                <span class="w-1.5 h-1.5 rounded-full bg-red-600"></span> Fail
-                                <span class="ml-2 not-italic text-gray-700">Hover bars for details</span>
-                            </div>
-                            <div x-show="hoverBar" class="flex items-center gap-3 animate-fade-in">
-                                <span class="text-gray-200 font-bold bg-gray-800 px-1.5 rounded" x-text="formatTime(hoverBar?.bucket_ts_ms)"></span>
-                                <span class="text-emerald-400">OK <span x-text="hoverBar?.success" class="font-bold"></span></span>
-                                <span class="text-red-400">Err <span x-text="hoverBar?.fail" class="font-bold"></span></span>
-                                <span class="text-gray-500">Total <span x-text="hoverBar?.total"></span></span>
-                            </div>
+                        <div class="flex items-center gap-3 text-[10px] text-gray-500 uppercase font-bold tracking-wider">
+                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-600"></span> Success</div>
+                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-600"></span> Fail</div>
                         </div>
                     </div>
 
-                    <div class="flex-1 w-full min-h-0 flex flex-col justify-center relative">
+                    <div class="flex-1 w-full min-h-0 flex flex-col justify-center relative overflow-hidden">
 
-                        <div class="w-full h-[85%] relative flex flex-row">
+                        <div class="w-full h-[60%] relative flex flex-row">
 
                             <div class="w-10 h-full border-r border-gray-800 flex flex-col justify-between text-[9px] text-gray-500 font-mono text-right pr-2 shrink-0 select-none z-10 -mt-1.5">
                                 <span><span x-text="niceCount(chartMax)"></span></span>
@@ -248,15 +243,16 @@
                             <div class="flex-1 h-full relative min-w-0">
 
                                 <div class="absolute inset-0 flex flex-col justify-between pointer-events-none z-0">
-                                    <div class="border-t border-gray-800/50 w-full h-0 border-dashed"></div>
-                                    <div class="border-t border-gray-800/50 w-full h-0 border-dashed"></div>
-                                    <div class="border-t border-gray-800/50 w-full h-0 border-dashed"></div>
-                                    <div class="border-t border-gray-800/50 w-full h-0 border-dashed"></div>
-                                    <div class="border-t border-gray-800/50 w-full h-0"></div> </div>
+                                    <div class="border-t border-gray-800/30 w-full h-0 border-dashed"></div>
+                                    <div class="border-t border-gray-800/30 w-full h-0 border-dashed"></div>
+                                    <div class="border-t border-gray-800/30 w-full h-0 border-dashed"></div>
+                                    <div class="border-t border-gray-800/30 w-full h-0 border-dashed"></div>
+                                    <div class="border-t border-gray-800/30 w-full h-0"></div>
+                                </div>
 
-                                <div class="w-full h-full overflow-x-auto overflow-y-hidden custom-scrollbar flex items-end px-2 z-10 relative" x-ref="chartContainer">
+                                <div class="w-full h-full overflow-x-auto overflow-y-visible custom-scrollbar flex items-end px-2 z-10 relative pb-8" x-ref="chartContainer">
 
-                                    <div x-show="chartData.length === 0" class="absolute inset-0 flex items-center justify-center text-gray-600 z-20">
+                                    <div x-show="chartData.length === 0" class="absolute inset-0 flex items-center justify-center text-gray-600 z-20 pb-8">
                                         No data available for this range
                                     </div>
 
@@ -268,24 +264,17 @@
                                             @mouseenter="hoverBar = bar"
                                             @mouseleave="hoverBar = null">
 
-                                            <div class="absolute inset-x-[-2px] bottom-0 top-0 bg-gray-800/50 opacity-0 group-hover/bar:opacity-100 transition-opacity rounded-sm pointer-events-none border-l border-r border-gray-700/50"></div>
+                                            <div class="absolute inset-x-[-2px] bottom-0 top-[-20px] bg-white/5 opacity-0 group-hover/bar:opacity-100 transition-opacity rounded-sm pointer-events-none"></div>
 
                                             <div class="w-[8px] mx-auto transition-all duration-200 rounded-t-[1px] relative flex flex-col justify-end overflow-hidden"
                                                     :class="bar.total === 0 ? 'bg-gray-800 h-[1px]' : 'bg-emerald-600 hover:bg-emerald-500'"
                                                     :style="`height: ${Math.max(0.5, (bar.total / (chartMax || 1)) * 100)}%`">
-
-                                                    <div class="w-full bg-red-500"
-                                                        :style="`height: ${bar.total > 0 ? (bar.fail / bar.total) * 100 : 0}%`"></div>
+                                                    <div class="w-full bg-red-500" :style="`height: ${bar.total > 0 ? (bar.fail / bar.total) * 100 : 0}%`"></div>
                                             </div>
 
-                                            <div class="absolute top-full mt-3 left-1/2 -translate-x-1/2 text-[9px] text-gray-500 font-mono whitespace-nowrap hidden group-hover/bar:block"
-                                                 style="z-index: 30;">
-                                                <span class="bg-gray-900 text-gray-200 px-1 rounded border border-gray-700" x-text="formatTimeShort(bar.bucket_ts_ms)"></span>
-                                            </div>
-
-                                            <div class="absolute top-full mt-3 left-1/2 -translate-x-1/2 text-[9px] text-gray-600 font-mono whitespace-nowrap group-hover/bar:hidden"
-                                                    x-show="shouldShowLabel(index, chartData.length)"
-                                                    x-text="formatTimeShort(bar.bucket_ts_ms)">
+                                            <div class="absolute top-full mt-2 left-1/2 -translate-x-1/2 text-[9px] text-gray-600 font-mono whitespace-nowrap"
+                                                 x-show="shouldShowLabel(index, chartData.length)"
+                                                 x-text="formatTimeShort(bar.bucket_ts_ms)">
                                             </div>
                                         </div>
                                         <div class="shrink-0 w-[4px]"></div>
@@ -297,8 +286,31 @@
                         </div>
                     </div>
 
-                </div>
+                    <div class="fixed z-50 pointer-events-none bg-gray-900/95 border border-gray-700 shadow-xl rounded px-3 py-2 text-xs backdrop-blur-sm transition-opacity duration-75"
+                         style="will-change: top, left;"
+                         :style="`top: ${mouseY + 15}px; left: ${mouseX + 15}px`"
+                         x-show="hoverBar"
+                         x-transition:enter="opacity-0 scale-95"
+                         x-transition:enter-end="opacity-100 scale-100"
+                         x-transition:leave="opacity-100"
+                         x-transition:leave-end="opacity-0">
 
+                        <div class="font-bold text-gray-300 mb-1 border-b border-gray-700 pb-1"
+                             x-text="formatTime(hoverBar?.bucket_ts_ms)"></div>
+
+                        <div class="grid grid-cols-2 gap-x-4 gap-y-1 font-mono">
+                            <span class="text-emerald-400">Success:</span>
+                            <span class="text-right text-gray-200" x-text="hoverBar?.success"></span>
+
+                            <span class="text-red-400">Fail:</span>
+                            <span class="text-right text-gray-200" x-text="hoverBar?.fail"></span>
+
+                            <span class="text-gray-500">Total:</span>
+                            <span class="text-right text-gray-400" x-text="hoverBar?.total"></span>
+                        </div>
+                    </div>
+
+                </div>
 
             </div>
         </section>
