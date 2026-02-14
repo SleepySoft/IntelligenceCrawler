@@ -318,32 +318,79 @@
 
     <div x-show="flowModalOpen" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm" @click.self="flowModalOpen = false">
         <div class="bg-gray-900 w-[600px] max-h-[80vh] rounded border border-gray-700 flex flex-col shadow-xl overflow-hidden">
-            <div class="h-10 bg-gray-800 flex justify-between items-center px-4 border-b border-gray-700">
-                <span class="text-xs font-bold">Flow Scheduler Snapshot</span>
+            <div class="h-10 bg-gray-800 flex justify-between items-center px-4 border-b border-gray-700 shrink-0">
+                <div class="flex items-center gap-2">
+                    <span class="text-xs font-bold text-gray-200">Flow Scheduler Snapshot</span>
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                </div>
                 <button @click="flowModalOpen=false" class="text-gray-400 hover:text-white">✕</button>
             </div>
-            <div class="p-4 overflow-y-auto text-xs font-mono space-y-4">
+
+            <div class="p-4 overflow-y-auto text-xs font-mono space-y-4 custom-scrollbar">
+
                 <div class="grid grid-cols-3 gap-2 text-center">
-                    <div class="bg-gray-800 p-2 rounded"><div class="text-emerald-400 text-lg" x-text="flowSnapshot.stats?.running || 0"></div><div class="text-gray-500">Running</div></div>
-                    <div class="bg-gray-800 p-2 rounded"><div class="text-blue-400 text-lg" x-text="flowSnapshot.stats?.queued || 0"></div><div class="text-gray-500">Queued</div></div>
-                    <div class="bg-gray-800 p-2 rounded"><div class="text-gray-400 text-lg" x-text="flowSnapshot.stats?.sleeping || 0"></div><div class="text-gray-500">Sleeping</div></div>
-                </div>
-                <div>
-                    <h4 class="text-gray-500 mb-1 border-b border-gray-800">Running Keys</h4>
-                    <template x-for="item in flowSnapshot.details?.running || []" :key="item.key">
-                        <div class="flex justify-between py-0.5 text-emerald-300">
-                            <span x-text="item.key"></span><span x-text="item.duration + 's'"></span>
+                    <div class="bg-gray-800/60 border border-gray-700 p-2 rounded">
+                        <div class="text-lg text-emerald-400 flex justify-center items-baseline gap-1">
+                            <span x-text="flowSnapshot.stats?.running || 0"></span>
+                            <span class="text-xs text-gray-600 font-normal">/ <span x-text="flowSnapshot.config?.max_concurrency ?? '-'"></span></span>
                         </div>
-                    </template>
+                        <div class="text-[10px] text-gray-500 uppercase font-bold">Concurrency</div>
+                    </div>
+
+                    <div class="bg-gray-800/60 border border-gray-700 p-2 rounded">
+                        <div class="text-lg text-blue-400" x-text="flowSnapshot.stats?.queued || 0"></div>
+                        <div class="text-[10px] text-gray-500 uppercase font-bold">Queued</div>
+                    </div>
+
+                    <div class="bg-gray-800/60 border border-gray-700 p-2 rounded">
+                        <div class="text-lg text-gray-300" x-text="flowSnapshot.stats?.sleeping || 0"></div>
+                        <div class="text-[10px] text-gray-500 uppercase font-bold">Sleeping</div>
+                    </div>
                 </div>
-                 <div>
-                    <h4 class="text-gray-500 mb-1 border-b border-gray-800">Queued</h4>
-                    <template x-for="item in flowSnapshot.details?.queued || []" :key="item.key">
-                        <div class="flex justify-between py-0.5 text-blue-300">
-                            <span x-text="item.key"></span><span x-text="'Wait: ' + item.wait + 's'"></span>
-                        </div>
-                    </template>
+
+                <div x-show="(flowSnapshot.details?.running?.length || 0) > 0">
+                    <h4 class="text-[10px] text-emerald-500 font-bold uppercase mb-1 border-b border-gray-800 pb-1">Running Tasks</h4>
+                    <div class="space-y-0.5">
+                        <template x-for="item in flowSnapshot.details?.running || []" :key="item.key">
+                            <div class="flex justify-between items-center py-1 border-b border-gray-800/30 last:border-0">
+                                <span class="text-emerald-300 truncate pr-2" x-text="item.key"></span>
+                                <span class="text-gray-500 shrink-0" x-text="(item.duration || 0).toFixed(1) + 's'"></span>
+                            </div>
+                        </template>
+                    </div>
                 </div>
+
+                <div x-show="(flowSnapshot.details?.queued?.length || 0) > 0">
+                    <h4 class="text-[10px] text-blue-500 font-bold uppercase mb-1 border-b border-gray-800 pb-1">Queued</h4>
+                    <div class="space-y-0.5">
+                        <template x-for="item in flowSnapshot.details?.queued || []" :key="item.key">
+                            <div class="flex justify-between items-center py-1 border-b border-gray-800/30 last:border-0">
+                                <span class="text-blue-300 truncate pr-2" x-text="item.key"></span>
+                                <span class="text-gray-600 shrink-0" x-text="'Pool: ' + (item.wait || 0).toFixed(1) + 's'"></span>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <div x-show="(flowSnapshot.details?.sleeping?.length || 0) > 0">
+                    <h4 class="text-[10px] text-yellow-600 font-bold uppercase mb-1 border-b border-gray-800 pb-1">Sleeping / Rate Limited</h4>
+                    <div class="space-y-0.5">
+                        <template x-for="item in flowSnapshot.details?.sleeping || []" :key="item.key">
+                            <div class="flex justify-between items-center py-1 border-b border-gray-800/30 last:border-0">
+                                <span class="text-gray-400 truncate pr-2" x-text="item.key"></span>
+                                <div class="flex items-center gap-2 shrink-0">
+                                    <span class="text-[9px] text-gray-600 uppercase">Wait</span>
+                                    <span class="text-yellow-500 font-bold" x-text="(item.remaining || item.duration || 0).toFixed(1) + 's'"></span>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <div x-show="!flowSnapshot.stats?.running && !flowSnapshot.stats?.queued && !flowSnapshot.stats?.sleeping" class="text-center text-gray-600 italic py-4">
+                    Scheduler is idle.
+                </div>
+
             </div>
         </div>
     </div>
@@ -356,7 +403,11 @@
                 groups: [],
                 logs: [],
                 // Initialize fully to avoid undefined errors
-                flowSnapshot: { stats: { running: 0, queued: 0, sleeping: 0 }, details: { running: [], queued: [] } },
+                flowSnapshot: {
+                    stats: { running: 0, queued: 0, sleeping: 0 },
+                    details: { running: [], queued: [], sleeping: [] },
+                    config: { max_concurrency: null }
+                },
 
                 // UI State
                 viewMode: 'LIVE', // LIVE, HISTORY, CHART
@@ -379,11 +430,27 @@
 
                 // System Control
                 controlState: 'NORMAL',
+                flowInterval: null,
                 flowModalOpen: false,
 
                 init() {
                     this.poll();
-                    setInterval(() => this.poll(), 2000);
+                    setInterval(() => this.poll(), 2000); // 全局轮询
+
+                    // [新增] 监听 Flow 弹窗打开状态，实现自动刷新
+                    this.$watch('flowModalOpen', (value) => {
+                        if (value) {
+                            // 打开时：立即获取一次，然后每 1秒 刷新一次
+                            this.fetchFlowDetails();
+                            this.flowInterval = setInterval(() => this.fetchFlowDetails(), 1000);
+                        } else {
+                            // 关闭时：清除定时器，停止刷新
+                            if (this.flowInterval) {
+                                clearInterval(this.flowInterval);
+                                this.flowInterval = null;
+                            }
+                        }
+                    });
                 },
 
                 async poll() {
