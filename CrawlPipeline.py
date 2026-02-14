@@ -24,6 +24,43 @@ from IntelligenceCrawler.Fetcher import Fetcher, fetcher_factory
 BASE_OUTPUT_DIR = "CRAWLER_OUTPUT"
 
 
+def auto_group_name_by_url(url_list):
+    # 1. 分组数据结构: { 'nhk': {'domain': 'nhk', 'paths': [...]}, ... }
+    groups = {}
+
+    for url in url_list:
+        # 使用 tldextract 提取精准的 domain (如 'nhk')
+        extracted = tldextract.extract(url)
+        domain_label = extracted.domain  # 这里只取 'nhk'，丢弃 .or.jp
+
+        parsed_path = urlparse(url).path
+
+        if domain_label not in groups:
+            groups[domain_label] = []
+        groups[domain_label].append(parsed_path)
+
+    final_list = []
+
+    # 2. 处理公共路径
+    for domain, paths in groups.items():
+        # 技巧：使用 os.path.commonprefix 找出最长公共路径
+        if len(paths) > 1:
+            common = os.path.commonprefix(paths)
+            # 回退到最后一个 '/'，防止切割单词 (比如 /new 和 /news 可能会被切成 /new)
+            if '/' in common:
+                common = common[:common.rfind('/') + 1]
+        else:
+            # 如果只有一个链接，我们假设只保留所在文件夹作为上下文，或者不去除
+            common = os.path.dirname(paths[0]) + '/'
+
+        for path in paths:
+            # 替换掉公共部分
+            short_path = path.replace(common, "", 1).lstrip('/')
+            final_list.append(f"{domain}/{short_path}")
+
+    return final_list
+
+
 def format_exception_with_traceback(exception: Exception) -> str:
     if exception.__traceback__ is None:
         return f"{type(exception).__name__}: {exception}\n(No traceback)"
@@ -499,10 +536,10 @@ def drive_pipeline_batch(pipeline: CrawlPipeline, config: dict):
     d_fetcher_kwargs = config.get('d_fetcher_kwargs', {})
 
     if isinstance(entry_points, dict):
-        channel_tables = {value: key for key, value in entry_points.items()}
+        channel_tables = {value: f"{pipeline.name}/{key}" for key, value in entry_points.items()}
         entry_points_list = list(entry_points.values())
     else:
-        channel_tables = {}
+        channel_tables = auto_group_name_by_url(entry_points)
         entry_points_list = entry_points
 
     # ============== 1. Discover Channels ==============

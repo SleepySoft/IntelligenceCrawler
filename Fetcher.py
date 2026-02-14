@@ -263,6 +263,7 @@ class PlaywrightFetcher(Fetcher):
                  proxy: Optional[str] = None,
                  timeout_s: int = 20,
                  stealth: bool = False,
+                 show_browser: bool = False,
                  pause_browser: bool = False,
                  render_page: bool = True,
 
@@ -280,6 +281,7 @@ class PlaywrightFetcher(Fetcher):
             proxy (Optional[str]): Proxy string (e.g., "http://user:pass@host:port").
             timeout_s (int): Default timeout in seconds for operations.
             stealth (bool): Whether to enable playwright-stealth.
+            show_browser (bool): Whether show browser.
             pause_browser (bool): If True, launches browser non-headless and
                                   calls page.pause() for debugging.
             render_page (bool): If True, gets page.content() (rendered HTML).
@@ -300,6 +302,7 @@ class PlaywrightFetcher(Fetcher):
 
         # --- Store config for the worker thread ---
         self.stealth_mode = stealth
+        self.show_browser = show_browser or pause_browser
         self.pause_browser = pause_browser
         self.render_page = render_page
 
@@ -359,7 +362,7 @@ class PlaywrightFetcher(Fetcher):
 
         # --- 3. Start Worker Thread ---
         self._log("Starting Playwright worker thread...")
-        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.worker_thread = threading.Thread(name=f"Fetch_Worker", target=self._worker_loop, daemon=True)
         self.worker_thread.start()
 
         # --- 4. Wait for Browser to Launch ---
@@ -446,11 +449,10 @@ class PlaywrightFetcher(Fetcher):
         """
         try:
             mode = "Stealth" if self.stealth_mode else "Standard"
-            self._log(f"[Worker] Starting Playwright ({mode}, Headless: {not self.pause_browser})...")
+            self._log(f"[Worker] Starting Playwright ({mode}, Headless: {not self.show_browser})...")
 
             self.playwright = sync_playwright().start()
 
-            headless_mode = not self.pause_browser
             # Use strict args to prevent zombie processes and memory issues
             launch_args = [
                 '--disable-gpu',
@@ -459,7 +461,7 @@ class PlaywrightFetcher(Fetcher):
             ]
 
             real_browser = self.playwright.chromium.launch(
-                headless=headless_mode,
+                headless=not self.show_browser,
                 args=launch_args,
                 proxy=self.proxy_config
             )

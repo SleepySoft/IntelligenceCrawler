@@ -205,30 +205,74 @@
                     </div>
                 </div>
 
-                <div x-show="viewMode === 'CHART'" class="p-4 flex flex-col h-full" x-cloak>
-                    <div class="flex gap-2 mb-4">
-                        <select x-model="chartRange" @change="fetchChart()" class="bg-gray-900 border border-gray-700 text-xs rounded px-2 py-1">
-                            <option value="1">Last 1 Hour</option>
-                            <option value="6">Last 6 Hours</option>
-                            <option value="24">Last 24 Hours</option>
-                        </select>
-                        <button @click="fetchChart()" class="text-xs bg-gray-800 px-3 rounded text-gray-300">Refresh</button>
+                <div x-show="viewMode === 'CHART'" class="flex flex-col h-full p-4" x-cloak>
+                    <div class="flex justify-between items-center mb-4 shrink-0">
+                        <div class="flex gap-2">
+                            <select x-model="chartRange" @change="fetchChart()" class="bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded px-2 py-1 outline-none focus:border-emerald-500">
+                                <option value="1">Last 1 Hour</option>
+                                <option value="6">Last 6 Hours</option>
+                                <option value="24">Last 24 Hours</option>
+                            </select>
+                            <button @click="fetchChart()" class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 px-3 py-1 rounded transition">Refresh</button>
+                        </div>
+                        <div class="text-xs text-gray-500 font-mono">
+                            Max: <span x-text="chartMax"></span> reqs
+                        </div>
                     </div>
-                    <div class="flex-1 border border-gray-800 bg-gray-900/30 rounded p-4 relative flex items-end gap-1 overflow-x-auto">
-                         <template x-for="bar in chartData" :key="bar.bucket_ts_ms">
-                            <div class="flex flex-col items-center justify-end min-w-[12px] h-full group relative">
-                                <div class="absolute bottom-full mb-1 bg-gray-800 border border-gray-700 text-[10px] p-2 rounded whitespace-nowrap z-10 hidden group-hover:block shadow-lg">
-                                    <div x-text="formatTime(bar.bucket_ts_ms)"></div>
-                                    <div class="text-emerald-400">Success: <span x-text="bar.success"></span></div>
-                                    <div class="text-red-400">Fail: <span x-text="bar.fail"></span></div>
-                                    <div class="text-gray-400">Total: <span x-text="bar.total"></span></div>
-                                </div>
-                                <div class="w-full bg-emerald-600/60 rounded-t relative" :style="`height: ${Math.max(4, (bar.total / chartMax) * 100)}%`">
-                                    <div class="absolute bottom-0 w-full bg-red-500/80" :style="`height: ${(bar.fail / bar.total) * 100}%`"></div>
-                                </div>
+
+                    <div class="flex-1 relative border-l border-b border-gray-700/50 bg-gray-900/20 min-h-0">
+
+                        <div class="absolute inset-0 flex flex-col justify-between pointer-events-none z-0">
+                            <div class="border-t border-gray-800/50 w-full h-0 relative">
+                                <span class="absolute -left-8 -top-2 text-[9px] text-gray-500 w-6 text-right" x-text="formatYAxis(chartMax)"></span>
                             </div>
-                         </template>
-                         <div x-show="chartData.length === 0" class="absolute inset-0 flex items-center justify-center text-gray-600">No trend data loaded</div>
+                            <div class="border-t border-gray-800/30 w-full h-0 relative">
+                                 <span class="absolute -left-8 -top-2 text-[9px] text-gray-500 w-6 text-right" x-text="formatYAxis(chartMax/2)"></span>
+                            </div>
+                            <div class="relative">
+                                 <span class="absolute -left-8 -top-2 text-[9px] text-gray-500 w-6 text-right">0</span>
+                            </div>
+                        </div>
+
+                        <div class="absolute inset-0 flex items-end overflow-x-auto overflow-y-hidden custom-scrollbar pl-1 pt-4 z-10">
+                            <template x-for="(bar, index) in chartData" :key="bar.bucket_ts_ms">
+                                <div class="h-full flex flex-col justify-end group relative shrink-0"
+                                     :style="`width: ${getBarWidth()}`">
+
+                                    <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover:block z-50">
+                                        <div class="bg-gray-800 border border-gray-600 text-[10px] p-2 rounded shadow-xl whitespace-nowrap">
+                                            <div class="text-gray-400 mb-1" x-text="formatTime(bar.bucket_ts_ms)"></div>
+                                            <div class="flex gap-3 font-mono">
+                                                <span class="text-emerald-400">OK: <span x-text="bar.success"></span></span>
+                                                <span class="text-red-400">Err: <span x-text="bar.fail"></span></span>
+                                            </div>
+                                            <div class="text-gray-500 mt-0.5 pt-0.5 border-t border-gray-700">Total: <span x-text="bar.total"></span></div>
+                                        </div>
+                                    </div>
+
+                                    <div class="w-[80%] mx-auto rounded-t transition-all relative group-hover:brightness-125"
+                                         :class="bar.total > 0 ? 'bg-emerald-600/80' : 'bg-transparent'"
+                                         :style="`height: ${bar.total > 0 ? Math.max(1, (bar.total / chartMax) * 100) : 0}%`">
+
+                                        <div class="absolute bottom-0 w-full bg-red-500/90 rounded-b"
+                                             x-show="bar.fail > 0"
+                                             :style="`height: ${(bar.fail / bar.total) * 100}%`">
+                                        </div>
+                                    </div>
+
+                                    <div class="absolute top-full left-1/2 -translate-x-1/2 mt-1 text-[9px] text-gray-600 font-mono whitespace-nowrap"
+                                         x-show="shouldShowLabel(index, chartData.length)"
+                                         x-text="formatTimeShort(bar.bucket_ts_ms)">
+                                    </div>
+
+                                    <div class="absolute top-0 bottom-0 left-1/2 w-px bg-white/5 opacity-0 group-hover:opacity-100 pointer-events-none"></div>
+                                </div>
+                            </template>
+
+                            <div x-show="chartData.length === 0" class="w-full h-full flex items-center justify-center text-gray-600 text-xs">
+                                No data in range
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -373,6 +417,37 @@
                     const json = await res.json();
                     this.chartData = json.items || [];
                     this.chartMax = Math.max(1, ...this.chartData.map(b => b.total));
+                },
+
+                // 格式化 Y 轴数值 (如 1000 -> 1k)
+                formatYAxis(num) {
+                    if (!num) return 0;
+                    if (num >= 1000) return (num / 1000).toFixed(1) + 'k';
+                    return Math.round(num);
+                },
+
+                // 格式化 X 轴短时间 (14:30)
+                formatTimeShort(ms) {
+                    if (!ms) return '';
+                    const d = new Date(ms);
+                    return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+                },
+
+                // 智能计算柱子宽度
+                getBarWidth() {
+                    const len = this.chartData.length;
+                    if (len <= 24) return '4%';     // 数据少时，柱子宽一点
+                    if (len <= 60) return '1.6%';   // 中等密度
+                    return '6px';                   // 数据多时，固定像素宽度
+                },
+
+                // 智能决定是否显示标签 (防止挤在一起)
+                shouldShowLabel(index, total) {
+                    if (total <= 12) return true; // 数据少，全显示
+
+                    // 动态计算步长，保证大概显示 6-8 个标签
+                    const step = Math.ceil(total / 8);
+                    return index % step === 0;
                 },
 
                 async fetchFlowDetails() {
