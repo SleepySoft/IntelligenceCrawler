@@ -25,40 +25,54 @@ BASE_OUTPUT_DIR = "CRAWLER_OUTPUT"
 
 
 def auto_group_name_by_url(url_list):
-    # 1. 分组数据结构: { 'nhk': {'domain': 'nhk', 'paths': [...]}, ... }
+    # 1. 中间结构: { 'nhk': [ {'url': raw, 'path': /a/b/c}, ... ] }
     groups = {}
 
     for url in url_list:
-        # 使用 tldextract 提取精准的 domain (如 'nhk')
         extracted = tldextract.extract(url)
-        domain_label = extracted.domain  # 这里只取 'nhk'，丢弃 .or.jp
-
-        parsed_path = urlparse(url).path
+        domain_label = extracted.domain  # 'nhk'
+        parsed_path = urlparse(url).path  # '/rss/news/cat4.xml'
 
         if domain_label not in groups:
             groups[domain_label] = []
-        groups[domain_label].append(parsed_path)
 
-    final_list = []
+        groups[domain_label].append({
+            'original_url': url,
+            'path': parsed_path
+        })
 
-    # 2. 处理公共路径
-    for domain, paths in groups.items():
-        # 技巧：使用 os.path.commonprefix 找出最长公共路径
+    # 2. 最终结果容器
+    result_dict = {}
+
+    for domain, items in groups.items():
+        # 提取当前域名下所有 path，计算公共前缀
+        paths = [x['path'] for x in items]
+
+        # 计算最长公共路径
         if len(paths) > 1:
             common = os.path.commonprefix(paths)
-            # 回退到最后一个 '/'，防止切割单词 (比如 /new 和 /news 可能会被切成 /new)
+            # 回退到最后一个 '/'，保证目录完整性
             if '/' in common:
                 common = common[:common.rfind('/') + 1]
         else:
-            # 如果只有一个链接，我们假设只保留所在文件夹作为上下文，或者不去除
+            # 如果只有一个链接，保留其所在目录作为前缀
             common = os.path.dirname(paths[0]) + '/'
 
-        for path in paths:
-            # 替换掉公共部分
-            short_path = path.replace(common, "", 1).lstrip('/')
-            final_list.append(f"{domain}/{short_path}")
+        for item in items:
+            # 切除公共前缀，得到差异化部分 (e.g. 'cat4.xml')
+            short_path = item['path'].replace(common, "", 1).lstrip('/')
 
-    return final_list
+            # 组装 Key: 域名/短路径
+            # 结果示例: nhk/cat4.xml
+            key_name = f"{domain}/{short_path}"
+
+            # 如果你需要去掉后缀(如.xml)变成 'nhk/cat4'，可以在这里加一行：
+            # key_name = os.path.splitext(key_name)[0]
+
+            # 存入字典: Key=短名, Value=原链接
+            result_dict[key_name] = item['original_url']
+
+    return result_dict
 
 
 def format_exception_with_traceback(exception: Exception) -> str:
