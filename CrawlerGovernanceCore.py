@@ -1,7 +1,5 @@
-import os
 import re
 import time
-import json
 import logging
 import sqlite3
 import hashlib
@@ -11,9 +9,9 @@ import collections
 import traceback
 from pathlib import Path
 from enum import IntEnum, Enum
-from typing import Optional, Union, List, Dict, Any
 from dataclasses import dataclass
-from contextlib import contextmanager
+from typing import Optional, Union, List, Dict, Any
+from contextlib import contextmanager, nullcontext
 
 try:
     from CrawlerFlowScheduler import FlowScheduler
@@ -1231,7 +1229,7 @@ class GovernanceManager:
             key: str,
             interval: float = 0.0,
             stop_event: Optional[threading.Event] = None):
-        return self.scheduler.pace(key, interval, stop_event)
+        return self.scheduler.pace(key, interval, stop_event) if self.scheduler is not None else nullcontext()
 
     # --- 4. Internal State Management (Called by Session) ---
 

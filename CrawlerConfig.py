@@ -4,11 +4,11 @@
 CRAWLER_CONFIG = {
     # === Components init parameters ===
     
-    'd_fetcher_name': 'PlaywrightFetcher',
-    'd_fetcher_init_param': {'log_callback': print, 'proxy': None, 'timeout_s': 20, 'stealth': True, 'pause_browser': False, 'render_page': True},
+    'd_fetcher_name': 'RequestsFetcher',
+    'd_fetcher_init_param': {'log_callback': print, 'proxy': None, 'timeout_s': 10},
 
-    'e_fetcher_name': 'PlaywrightFetcher',
-    'e_fetcher_init_param': {'log_callback': print, 'proxy': None, 'timeout_s': 20, 'stealth': True, 'pause_browser': False, 'render_page': True},
+    'e_fetcher_name': 'RequestsFetcher',
+    'e_fetcher_init_param': {'log_callback': print, 'proxy': None, 'timeout_s': 20},
 
     'discoverer_name': 'ListPageDiscoverer',
     'discoverer_init_param': {'verbose': True, 'manual_specified_signature': None, 'scope_selector': None},
@@ -18,10 +18,10 @@ CRAWLER_CONFIG = {
 
     # ======== Crawl parameters ========
     
-    'entry_points': ['https://tass.com/world', 'https://tass.com/emergencies', 'https://tass.com/politics', 'https://tass.com/economy', 'https://tass.com/defense', 'https://tass.com/society'],
+    'entry_points': {'即时新闻': 'https://www.news.cn/world/jsxw/index.html', '新华财经': 'https://www.news.cn/fortune/yx/index.html', '中央文件': 'https://www.news.cn/politics/zywj/index.htm', '新华人事': 'https://www.news.cn/politics/xhrs/index.html', '廉政资讯': 'https://www.news.cn/legal/ffu/lzzx/index.html'},
     'period_filter': (None, None),
     'channel_filter': None,
-    'd_fetcher_kwargs': {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 5},
+    'd_fetcher_kwargs': {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 10, 'scroll_pages': 0},
     'e_fetcher_kwargs': {'wait_until': 'networkidle', 'wait_for_selector': None, 'wait_for_timeout_s': 20, 'scroll_pages': 0},
     'extractor_kwargs': {},
 

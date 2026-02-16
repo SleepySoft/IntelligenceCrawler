@@ -281,9 +281,9 @@ def _try_parse_json_or_py_literal(text: str):
     if _is_probably_json(t):
         try:
             return json.loads(t)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
             # JSON 失败继续尝试 Python 字面量
-            pass
+            print(f"Try to parse as josn error: {e}")
 
     # 2) Python 字面量（兼容单引号、True/False/None 等）
     # 仅在“看起来像容器”时尝试，避免把普通字符串误解析
@@ -780,8 +780,11 @@ class ChannelDiscoveryWorker(QRunnable):
             # 运行时参数 (如 wait_until)
             runtime_kwargs = self.config.get('fetcher_kwargs', {})
 
+            entry_point_list = list(self.entry_point.values()) \
+                if isinstance(self.entry_point, dict) else self.entry_point
+
             channel_list = discoverer.discover_channels(
-                list(self.entry_point),     # 20260210 - It may be a dict.
+                entry_point=entry_point_list,     # 20260210 - It may be a dict.
                 start_date=self.start_date,
                 end_date=self.end_date,
                 fetcher_kwargs=runtime_kwargs
