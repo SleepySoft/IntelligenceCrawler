@@ -494,6 +494,7 @@ def common_channel_filter(channel_url: str, channel_filter_list: List[str]) -> b
 
 def save_article_to_disk(
         url: str,
+        channel_group: str,
         result: ExtractionResult,
         in_markdown: bool = True,
         in_pdf: bool = True

@@ -48,9 +48,9 @@ def localize_markdown_image(markdown_content: str, base_url: str, image_dir: str
     try:
         # 确保图片保存目录存在
         os.makedirs(image_dir, exist_ok=True)
-        logger.info(f"Image directory created/checked: {image_dir}", 2)
+        logger.info(f"Image directory created/checked: {image_dir}")
     except OSError as e:
-        logger.error(f"[Error] Could not create image directory {image_dir}: {e}", 2)
+        logger.error(f"[Error] Could not create image directory {image_dir}: {e}")
         return markdown_content, False
 
     download_success = False
@@ -77,11 +77,11 @@ def localize_markdown_image(markdown_content: str, base_url: str, image_dir: str
 
         # 3. 下载图片
         try:
-            logger.info(f"Downloading: {absolute_url}", 3)
+            logger.info(f"Downloading: {absolute_url}")
 
             # 如果文件已存在，则跳过下载 (简单的缓存机制)
             if os.path.exists(local_path):
-                logger.info(f"File already exists: {local_path}. Skipping download.", 3)
+                logger.info(f"File already exists: {local_path}. Skipping download.")
             else:
                 # 确保在下载前进行依赖检查
                 if 'requests' not in globals():
@@ -95,7 +95,7 @@ def localize_markdown_image(markdown_content: str, base_url: str, image_dir: str
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
 
-            logger.info(f"Successfully saved to: {local_path}", 3)
+            logger.info(f"Successfully saved to: {local_path}")
 
             # 只有当成功保存或文件已存在时，才标记本次操作成功
             download_success = True
@@ -105,7 +105,7 @@ def localize_markdown_image(markdown_content: str, base_url: str, image_dir: str
             return f"![{alt_text}]({os.path.join(image_dir, filename)})"
 
         except Exception as e:
-            logger.error(f"[Error] Failed to download image from {absolute_url}: {e}", 3)
+            logger.error(f"[Error] Failed to download image from {absolute_url}: {e}")
             # 下载失败，返回原始 URL 引用
             return match.group(0)
 
@@ -253,23 +253,39 @@ def save_extraction_result_as_md(
             image_dir = f"{base_file_path}.img"
             os.makedirs(image_dir, exist_ok=True)
 
-            rewritten_markdown, download_success = (
-                localize_markdown_image(result.markdown_content, url, image_dir))
+            try:
+                rewritten_markdown, download_success = localize_markdown_image(
+                    result.markdown_content,
+                    url,
+                    image_dir
+                )
 
-            if download_success:
-                markdown_content = rewritten_markdown
-            else:
-                # Image parse fail, remove dir.
-                logger.info(f"Image localization failed completely for {url}. Removing directory: {image_dir}", 2)
-                try:
-                    # 确保只在 image_dir 变量被设置且存在时尝试删除
-                    if image_dir and os.path.exists(image_dir):
-                        # 如果 directory 不为空，shutil.rmtree 是必要的
+                if download_success:
+                    markdown_content = rewritten_markdown
+                else:
+                    logger.info(
+                        f"Image localization failed completely for {url}. "
+                        f"Removing directory: {image_dir}"
+                    )
+
+                    if os.path.exists(image_dir):
                         shutil.rmtree(image_dir)
-                        logger.info(f"Successfully removed empty/failed image directory: {image_dir}", 2)
-                except OSError as e:
-                    logger.error(f"Failed to remove image directory {image_dir}: {e}", 2)
-                # markdown_content 保持为原始 content，继续保存主文件
+
+            except Exception:
+                logger.exception(
+                    f"Image localization raised exception for {url}. "
+                    f"Will keep original markdown."
+                )
+
+                if image_dir and os.path.exists(image_dir):
+                    try:
+                        shutil.rmtree(image_dir)
+                    except Exception:
+                        logger.exception(
+                            f"Failed to remove image directory after image localization error: {image_dir}"
+                        )
+
+                markdown_content = result.markdown_content
 
         # 4. 保存 Markdown content
         with open(md_filepath, 'w', encoding='utf-8') as f:
@@ -295,18 +311,19 @@ def save_extraction_result_as_md(
 
         logger.info(f"[Handler] SAVED: {url}\n    -> {md_filepath}")
 
-    except Exception as e:
-        logger.error(f"[Handler] CRITICAL ERROR saving {url}: {e}")
-        # 如果在创建路径后发生错误，尝试清理图片目录（以防创建了一半）
+    except Exception:
+        logger.exception(f"[Handler] CRITICAL ERROR saving {url}")
+
         if base_file_path and save_image and image_dir and os.path.exists(image_dir):
-            logger.info(f"Attempting to clean up image directory after critical error: {image_dir}", 2)
+            logger.info(
+                f"Attempting to clean up image directory after critical error: {image_dir}"
+            )
             try:
                 shutil.rmtree(image_dir)
             except OSError as clean_up_e:
-                logger.error(f"Failed cleanup of image directory {image_dir}: {clean_up_e}", 2)
-
-        traceback.print_exc()
-
+                logger.error(
+                    f"Failed cleanup of image directory {image_dir}: {clean_up_e}"
+                )
 
 # ----------------------------------------------------------------------------------------------------------------------
 # --- PDF Generation Function ---
