@@ -276,17 +276,23 @@ class PopupTextEditor(QFrame):
     accepted = pyqtSignal(str)
     rejected = pyqtSignal()
 
-    def __init__(self, anchor_widget, min_lines=8, max_lines=18):
+    def __init__(self, anchor_widget, min_lines=8, max_lines=18, accept_on_close=True):
         """
         min_lines: 默认最小行数（你要求至少5行，这里默认给更高的8行，参数可调）
         max_lines: 自动扩展的“舒适上限”，再多就靠竖向滚动条
+        accept_on_close: 点击外部/Esc/关闭弹窗时是否自动接受输入。
+                         True  = 关闭即接受（默认新行为）
+                         False = 关闭即取消（旧行为，需点“确认”才接受）
         """
         super().__init__(anchor_widget, Qt.Popup | Qt.FramelessWindowHint)
         self.anchor = anchor_widget
         self.min_lines = max(1, min_lines)
         self.max_lines = max(self.min_lines, max_lines)
+        self.accept_on_close = accept_on_close
 
         self._accepted_by_user = False
+        self._cancelled_by_user = False
+        self._user_closed = False
         self._prefer_below = True
 
         # 合并更新：避免 textChanged -> resize 风暴导致卡死
@@ -369,6 +375,8 @@ class PopupTextEditor(QFrame):
     def open_near_anchor(self, prefer_below=True):
         """打开并定位：宽度严格等于 anchor（combobox）宽度"""
         self._accepted_by_user = False
+        self._cancelled_by_user = False
+        self._user_closed = False
         self._prefer_below = prefer_below
 
         # 严格对齐宽度
@@ -486,20 +494,33 @@ class PopupTextEditor(QFrame):
         self._request_resize()
         super().resizeEvent(e)
 
-    # ---------- 关闭策略：点击外部关闭 => 取消 ----------
+    # ---------- 关闭策略 ----------
     def closeEvent(self, e):
-        if not self._accepted_by_user:
-            self.rejected.emit()
+        # 防止重复发射信号：若 _ok/_cancel 已处理过，则跳过
+        if not self._user_closed:
+            self._user_closed = True
+            if self._accepted_by_user:
+                # 已由 _ok() 处理，此处不再重复发射
+                pass
+            elif self._cancelled_by_user:
+                # 已由 _cancel() 处理，此处不再重复发射
+                pass
+            elif self.accept_on_close:
+                self.accepted.emit(self.text())
+            else:
+                self.rejected.emit()
         super().closeEvent(e)
 
     # ---------- 确认/取消 ----------
     def _ok(self):
         self._accepted_by_user = True
+        self._user_closed = True
         self.accepted.emit(self.text())
         self.close()
 
     def _cancel(self):
-        self._accepted_by_user = False
+        self._cancelled_by_user = True
+        self._user_closed = True
         self.rejected.emit()
         self.close()
 
@@ -516,7 +537,13 @@ class PopupTextEditor(QFrame):
 
 
 class MultiLinePopupComboBox(AdjustableWidthComboBox):
-    def __init__(self, parent=None, max_dropdown_width=800, editor_min_lines=8, editor_max_lines=18):
+    def __init__(self, parent=None, max_dropdown_width=800, editor_min_lines=8, editor_max_lines=18,
+                 accept_on_close=True):
+        """
+        accept_on_close: 控制弹窗关闭时的行为
+            True  - 点击外部/失去焦点时自动接受输入（默认新行为）
+            False - 必须点击"确认"才接受；点击外部/Esc/取消均回滚（旧行为）
+        """
         super().__init__(parent=parent, max_dropdown_width=max_dropdown_width)
 
         super().setEditable(True)
@@ -529,7 +556,8 @@ class MultiLinePopupComboBox(AdjustableWidthComboBox):
         self._full_text = ""
         self._snapshot_before_edit = ""
 
-        self._popup = PopupTextEditor(self, min_lines=editor_min_lines, max_lines=editor_max_lines)
+        self._popup = PopupTextEditor(self, min_lines=editor_min_lines, max_lines=editor_max_lines,
+                                      accept_on_close=accept_on_close)
         self._popup.accepted.connect(self._apply_text)
         self._popup.rejected.connect(self._cancel_input)
 
