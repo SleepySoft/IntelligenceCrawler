@@ -396,20 +396,26 @@ class FetcherConfigWidget(QWidget):
 
     [MODIFIED] Now supports 'one_row' or 'two_row' (multi-row grid) layout.
     ([已修改] 现在支持 'one_row' 或 'two_row' (多行网格) 布局。)
+
+    [ARCHITECTURE] Autonomous config widget: directly outputs/inputs flat config fragments.
+    get_config()  outputs keys like d_fetcher_name, d_fetcher_init_param, d_fetcher_kwargs
+    set_config()  reads the same flat keys back into UI.
     """
 
-    def __init__(self, layout_style: str = 'two_row', parent: Optional[QWidget] = None):
+    def __init__(self, prefix: str = 'd_', layout_style: str = 'two_row', parent: Optional[QWidget] = None):
         """
         Initialize the widget.
         (初始化窗口部件。)
 
         Args:
+            prefix (str): Config key prefix, e.g. 'd_' for discovery, 'e_' for extraction.
             layout_style (str): 'one_row' or 'two_row'.
                                 'one_row' uses a QHBoxLayout.
                                 'two_row' (default) uses a QGridLayout.
             parent (Optional[QWidget]): Parent widget.
         """
         super().__init__(parent)
+        self.prefix = prefix
         self.layout_style = layout_style
 
         # --- Create Widgets (This part is unchanged) ---
@@ -459,6 +465,12 @@ class FetcherConfigWidget(QWidget):
                                           "< 0: Scroll Up\n"
                                           "0: Disabled")
 
+        # --- [NEW] Action Editor Button ---
+        self.actions_button = QPushButton("Actions...")
+        self.actions_button.setToolTip("Configure post-load page actions (click, fill, scroll, etc.)")
+        self.actions_button.setVisible(False)  # Only visible for Playwright
+        self._post_extra_action: List[dict] = []
+
         # --- Conditional Layout ---
         if self.layout_style == 'one_row':
             # --- 'one_row' LAYOUT (using QHBoxLayout) ---
@@ -486,6 +498,9 @@ class FetcherConfigWidget(QWidget):
             # --- Add scroll widgets to one_row layout ---
             layout.addWidget(self.scroll_pages_label)
             layout.addWidget(self.scroll_pages_spin)
+
+            # --- Add action editor button to one_row layout ---
+            layout.addWidget(self.actions_button)
 
         else:
             # --- 'two_row' LAYOUT (using QGridLayout) ---
@@ -515,17 +530,22 @@ class FetcherConfigWidget(QWidget):
             grid_layout.addWidget(self.wait_selector_label, 1, 4)
             grid_layout.addWidget(self.wait_selector_input, 1, 5)  # Col 5
 
+            # --- Add action editor button to Row 0 ---
+            grid_layout.addWidget(self.actions_button, 0, 8)
+
             # --- Set Column Stretches ---
             # (设置列的拉伸，使输入框和下拉框可以扩展)
             grid_layout.setColumnStretch(1, 2)  # (Fetcher Combo / Proxy Input)
             grid_layout.setColumnStretch(3, 1)  # (Timeout Spin / WaitUntil Combo)
             grid_layout.setColumnStretch(5, 2)  # (Render Check / Wait Selector Input)
             grid_layout.setColumnStretch(7, 1)  # [NEW] (Scroll Spin)
+            grid_layout.setColumnStretch(8, 0)  # (Actions Button)
 
-        # --- Connect Signals (Unchanged) ---
+        # --- Connect Signals ---
         self.fetcher_combo.currentTextChanged.connect(self._on_fetcher_changed)
+        self.actions_button.clicked.connect(self._open_action_editor)
 
-        # --- Initial State (Unchanged) ---
+        # --- Initial State ---
         self._on_fetcher_changed(self.fetcher_combo.currentText())
 
     def _on_fetcher_changed(self, text: str):
@@ -541,6 +561,9 @@ class FetcherConfigWidget(QWidget):
         self.scroll_pages_label.setVisible(is_playwright)
         self.scroll_pages_spin.setVisible(is_playwright)
         # --- [END NEW] ---
+
+        # --- [NEW] Action editor button visibility ---
+        self.actions_button.setVisible(is_playwright)
 
         self.pause_check.setEnabled(is_playwright)
         self.render_check.setEnabled(is_playwright)
@@ -562,63 +585,373 @@ class FetcherConfigWidget(QWidget):
         """Allow parent to override the 'Render' checkbox tooltip."""
         self.render_check.setToolTip(tooltip)
 
-    def get_config(self) -> Dict[str, Any]:
-        """Return the current configuration as a dictionary."""
-        fetcher_name = self.fetcher_combo.currentText()
-        is_playwright = "Playwright" in fetcher_name
+    # -----------------------------------------------------------------------
+    # Autonomous config interface: directly outputs/inputs flat config fragments
+    # -----------------------------------------------------------------------
 
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Return the current configuration as a **flat** dictionary fragment.
+
+        Returns dict with keys like (for prefix='d_'):
+            d_fetcher_name (str): e.g. 'RequestsFetcher' or 'PlaywrightFetcher'
+            d_fetcher_init_param (dict): {'log_callback': print, 'proxy': ..., 'timeout_s': 10,
+                                           'stealth': False, 'pause_browser': False, 'render_page': False}
+            d_fetcher_kwargs (dict): {'wait_until': 'networkidle', 'wait_for_selector': None,
+                                      'wait_for_timeout_s': 10, 'scroll_pages': 0,
+                                      'post_extra_action': [...] or None}
+        """
+        fetcher_ui = self.fetcher_combo.currentText()
+        is_playwright = "Playwright" in fetcher_ui
+
+        p = self.prefix
         return {
-            'fetcher_name': fetcher_name,
-            'proxy': self.proxy_input.text().strip() or None,
-            'timeout': self.timeout_spin.value(),
-            'pause': self.pause_check.isChecked() and is_playwright,
-            'render': self.render_check.isChecked() and is_playwright,
-            'wait_until': self.wait_until_combo.currentText() if is_playwright else 'networkidle',
-            'wait_for_selector': self.wait_selector_input.text().strip() or None if is_playwright else None,
-            'scroll_pages': self.scroll_pages_spin.value() if is_playwright else 0
+            f'{p}fetcher_name': self._map_ui_fetcher_to_class(fetcher_ui),
+            f'{p}fetcher_init_param': {
+                'log_callback': print,
+                'proxy': self.proxy_input.text().strip() or None,
+                'timeout_s': self.timeout_spin.value(),
+                'stealth': "Stealth" in fetcher_ui,
+                'pause_browser': self.pause_check.isChecked() and is_playwright,
+                'render_page': self.render_check.isChecked() and is_playwright,
+            },
+            f'{p}fetcher_kwargs': {
+                'wait_until': self.wait_until_combo.currentText() if is_playwright else 'networkidle',
+                'wait_for_selector': self.wait_selector_input.text().strip() or None,
+                'wait_for_timeout_s': self.timeout_spin.value(),
+                'scroll_pages': self.scroll_pages_spin.value() if is_playwright else 0,
+                'post_extra_action': self._post_extra_action or None,
+            }
         }
+
+    def set_config(self, config: Dict[str, Any]):
+        """
+        Restore UI from a **flat** configuration dictionary.
+        Only reads keys matching this widget's prefix.
+
+        Args:
+            config: Full flat config dict (e.g. CRAWLER_CONFIG).
+        """
+        p = self.prefix
+        name = config.get(f'{p}fetcher_name', '')
+        init = config.get(f'{p}fetcher_init_param', {})
+        kwargs = config.get(f'{p}fetcher_kwargs', {})
+
+        # Reverse map class name -> UI text
+        ui_name = self._map_class_to_ui_fetcher(name, init.get('stealth', False))
+        self.fetcher_combo.setCurrentText(ui_name)
+
+        self.proxy_input.setText(init.get('proxy') or "")
+        self.timeout_spin.setValue(int(init.get('timeout_s', 30)))
+        self.pause_check.setChecked(init.get('pause_browser', False))
+        self.render_check.setChecked(init.get('render_page', False))
+
+        self.wait_until_combo.setCurrentText(kwargs.get('wait_until', 'networkidle'))
+        self.wait_selector_input.setText(kwargs.get('wait_for_selector') or "")
+        self.scroll_pages_spin.setValue(kwargs.get('scroll_pages', 0))
+
+        # Restore post_extra_action
+        self._post_extra_action = kwargs.get('post_extra_action') or []
+        self._update_actions_button_text()
+
+    # -----------------------------------------------------------------------
+    # Action Editor integration
+    # -----------------------------------------------------------------------
+
+    def _open_action_editor(self):
+        """Open the ActionEditorDialog to configure post_extra_action."""
+        from IntelligenceCrawler.ActionEditorDialog import ActionEditorDialog
+        dlg = ActionEditorDialog(self, title=f"{'Discovery' if self.prefix == 'd_' else 'Article'} Fetcher Actions")
+        dlg.set_actions(self._post_extra_action)
+        if dlg.exec_() == QDialog.Accepted:
+            self._post_extra_action = dlg.get_actions()
+            self._update_actions_button_text()
+
+    def _update_actions_button_text(self):
+        count = len(self._post_extra_action)
+        self.actions_button.setText(f"Actions ({count})" if count > 0 else "Actions...")
+
+    # -----------------------------------------------------------------------
+    # Mapping helpers (moved from CrawlerPlaygroundApp to widget)
+    # -----------------------------------------------------------------------
+
+    def _map_ui_fetcher_to_class(self, ui_name: str) -> str:
+        if "Playwright" in ui_name:
+            return "PlaywrightFetcher"
+        return "RequestsFetcher"
+
+    def _map_class_to_ui_fetcher(self, class_name: str, stealth: bool = False) -> str:
+        if "Requests" in class_name:
+            return "Simple (Requests)"
+        if "Playwright" in class_name:
+            return "Stealth (Playwright)" if stealth else "Advanced (Playwright)"
+        return class_name
+
+    # -----------------------------------------------------------------------
+    # Legacy compatibility wrapper (deprecated, use set_config instead)
+    # -----------------------------------------------------------------------
 
     def load_from_config(self, fetcher_name: str, init_params: dict, runtime_kwargs: dict):
         """
-        Smartly loads configuration back into the widget controls.
+        [DEPRECATED] Use set_config() instead.
+        Loads configuration back into the widget controls from split dicts.
         """
-        # 1. 设置 Fetcher 类型 (这将触发 _on_fetcher_changed 信号，更新 UI 可见性)
-        # 我们需要把类名 (RequestsFetcher) 映射回 UI 名称 (Simple (Requests))
-        # 这需要反向映射，或者我们在 UI ComboBox 里存 UserData
+        is_playwright = "Playwright" in fetcher_name
+        stealth = init_params.get("stealth", False)
+        ui_name = self._map_class_to_ui_fetcher(fetcher_name, stealth)
+        self.fetcher_combo.setCurrentText(ui_name)
 
-        # 简单的反向查找逻辑：
-        target_ui_name = None
-        for i in range(self.fetcher_combo.count()):
-            ui_text = self.fetcher_combo.itemText(i)
-            # 这里的判断逻辑需要和你的生成逻辑对应
-            if "Requests" in fetcher_name and "Requests" in ui_text:
-                target_ui_name = ui_text
-                break
-            if "Playwright" in fetcher_name:
-                if init_params.get("stealth") and "Stealth" in ui_text:
-                    target_ui_name = ui_text
-                    break
-                elif not init_params.get("stealth") and "Advanced" in ui_text:
-                    target_ui_name = ui_text
-                    break
-
-        if target_ui_name:
-            self.fetcher_combo.setCurrentText(target_ui_name)
-
-        # 2. 填充初始化参数 (Init Params)
         self.proxy_input.setText(init_params.get('proxy') or "")
         self.timeout_spin.setValue(int(init_params.get('timeout_s', 30)))
 
-        # Playwright 特有
-        if "Playwright" in fetcher_name:
+        if is_playwright:
             self.pause_check.setChecked(init_params.get('pause_browser', False))
             self.render_check.setChecked(init_params.get('render_page', False))
 
-        # 3. 填充运行时参数 (Runtime Kwargs)
-        if "Playwright" in fetcher_name:
+        if is_playwright:
             self.wait_until_combo.setCurrentText(runtime_kwargs.get('wait_until', 'networkidle'))
             self.wait_selector_input.setText(runtime_kwargs.get('wait_for_selector') or "")
             self.scroll_pages_spin.setValue(runtime_kwargs.get('scroll_pages', 0))
+
+
+# =============================================================================
+#
+# DiscovererConfigPanel — 自治的 Discoverer 配置面板
+#
+# =============================================================================
+
+class DiscovererConfigPanel(QWidget):
+    """
+    Autonomous configuration panel for the Discoverer component.
+
+    get_config() outputs flat keys:
+        discoverer_name (str): e.g. 'SitemapDiscoverer', 'RSSDiscoverer', 'ListPageDiscoverer'
+        discoverer_init_param (dict): {'verbose': True, 'manual_specified_signature': ..., 'scope_selector': ...}
+        date_filter_enabled (bool)
+        date_filter_days (int)
+
+    set_config(config) reads the same flat keys back into UI.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("Discoverer:"))
+        self.discoverer_combo = QComboBox()
+        self.discoverer_combo.addItems(["Sitemap", "RSS", "Smart Analysis"])
+        if "RSSDiscoverer" not in globals():
+            self.discoverer_combo.model().item(1).setEnabled(False)
+        self.discoverer_combo.setToolTip(
+            "Select the discovery method:\n"
+            "- Sitemap: Finds sitemap.xml from the homepage.\n"
+            "- RSS: Finds <link rel='alternate'> RSS feeds from the homepage.\n"
+            "- Smart Analysis: AI-powered link signature detection."
+        )
+        layout.addWidget(self.discoverer_combo)
+
+        self.manual_specified_signature_label = QLabel("AI Signature:")
+        self.manual_specified_signature_input = QLineEdit()
+        self.manual_specified_signature_input.setPlaceholderText("Optional: e.g., 'a[class*=\"title\"]'")
+        self.manual_specified_signature_input.setToolTip("Manually specify the 'link fingerprint' signature.")
+        self.manual_specified_signature_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+        layout.addWidget(self.manual_specified_signature_label)
+        layout.addWidget(self.manual_specified_signature_input, 1)
+
+        self.scope_selector_label = QLabel("Scope:")
+        self.scope_selector_input = QLineEdit()
+        self.scope_selector_input.setPlaceholderText("e.g., '#main-content'")
+        self.scope_selector_input.setToolTip("Limit discovery to this CSS selector (e.g., div.news-list).")
+        self.scope_selector_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+        layout.addWidget(self.scope_selector_label)
+        layout.addWidget(self.scope_selector_input, 1)
+
+        self.inspect_signature_button = QPushButton("Inspect...")
+        self.inspect_signature_button.setToolTip(
+            "Analyze the entry URL to find all possible link signatures.\n"
+            "(Requires 'Smart Analysis' mode)"
+        )
+        self.inspect_signature_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout.addWidget(self.inspect_signature_button)
+
+        self.date_filter_check = QCheckBox("Filter last:")
+        self.date_filter_check.setToolTip("If checked, only discover channels/articles updated within the last X days.")
+        layout.addWidget(self.date_filter_check)
+
+        self.date_filter_days_spin = QSpinBox()
+        self.date_filter_days_spin.setRange(1, 9999)
+        self.date_filter_days_spin.setValue(7)
+        self.date_filter_days_spin.setSuffix(" days")
+        self.date_filter_days_spin.setEnabled(False)
+        layout.addWidget(self.date_filter_days_spin)
+
+        self.date_filter_check.stateChanged.connect(
+            lambda state: self.date_filter_days_spin.setEnabled(state == Qt.Checked)
+        )
+        self.discoverer_combo.currentTextChanged.connect(self._on_discoverer_changed)
+        self._on_discoverer_changed(self.discoverer_combo.currentText())
+
+    def _on_discoverer_changed(self, text: str):
+        is_smart = (text == "Smart Analysis")
+        self.manual_specified_signature_label.setVisible(is_smart)
+        self.manual_specified_signature_input.setVisible(is_smart)
+        self.scope_selector_label.setVisible(is_smart)
+        self.scope_selector_input.setVisible(is_smart)
+        self.inspect_signature_button.setVisible(is_smart)
+
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Return flat discoverer config fragment.
+
+        Returns dict with keys:
+            discoverer_name (str): Factory class name
+            discoverer_init_param (dict): Factory init parameters
+            date_filter_enabled (bool)
+            date_filter_days (int)
+        """
+        ui_name = self.discoverer_combo.currentText()
+        class_name = self._map_ui_discoverer_to_class(ui_name)
+        init_param = {"verbose": True}
+
+        if class_name == "ListPageDiscoverer":
+            init_param["manual_specified_signature"] = self.manual_specified_signature_input.text().strip() or None
+            init_param["scope_selector"] = self.scope_selector_input.text().strip() or None
+
+        return {
+            "discoverer_name": class_name,
+            "discoverer_init_param": init_param,
+            "date_filter_enabled": self.date_filter_check.isChecked(),
+            "date_filter_days": self.date_filter_days_spin.value(),
+        }
+
+    def set_config(self, config: Dict[str, Any]):
+        """Restore UI from flat discoverer config fragment."""
+        class_name = config.get("discoverer_name", "SitemapDiscoverer")
+        ui_name = self._map_class_to_ui_discoverer(class_name)
+        self.discoverer_combo.setCurrentText(ui_name)
+
+        init_param = config.get("discoverer_init_param", {})
+        self.manual_specified_signature_input.setText(init_param.get("manual_specified_signature") or "")
+        self.scope_selector_input.setText(init_param.get("scope_selector") or "")
+
+        self.date_filter_check.setChecked(config.get("date_filter_enabled", False))
+        self.date_filter_days_spin.setValue(config.get("date_filter_days", 7))
+
+    @staticmethod
+    def _map_ui_discoverer_to_class(ui_name: str) -> str:
+        mapping = {"Sitemap": "SitemapDiscoverer", "RSS": "RSSDiscoverer", "Smart Analysis": "ListPageDiscoverer"}
+        return mapping.get(ui_name, ui_name)
+
+    @staticmethod
+    def _map_class_to_ui_discoverer(class_name: str) -> str:
+        mapping = {"SitemapDiscoverer": "Sitemap", "RSSDiscoverer": "RSS", "ListPageDiscoverer": "Smart Analysis"}
+        return mapping.get(class_name, class_name)
+
+
+# =============================================================================
+#
+# ExtractorConfigPanel — 自治的 Extractor 配置面板
+#
+# =============================================================================
+
+class ExtractorConfigPanel(QWidget):
+    """
+    Autonomous configuration panel for the Extractor component.
+
+    get_config() outputs flat keys:
+        extractor_name (str): e.g. 'Trafilatura', 'Generic CSS'
+        extractor_init_param (dict): {'verbose': True}  (or {'verbose': True, 'model_name': '...'})
+        extractor_kwargs (dict): e.g. {'selectors': ['article', '.post']} for Generic CSS
+
+    set_config(config) reads the same flat keys back into UI.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        layout.addWidget(QLabel("Extractor:"))
+        self.extractor_combo = QComboBox()
+        available_extractors = sorted(EXTRACTOR_MAP.keys())
+        if available_extractors:
+            self.extractor_combo.addItems(available_extractors)
+            if "Trafilatura" in available_extractors:
+                self.extractor_combo.setCurrentText("Trafilatura")
+        else:
+            self.extractor_combo.addItem("No Extractors Found")
+            self.extractor_combo.setEnabled(False)
+        layout.addWidget(self.extractor_combo)
+
+        self.css_selector_label = QLabel("Selectors:")
+        self.css_selector_input = QLineEdit()
+        self.css_selector_input.setPlaceholderText("e.g., article.content, .post-body")
+        self.css_selector_input.setToolTip("CSS selectors (comma-separated) for Generic CSS Extractor")
+        self.css_selector_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+        layout.addWidget(self.css_selector_label)
+        layout.addWidget(self.css_selector_input, 1)
+
+        self.extractor_combo.currentTextChanged.connect(self._on_extractor_changed)
+        self._on_extractor_changed(self.extractor_combo.currentText())
+
+    def _on_extractor_changed(self, text: str):
+        is_generic_css = (text == "Generic CSS")
+        self.css_selector_label.setVisible(is_generic_css)
+        self.css_selector_input.setVisible(is_generic_css)
+
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Return flat extractor config fragment.
+
+        Returns dict with keys:
+            extractor_name (str): Factory-recognized name
+            extractor_init_param (dict)
+            extractor_kwargs (dict)
+        """
+        ui_name = self.extractor_combo.currentText()
+        init_param = {"verbose": True}
+        kwargs = {}
+
+        if ui_name == "Crawl4AI":
+            # Future: expose model_name in UI
+            pass
+
+        if ui_name == "Generic CSS":
+            selector_str = self.css_selector_input.text().strip()
+            if selector_str:
+                kwargs["selectors"] = [s.strip() for s in selector_str.split(",") if s.strip()]
+            else:
+                kwargs["selectors"] = ["body"]
+
+        return {
+            "extractor_name": ui_name,
+            "extractor_init_param": init_param,
+            "extractor_kwargs": kwargs,
+        }
+
+    def set_config(self, config: Dict[str, Any]):
+        """Restore UI from flat extractor config fragment."""
+        name = config.get("extractor_name", "Trafilatura")
+        target_ui = None
+        for i in range(self.extractor_combo.count()):
+            ui_text = self.extractor_combo.itemText(i)
+            if ui_text in name or name in ui_text:
+                target_ui = ui_text
+                break
+        if target_ui:
+            self.extractor_combo.setCurrentText(target_ui)
+
+        kwargs = config.get("extractor_kwargs", {})
+        selectors = kwargs.get("selectors", [])
+        if selectors:
+            self.css_selector_input.setText(", ".join(selectors))
+        else:
+            self.css_selector_input.clear()
 
 
 class SignatureInspectorDialog(QDialog):
@@ -1060,14 +1393,8 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         self.discovery_fetcher_widget: Optional[FetcherConfigWidget] = None
         self.article_fetcher_widget: Optional[FetcherConfigWidget] = None
-
-        self.manual_specified_signature_label: Optional[QLabel] = None
-        self.manual_specified_signature_input: Optional[QLineEdit] = None
-        self.scope_selector_label: Optional[QLabel] = None
-        self.scope_selector_input: Optional[QLineEdit] = None
-
-        self.css_selector_label: Optional[QLabel] = None
-        self.css_selector_input: Optional[QLineEdit] = None
+        self.discoverer_panel: Optional[DiscovererConfigPanel] = None
+        self.extractor_panel: Optional[ExtractorConfigPanel] = None
 
         # Cache for the *actual* entry_point (str or List[str])
         # used in the last discovery run.
@@ -1111,8 +1438,6 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         # --- Set initial visibility for dynamic UI ---
         self.update_generated_code()  # Show initial code
-        self._update_discoverer_options_ui(self.discoverer_combo.currentText())
-        self._update_extractor_options_ui(self.extractor_combo.currentText())
 
         self.setWindowTitle("Crawler Playground (v4.0)")
         self.setWindowIcon(QIcon.fromTheme("internet-web-browser"))
@@ -1166,67 +1491,9 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.url_input.customContextMenuRequested.connect(self._show_url_history_context_menu)
         top_bar_row1_layout.addWidget(self.url_input, 1)  # Give it stretch factor 1
 
-        top_bar_row1_layout.addWidget(QLabel("Discoverer:"))
-        self.discoverer_combo = QComboBox()
-        self.discoverer_combo.addItems(["Sitemap", "RSS", "Smart Analysis"])
-        if "RSSDiscoverer" not in globals():
-            self.discoverer_combo.model().item(1).setEnabled(False)
-        # self.discoverer_combo.model().item(2).setEnabled(False)  # WIP
-        self.discoverer_combo.setToolTip(
-            "Select the discovery method:\n"
-            "- Sitemap: Finds sitemap.xml from the homepage.\n"
-            "- RSS: Finds <link rel='alternate'> RSS feeds from the homepage.\n\n"
-            "In both cases, enter the homepage URL."
-        )
-        top_bar_row1_layout.addWidget(self.discoverer_combo)
-
-        # --- [NEW] AI Signature (for Smart Analysis) ---
-        self.manual_specified_signature_label = QLabel("AI Signature:")
-        self.manual_specified_signature_input = QLineEdit()
-        self.manual_specified_signature_input.setPlaceholderText("Optional: e.g., 'a[class*=\"title\"]'")
-        self.manual_specified_signature_input.setToolTip("Manually specify the 'link fingerprint' signature.")
-        self.manual_specified_signature_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-        top_bar_row1_layout.addWidget(self.manual_specified_signature_label)
-        top_bar_row1_layout.addWidget(self.manual_specified_signature_input, 1)  # Give it stretch
-
-        self.scope_selector_label = QLabel("Scope:")
-        self.scope_selector_input = QLineEdit()
-        self.scope_selector_input.setPlaceholderText("e.g., '#main-content'")
-        self.scope_selector_input.setToolTip("Limit discovery to this CSS selector (e.g., div.news-list).")
-        # 让它稍微短一点，stretch factor 设为 0 或者 1，视情况而定
-        self.scope_selector_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-
-        top_bar_row1_layout.addWidget(self.scope_selector_label)
-        top_bar_row1_layout.addWidget(self.scope_selector_input, 1)
-
-        self.inspect_signature_button = QPushButton("Inspect...")
-        self.inspect_signature_button.setToolTip(
-            "Analyze the entry URL to find all possible link signatures.\n"
-            "(Requires 'Smart Analysis' mode)"
-        )
-        self.inspect_signature_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        top_bar_row1_layout.addWidget(self.inspect_signature_button)
-        # --- [END NEW] ---
-
-        self.date_filter_check = QCheckBox("Filter last:")
-        self.date_filter_check.setToolTip("If checked, only discover channels/articles updated within the last X days.")
-        top_bar_row1_layout.addWidget(self.date_filter_check)
-
-        self.date_filter_days_spin = QSpinBox()
-        self.date_filter_days_spin.setRange(1, 9999)
-        self.date_filter_days_spin.setValue(7)
-        self.date_filter_days_spin.setSuffix(" days")
-        self.date_filter_days_spin.setEnabled(False)  # Disabled by default
-        top_bar_row1_layout.addWidget(self.date_filter_days_spin)
-        self.date_filter_check.stateChanged.connect(
-            lambda state: self.date_filter_days_spin.setEnabled(state == Qt.Checked)
-        )
-
-        top_bar_row1_layout.addSpacing(15)
-
-        # self.analyze_button = QPushButton("Discover Channels")  # Renamed
-        # self.analyze_button.setStyleSheet("padding: 5px 10px;")  # Add padding
-        # top_bar_row1_layout.addWidget(self.analyze_button)
+        # --- [ARCH] DiscovererConfigPanel replaces scattered discoverer controls ---
+        self.discoverer_panel = DiscovererConfigPanel(self)
+        top_bar_row1_layout.addWidget(self.discoverer_panel)
 
         main_layout.addLayout(top_bar_row1_layout)  # Add Row 1
 
@@ -1236,7 +1503,7 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         top_bar_row2_layout.addWidget(QLabel("Discovery Fetcher:"))
 
-        self.discovery_fetcher_widget = FetcherConfigWidget(layout_style='one_row', parent=self)
+        self.discovery_fetcher_widget = FetcherConfigWidget(prefix='d_', layout_style='one_row', parent=self)
         self.discovery_fetcher_widget.set_defaults(
             fetcher_name="Simple (Requests)",
             timeout=10,
@@ -1425,31 +1692,15 @@ class CrawlerPlaygroundApp(QMainWindow):
         # --- Toolbar 1: Fetcher Settings ---
         fetcher_toolbar = QToolBar("Fetcher Tools")
 
-        self.article_fetcher_widget = FetcherConfigWidget(layout_style='two_row', parent=self)
+        self.article_fetcher_widget = FetcherConfigWidget(prefix='e_', layout_style='two_row', parent=self)
         fetcher_toolbar.addWidget(self.article_fetcher_widget)
 
         # --- Toolbar 2: Extractor Settings ---
         extractor_toolbar = QToolBar("Extractor Tools")
         extractor_toolbar.layout().setSpacing(5)
-        extractor_toolbar.addWidget(QLabel("Extractor:"))
-        self.extractor_combo = QComboBox()
-        available_extractors = sorted(EXTRACTOR_MAP.keys())
-        if available_extractors:
-            self.extractor_combo.addItems(available_extractors)
-            if "Trafilatura" in available_extractors:
-                self.extractor_combo.setCurrentText("Trafilatura")
-        else:
-            self.extractor_combo.addItem("No Extractors Found")
-            self.extractor_combo.setEnabled(False)
-        extractor_toolbar.addWidget(self.extractor_combo)
 
-        self.css_selector_label = QLabel("Selectors:")
-        self.css_selector_input = QLineEdit()
-        self.css_selector_input.setPlaceholderText("e.g., article.content, .post-body")
-        self.css_selector_input.setToolTip("CSS selectors (comma-separated) for Generic CSS Extractor")
-        self.css_selector_input.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-        extractor_toolbar.addWidget(self.css_selector_label)
-        extractor_toolbar.addWidget(self.css_selector_input)
+        self.extractor_panel = ExtractorConfigPanel(self)
+        extractor_toolbar.addWidget(self.extractor_panel)
 
         self.extractor_analyze_button = QPushButton("Analyze")
         extractor_toolbar.addWidget(self.extractor_analyze_button)
@@ -1493,11 +1744,9 @@ class CrawlerPlaygroundApp(QMainWindow):
     def connect_signals(self):
         """Centralize all signal/slot connections."""
         # Top Bar
-        # self.url_input.lineEdit().returnPressed.connect(self.start_channel_discovery)
-        # self.url_input.lineEdit().textChanged.connect(self.on_url_input_changed)
         self.analyze_button.clicked.connect(self.start_channel_discovery)
-        self.discoverer_combo.currentTextChanged.connect(self._update_discoverer_options_ui)
-        self.inspect_signature_button.clicked.connect(self.start_signature_inspection)
+        if self.discoverer_panel:
+            self.discoverer_panel.inspect_signature_button.clicked.connect(self.start_signature_inspection)
 
         # Tree
         self.tree_widget.itemClicked.connect(self.on_tree_item_clicked)
@@ -1507,17 +1756,16 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.article_go_button.clicked.connect(self.on_article_go_clicked)
         self.article_url_input.returnPressed.connect(self.on_article_go_clicked)
         self.extractor_analyze_button.clicked.connect(self.start_extraction_analysis)
-        self.extractor_combo.currentTextChanged.connect(self._update_extractor_options_ui)
 
-        self.discoverer_combo.currentTextChanged.connect(self.update_generated_code)
-
-        # 连接新 widget 内部的 ComboBox
+        # Config change triggers code refresh
+        if self.discoverer_panel:
+            self.discoverer_panel.discoverer_combo.currentTextChanged.connect(self.update_generated_code)
+        if self.extractor_panel:
+            self.extractor_panel.extractor_combo.currentTextChanged.connect(self.update_generated_code)
         if self.discovery_fetcher_widget:
             self.discovery_fetcher_widget.fetcher_combo.currentTextChanged.connect(self.update_generated_code)
         if self.article_fetcher_widget:
             self.article_fetcher_widget.fetcher_combo.currentTextChanged.connect(self.update_generated_code)
-
-        self.extractor_combo.currentTextChanged.connect(self.update_generated_code)
         self.tree_widget.itemChanged.connect(self.update_generated_code_from_tree)
 
         self.save_code_button.clicked.connect(self._save_generated_code)
@@ -1528,7 +1776,8 @@ class CrawlerPlaygroundApp(QMainWindow):
         # Top bar
         self.url_input.setEnabled(not is_loading)
         self.analyze_button.setEnabled(not is_loading)
-        self.discoverer_combo.setEnabled(not is_loading)
+        if self.discoverer_panel:
+            self.discoverer_panel.setEnabled(not is_loading)
 
         if self.discovery_fetcher_widget:
             self.discovery_fetcher_widget.setEnabled(not is_loading)
@@ -1590,7 +1839,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         """Slot for 'Discover Channels' button. (Refactored: Uniform List Input)"""
 
         raw_text = self.url_input.currentText().strip()
-        self.discoverer_name = self.discoverer_combo.currentText()
+        self.discoverer_name = self.discoverer_panel.discoverer_combo.currentText() if self.discoverer_panel else "Sitemap"
 
         if not raw_text:
             self.status_bar.showMessage("Error: Please enter a URL or list of URLs.")
@@ -1733,7 +1982,8 @@ class CrawlerPlaygroundApp(QMainWindow):
         Slot for the 'Inspect...' button.
         Starts the SignatureAnalysisWorker.
         """
-        if self.discoverer_combo.currentText() != "Smart Analysis":
+        disc_name = self.discoverer_panel.discoverer_combo.currentText() if self.discoverer_panel else ""
+        if disc_name != "Smart Analysis":
             self.status_bar.showMessage("Error: Signature inspection only works with 'Smart Analysis' discoverer.")
             return
 
@@ -1785,7 +2035,8 @@ class CrawlerPlaygroundApp(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             selected_sig = dialog.get_selected_signature()
             if selected_sig:
-                self.manual_specified_signature_input.setText(selected_sig)
+                if self.discoverer_panel:
+                    self.discoverer_panel.manual_specified_signature_input.setText(selected_sig)
                 self.status_bar.showMessage(f"AI Signature set from inspector.")
                 self.append_log_history(f"[Inspect] User selected signature: {selected_sig}")
             else:
@@ -2158,116 +2409,46 @@ class CrawlerPlaygroundApp(QMainWindow):
             "channel_filter_keys": final_keys
         }
 
-    def _get_current_extractor_args(self, extractor_name: str) -> dict:
-        """
-        Retrieves extractor-specific arguments from the UI.
-        (从UI检索特定于提取器的参数。)
-        """
-        # --- [MODIFIED] ---
-        if extractor_name == "Generic CSS":
-            if hasattr(self, 'css_selector_input') and self.css_selector_input:
-                selector_str = self.css_selector_input.text().strip()
-                if selector_str:
-                    # 按逗号分割，并去除每个选择器的空白
-                    selectors_list = [s.strip() for s in selector_str.split(',') if s.strip()]
-                    return {
-                        'selectors': selectors_list
-                    }
-            # Fallback if UI not ready or input is empty
-            return {'selectors': ['body']}  # Default fallback
-        return {}  # Default for other extractors
-
     def _build_config_dict(self) -> dict:
         """
-        Reads all UI controls and builds the standardized config dictionary.
-        Now uses standardized class names for Factories.
+        Assembles the nested runtime config from autonomous child widgets.
+        Playground is a pure aggregator — fields come from widgets already mapped.
         """
-        # --- 1. Discoverer Configuration ---
-        d_fetcher_config_dict = self.discovery_fetcher_widget.get_config()
+        d = self.discovery_fetcher_widget.get_config() if self.discovery_fetcher_widget else {}
+        e = self.article_fetcher_widget.get_config() if self.article_fetcher_widget else {}
+        disc = self.discoverer_panel.get_config() if self.discoverer_panel else {}
+        ext = self.extractor_panel.get_config() if self.extractor_panel else {}
 
-        # [Mapping] UI Name -> Class Name
-        discovery_fetcher_class = self._map_ui_fetcher_to_class(d_fetcher_config_dict['fetcher_name'])
-
-        # Fetcher Init Parameters (for Factory)
-        discoverer_fetcher_params = {
-            "proxy": d_fetcher_config_dict['proxy'],
-            "timeout_s": d_fetcher_config_dict['timeout'],  # Factory expects timeout_s
-            "stealth": "Stealth" in d_fetcher_config_dict['fetcher_name'],
-            "pause_browser": d_fetcher_config_dict['pause'],
-            "render_page": d_fetcher_config_dict['render']
-        }
-
-        # Fetcher Runtime Parameters (for .get_content / .discover)
-        discoverer_fetcher_kwargs = {
-            'wait_until': d_fetcher_config_dict.get('wait_until'),
-            'wait_for_selector': d_fetcher_config_dict.get('wait_for_selector'),
-            'wait_for_timeout_s': d_fetcher_config_dict.get('timeout'),
-            'scroll_pages': d_fetcher_config_dict.get('scroll_pages', 0)
-        }
-
-        discoverer_ui_name = self.discoverer_combo.currentText()
-        discoverer_class = self._map_ui_discoverer_to_class(discoverer_ui_name)
-
-        discoverer_args = {
-            "entry_point": self.last_used_entry_point,
-            # Specific args for ListPageDiscoverer
-            "scope_selector": self.scope_selector_input.text().strip() or None,
-            "manual_specified_signature": self.manual_specified_signature_input.text().strip() or None,
-            # Common args
-            "verbose": True
-        }
-
-        # --- 2. Extractor Configuration ---
-        e_fetcher_config_dict = self.article_fetcher_widget.get_config()
-        article_fetcher_class = self._map_ui_fetcher_to_class(e_fetcher_config_dict['fetcher_name'])
-
-        extractor_fetcher_params = {
-            "proxy": e_fetcher_config_dict['proxy'],
-            "timeout_s": e_fetcher_config_dict['timeout'],
-            "stealth": "Stealth" in e_fetcher_config_dict['fetcher_name'],
-            "pause_browser": e_fetcher_config_dict['pause'],
-            "render_page": e_fetcher_config_dict['render']
-        }
-
-        extractor_fetcher_kwargs = {
-            'wait_until': e_fetcher_config_dict['wait_until'],
-            'wait_for_selector': e_fetcher_config_dict['wait_for_selector'],
-            'wait_for_timeout_s': e_fetcher_config_dict['timeout'],
-            'scroll_pages': e_fetcher_config_dict['scroll_pages']
-        }
-
-        extractor_name = self.extractor_combo.currentText()
-        # Extractor args (init args + extract args mixed, separated by Worker logic if needed)
-        extractor_args = self._get_current_extractor_args(extractor_name)
-
-        # --- 3. Assemble Final Config ---
-        config = {
+        return {
             "discoverer": {
-                "class": discoverer_class,
-                "args": discoverer_args,
-                "fetcher": {
-                    "class": discovery_fetcher_class,
-                    "parameters": discoverer_fetcher_params
+                "class": disc.get("discoverer_name", "SitemapDiscoverer"),
+                "args": {
+                    "entry_point": self.last_used_entry_point,
+                    "scope_selector": disc.get("discoverer_init_param", {}).get("scope_selector"),
+                    "manual_specified_signature": disc.get("discoverer_init_param", {}).get("manual_specified_signature"),
+                    "verbose": True,
                 },
-                "fetcher_kwargs": discoverer_fetcher_kwargs,
-                # Extra meta info
+                "fetcher": {
+                    "class": d.get("d_fetcher_name", "RequestsFetcher"),
+                    "parameters": d.get("d_fetcher_init_param", {}),
+                },
+                "fetcher_kwargs": d.get("d_fetcher_kwargs", {}),
                 "date_filter": {
-                    "enabled": self.date_filter_check.isChecked(),
-                    "days": self.date_filter_days_spin.value()
+                    "enabled": disc.get("date_filter_enabled", False),
+                    "days": disc.get("date_filter_days", 7),
                 }
             },
             "extractor": {
-                "class": extractor_name,  # Usually matches class name directly
-                "args": extractor_args,
+                "class": ext.get("extractor_name", "Trafilatura"),
+                "args": ext.get("extractor_kwargs", {}),
                 "fetcher": {
-                    "class": article_fetcher_class,
-                    "parameters": extractor_fetcher_params
+                    "class": e.get("e_fetcher_name", "RequestsFetcher"),
+                    "parameters": e.get("e_fetcher_init_param", {}),
                 },
-                "fetcher_kwargs": extractor_fetcher_kwargs,
+                "fetcher_kwargs": e.get("e_fetcher_kwargs", {}),
             },
             "channel_filter": self._build_channel_filter_config()
         }
-        return config
 
 
     def closeEvent(self, event):
@@ -2316,26 +2497,12 @@ class CrawlerPlaygroundApp(QMainWindow):
     # --- [NEW] UI Helper Functions (for dynamic widgets) ---
 
     def _update_discoverer_options_ui(self, discoverer_name: str):
-        """Shows/hides discoverer-specific options based on selection."""
-        is_smart = (discoverer_name == "Smart Analysis")
-        if self.manual_specified_signature_label:
-            self.manual_specified_signature_label.setVisible(is_smart)
-        if self.manual_specified_signature_input:
-            self.manual_specified_signature_input.setVisible(is_smart)
-        if self.scope_selector_label:
-            self.scope_selector_label.setVisible(is_smart)
-        if self.scope_selector_input:
-            self.scope_selector_input.setVisible(is_smart)
-        if hasattr(self, 'inspect_signature_button'):
-            self.inspect_signature_button.setVisible(is_smart)
+        """[DEPRECATED] DiscovererConfigPanel now manages its own visibility internally."""
+        pass
 
     def _update_extractor_options_ui(self, extractor_name: str):
-        """Shows/hides extractor-specific options based on selection."""
-        is_generic_css = (extractor_name == "Generic CSS")
-        if self.css_selector_label:
-            self.css_selector_label.setVisible(is_generic_css)
-        if self.css_selector_input:
-            self.css_selector_input.setVisible(is_generic_css)
+        """[DEPRECATED] ExtractorConfigPanel now manages its own visibility internally."""
+        pass
 
     # --- NEW: URL History Management Methods ---
 
@@ -2409,8 +2576,8 @@ class CrawlerPlaygroundApp(QMainWindow):
     def load_config_from_file(self):
         """
         Loads a python config file and updates the UI.
+        Pure dispatch: each autonomous widget restores itself from the flat config.
         """
-        # 1. 打开文件选择器
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Load Configuration", "", "Python Files (*.py)"
         )
@@ -2418,7 +2585,6 @@ class CrawlerPlaygroundApp(QMainWindow):
             return
 
         try:
-            # 2. 动态加载 Python 文件 (即执行它以获取字典)
             import importlib.util
             spec = importlib.util.spec_from_file_location("loaded_config", file_path)
             module = importlib.util.module_from_spec(spec)
@@ -2429,96 +2595,36 @@ class CrawlerPlaygroundApp(QMainWindow):
 
             config = module.CRAWLER_CONFIG
 
-            # ==========================================
-            # 3. 开始 UI 同步 (顺序非常重要)
-            # ==========================================
-
-            # --- A. 恢复 Entry Point (URL) ---
-            entry_points = config.get('entry_points', [])
+            # --- Entry Points ---
+            entry_points = config.get('entry_points', {})
             if entry_points:
-                # 假设我们只取第一个，或者把列表拼接成字符串
                 url_text = " ".join(entry_points) if isinstance(entry_points, list) else str(entry_points)
-
-                # 更新输入框
                 self.url_input.setCurrentText(url_text)
-                # 关键：同步更新缓存，否则下次生成会出错
                 self.last_used_entry_point = entry_points
 
-                # --- B. 恢复 Discoverer ---
-            # B1. 先设置类型 (触发 UI 变化)
-            disc_class = config.get('discoverer_name', 'SitemapDiscoverer')
+            # --- Compatibility: old configs used period_filter instead of date_filter_* ---
+            if 'period_filter' in config and 'date_filter_enabled' not in config:
+                period = config['period_filter']
+                if period and period[0]:
+                    import datetime
+                    delta = period[1] - period[0]
+                    config['date_filter_enabled'] = True
+                    config['date_filter_days'] = max(1, delta.days)
+                else:
+                    config['date_filter_enabled'] = False
+                    config['date_filter_days'] = 7
 
-            # 简单的名称映射回 UI
-            ui_disc_map = {
-                'SitemapDiscoverer': 'Sitemap',
-                'RSSDiscoverer': 'RSS',
-                'ListPageDiscoverer': 'Smart Analysis'
-            }
-            ui_disc_name = ui_disc_map.get(disc_class)
-            if ui_disc_name:
-                self.discoverer_combo.setCurrentText(ui_disc_name)
-
-            # B2. 设置 Discoverer 参数 (Smart Analysis 特有)
-            disc_init = config.get('discoverer_init_param', {})
-            if disc_class == 'ListPageDiscoverer':
-                if self.manual_specified_signature_input:
-                    self.manual_specified_signature_input.setText(disc_init.get('manual_specified_signature') or "")
-                if self.scope_selector_input:
-                    self.scope_selector_input.setText(disc_init.get('scope_selector') or "")
-
-            # --- C. 恢复 Discovery Fetcher ---
-            self.discovery_fetcher_widget.load_from_config(
-                fetcher_name=config.get('d_fetcher_name', ''),
-                init_params=config.get('d_fetcher_init_param', {}),
-                runtime_kwargs=config.get('d_fetcher_kwargs', {})
-            )
-
-            # --- D. 恢复 Extractor ---
-            # D1. 设置类型
-            ext_class = config.get('extractor_name', 'TrafilaturaExtractor')
-            # 假设 UI 中的名字基本和类名对应 (去除 'Extractor' 后缀或查表)
-            # 这里做一个简单处理：
-            target_ext_ui = None
-            for i in range(self.extractor_combo.count()):
-                ui_text = self.extractor_combo.itemText(i)
-                # 比如 TrafilaturaExtractor -> Trafilatura
-                if ui_text in ext_class:
-                    target_ext_ui = ui_text
-                    break
-
-            if target_ext_ui:
-                self.extractor_combo.setCurrentText(target_ext_ui)
-
-            # D2. 设置 Extractor 参数 (如 Generic CSS 的 selector)
-            # 注意：Extractor 的参数在生成代码时可能分散在 init_param 和 kwargs 里
-            # 根据你的生成逻辑，Generic CSS 的 selectors 应该在 kwargs 里
-            ext_kwargs = config.get('extractor_kwargs', {})
-            if "Generic" in ext_class:
-                selectors = ext_kwargs.get('selectors', [])
-                if selectors:
-                    self.css_selector_input.setText(", ".join(selectors))
-
-            # --- E. 恢复 Article Fetcher ---
-            self.article_fetcher_widget.load_from_config(
-                fetcher_name=config.get('e_fetcher_name', ''),
-                init_params=config.get('e_fetcher_init_param', {}),
-                runtime_kwargs=config.get('e_fetcher_kwargs', {})
-            )
-
-            # --- F. 恢复 Date Filter ---
-            period = config.get('period_filter', (None, None))
-            # period 可能是 (datetime, datetime) 或者 (None, None)
-            if period and period[0]:
-                self.date_filter_check.setChecked(True)
-                # 计算天数差
-                delta = period[1] - period[0]
-                self.date_filter_days_spin.setValue(max(1, delta.days))
-            else:
-                self.date_filter_check.setChecked(False)
+            # --- Pure dispatch to autonomous widgets ---
+            if self.discoverer_panel:
+                self.discoverer_panel.set_config(config)
+            if self.discovery_fetcher_widget:
+                self.discovery_fetcher_widget.set_config(config)
+            if self.extractor_panel:
+                self.extractor_panel.set_config(config)
+            if self.article_fetcher_widget:
+                self.article_fetcher_widget.set_config(config)
 
             self.status_bar.showMessage(f"Configuration loaded from {file_path}", 5000)
-
-            # 最后：强制刷新一下代码预览，确保“加载”后的状态和“生成”的代码一致
             self.update_generated_code()
 
         except Exception as e:
@@ -2527,34 +2633,3 @@ class CrawlerPlaygroundApp(QMainWindow):
             QMessageBox.warning(self, "Load Error", f"Could not load configuration:\n{str(e)}")
 
 
-# =============================================================================
-#
-# SECTION 4: Main Execution
-#
-# =============================================================================
-
-if __name__ == "__main__":
-    if not QWebEngineView:
-        print("\n--- WARNING ---")
-        print("PyQtWebEngine not found. The Article web preview will be disabled.")
-        print("Please install it for full functionality: pip install PyQtWebEngine")
-
-    if not sync_playwright:
-        print("\n--- WARNING ---")
-        print("Playwright not found. 'Advanced' and 'Stealth' fetchers will be disabled.")
-        print("Please install it: pip install playwright && python -m playwright install")
-
-    app = QApplication(sys.argv)
-
-    app.setOrganizationName(SETTING_ORG)
-    app.setApplicationName(SETTING_APP)
-
-    if hasattr(Qt, 'AA_EnableHighDpiScaling'):
-        app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
-        app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-
-    main_window = CrawlerPlaygroundApp()
-    main_window.show()
-
-    sys.exit(app.exec_())
