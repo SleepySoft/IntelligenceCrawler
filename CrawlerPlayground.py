@@ -1069,16 +1069,16 @@ class WorkerSignals(QObject):
 class ChannelDiscoveryWorker(QRunnable):
     """
     Worker thread for Stage 1: Discovering all channels.
-    Refactored to use config dict and factories.
+    Consumes flat CRAWLER_CONFIG directly (no nested wrapping).
     """
 
     def __init__(self,
-                 discoverer_config: Dict[str, Any],  # 接收整个 discoverer 配置块
-                 entry_point: Any,  # URL 列表
+                 config: Dict[str, Any],  # flat CRAWLER_CONFIG
+                 entry_point: Any,
                  start_date: Optional[datetime.datetime],
                  end_date: Optional[datetime.datetime]):
-        super(ChannelDiscoveryWorker, self).__init__()
-        self.config = discoverer_config
+        super().__init__()
+        self.config = config
         self.entry_point = entry_point
         self.start_date = start_date
         self.end_date = end_date
@@ -1090,34 +1090,28 @@ class ChannelDiscoveryWorker(QRunnable):
             log_callback = self.signals.progress.emit
 
             # --- 1. Setup Fetcher using Factory ---
-            fetcher_cfg = self.config.get('fetcher', {})
-            fetcher_params = fetcher_cfg.get('parameters', {}).copy()
-
-            # 注入运行时回调
+            fetcher_name = self.config.get('d_fetcher_name')
+            fetcher_params = self.config.get('d_fetcher_init_param', {}).copy()
             fetcher_params['log_callback'] = log_callback
 
-            fetcher_name = fetcher_cfg.get('class')
             fetcher = fetcher_factory(fetcher_name, fetcher_params)
 
             # --- 2. Setup Discoverer using Factory ---
-            discoverer_name = self.config.get('class')
-            discoverer_args = self.config.get('args', {}).copy()
-
-            # 注入运行时依赖
+            discoverer_name = self.config.get('discoverer_name')
+            discoverer_args = self.config.get('discoverer_init_param', {}).copy()
             discoverer_args['fetcher'] = fetcher
             discoverer_args['verbose'] = True
 
             discoverer = discoverer_factory(discoverer_name, discoverer_args)
 
             # --- 3. Execution ---
-            # 运行时参数 (如 wait_until)
-            runtime_kwargs = self.config.get('fetcher_kwargs', {})
+            runtime_kwargs = self.config.get('d_fetcher_kwargs', {})
 
             entry_point_list = list(self.entry_point.values()) \
                 if isinstance(self.entry_point, dict) else self.entry_point
 
             channel_list = discoverer.discover_channels(
-                entry_point=entry_point_list,     # 20260210 - It may be a dict.
+                entry_point=entry_point_list,
                 start_date=self.start_date,
                 end_date=self.end_date,
                 fetcher_kwargs=runtime_kwargs
@@ -1135,13 +1129,14 @@ class ChannelDiscoveryWorker(QRunnable):
 class ArticleListWorker(QRunnable):
     """
     Worker thread for Stage 2: Gets articles for one channel.
+    Consumes flat CRAWLER_CONFIG directly.
     """
 
     def __init__(self,
-                 discoverer_config: Dict[str, Any],
+                 config: Dict[str, Any],  # flat CRAWLER_CONFIG
                  channel_url: str):
-        super(ArticleListWorker, self).__init__()
-        self.config = discoverer_config
+        super().__init__()
+        self.config = config
         self.channel_url = channel_url
         self.signals = WorkerSignals()
 
@@ -1151,23 +1146,21 @@ class ArticleListWorker(QRunnable):
             log_callback = self.signals.progress.emit
 
             # --- 1. Setup Fetcher ---
-            fetcher_cfg = self.config.get('fetcher', {})
-            # 注意：列表抓取通常也需要渲染，所以沿用 discovery 的配置
-            # 或者，如果逻辑上列表抓取需要强制渲染，可以在这里修改 fetcher_params
-            fetcher_params = fetcher_cfg.get('parameters', {}).copy()
+            fetcher_name = self.config.get('d_fetcher_name')
+            fetcher_params = self.config.get('d_fetcher_init_param', {}).copy()
             fetcher_params['log_callback'] = log_callback
 
-            fetcher = fetcher_factory(fetcher_cfg.get('class'), fetcher_params)
+            fetcher = fetcher_factory(fetcher_name, fetcher_params)
 
             # --- 2. Setup Discoverer ---
-            discoverer_name = self.config.get('class')
-            discoverer_args = self.config.get('args', {}).copy()
+            discoverer_name = self.config.get('discoverer_name')
+            discoverer_args = self.config.get('discoverer_init_param', {}).copy()
             discoverer_args['fetcher'] = fetcher
 
             discoverer = discoverer_factory(discoverer_name, discoverer_args)
 
             # --- 3. Execution ---
-            runtime_kwargs = self.config.get('fetcher_kwargs', {})
+            runtime_kwargs = self.config.get('d_fetcher_kwargs', {})
 
             article_list = discoverer.get_articles_for_channel(
                 self.channel_url,
@@ -1188,13 +1181,14 @@ class ArticleListWorker(QRunnable):
 class ExtractionWorker(QRunnable):
     """
     Worker thread for Stage 3: Fetching and Extracting.
+    Consumes flat CRAWLER_CONFIG directly.
     """
 
     def __init__(self,
-                 extractor_config: Dict[str, Any],  # 接收整个 extractor 配置块
+                 config: Dict[str, Any],  # flat CRAWLER_CONFIG
                  url_to_extract: str):
-        super(ExtractionWorker, self).__init__()
-        self.config = extractor_config
+        super().__init__()
+        self.config = config
         self.url_to_extract = url_to_extract
         self.signals = WorkerSignals()
 
@@ -1204,18 +1198,15 @@ class ExtractionWorker(QRunnable):
             log_callback = self.signals.progress.emit
 
             # --- 1. Setup Fetcher ---
-            fetcher_cfg = self.config.get('fetcher', {})
-            fetcher_params = fetcher_cfg.get('parameters', {}).copy()
+            fetcher_name = self.config.get('e_fetcher_name')
+            fetcher_params = self.config.get('e_fetcher_init_param', {}).copy()
             fetcher_params['log_callback'] = log_callback
 
-            fetcher = fetcher_factory(fetcher_cfg.get('class'), fetcher_params)
+            fetcher = fetcher_factory(fetcher_name, fetcher_params)
 
             # --- 2. Get Content ---
-            runtime_kwargs = self.config.get('fetcher_kwargs', {})
+            runtime_kwargs = self.config.get('e_fetcher_kwargs', {})
 
-            # 从 kwargs 提取 fetcher.get_content 需要的参数
-            # 注意：timeout_s 在 params 里有，但 get_content 有时也需要 wait_for_timeout_s
-            # 我们可以直接把整个 runtime_kwargs 传进去，只要 Fetcher 支持 **kwargs
             content_bytes = fetcher.get_content(
                 self.url_to_extract,
                 **runtime_kwargs
@@ -1225,23 +1216,18 @@ class ExtractionWorker(QRunnable):
                 raise ValueError("Failed to fetch content (returned None).")
 
             # --- 3. Setup Extractor ---
-            extractor_name = self.config.get('class')
-            extractor_args = self.config.get('args', {}).copy()
-            extractor_args['verbose'] = True
+            extractor_name = self.config.get('extractor_name')
+            extractor_init = self.config.get('extractor_init_param', {}).copy()
+            extractor_kwargs = self.config.get('extractor_kwargs', {}).copy()
+            extractor_init['verbose'] = True
 
-            extractor = extractor_factory(extractor_name, extractor_args)
+            extractor = extractor_factory(extractor_name, extractor_init)
 
             # --- 4. Execution ---
-            # Extractor.extract 通常接收 bytes, url, 以及额外的提取参数 (如 selectors)
-            # 这些参数应该已经在 extractor_args 里了，或者需要单独拆分
-            # 在 _build_config_dict 中，selectors 放在 args 里
-
-            # 注意：某些 Extractor 的 extract 方法参数不同。
-            # GenericCSSExtractor 需要 selectors 列表。
-            # 这里我们将 args 作为 kwargs 传给 extract 方法
-            extract_runtime_args = extractor_args.copy()
-            # 移除 verbose，因为它是 __init__ 参数
-            if 'verbose' in extract_runtime_args: del extract_runtime_args['verbose']
+            # Merge init_param and kwargs for extract() call, minus 'verbose'
+            extract_runtime_args = {**extractor_kwargs}
+            if 'verbose' in extract_runtime_args:
+                del extract_runtime_args['verbose']
 
             markdown_result = extractor.extract(
                 content_bytes,
@@ -1261,14 +1247,14 @@ class ExtractionWorker(QRunnable):
 class ChannelSourceWorker(QRunnable):
     """
     Worker thread to fetch raw channel content (e.g., XML) for the text viewer.
-    Refactored to use config dict and factories.
+    Consumes flat CRAWLER_CONFIG directly.
     """
 
     def __init__(self,
-                 discoverer_config: Dict[str, Any],  # 接收标准配置
+                 config: Dict[str, Any],  # flat CRAWLER_CONFIG
                  url: str):
-        super(ChannelSourceWorker, self).__init__()
-        self.config = discoverer_config
+        super().__init__()
+        self.config = config
         self.url = url
         self.signals = WorkerSignals()
 
@@ -1278,27 +1264,23 @@ class ChannelSourceWorker(QRunnable):
             log_callback = self.signals.progress.emit
 
             # 1. Setup Fetcher via Factory
-            fetcher_cfg = self.config.get('fetcher', {})
-            # 源码查看通常不需要渲染，为了速度和 XML 解析稳定性，强制 render=False
-            # 但如果你希望跟 UI 设置保持一致，就直接用 copy。这里我们做一个特殊处理：
-            fetcher_params = fetcher_cfg.get('parameters', {}).copy()
+            fetcher_name = self.config.get('d_fetcher_name')
+            fetcher_params = self.config.get('d_fetcher_init_param', {}).copy()
             fetcher_params['log_callback'] = log_callback
             fetcher_params['render_page'] = False  # Force False for source viewing
 
-            fetcher = fetcher_factory(fetcher_cfg.get('class'), fetcher_params)
+            fetcher = fetcher_factory(fetcher_name, fetcher_params)
 
             # 2. Setup Discoverer via Factory
-            discoverer_name = self.config.get('class')
-            discoverer_args = self.config.get('args', {}).copy()
+            discoverer_name = self.config.get('discoverer_name')
+            discoverer_args = self.config.get('discoverer_init_param', {}).copy()
             discoverer_args['fetcher'] = fetcher
 
             discoverer = discoverer_factory(discoverer_name, discoverer_args)
 
             # 3. Execution
-            # 获取运行时的 kwargs (如 headers, cookies 等，虽然目前主要是 wait_until)
-            runtime_kwargs = self.config.get('fetcher_kwargs', {})
+            runtime_kwargs = self.config.get('d_fetcher_kwargs', {})
 
-            # 使用 Discoverer 的通用接口 get_content_str
             content_string = discoverer.get_content_str(
                 self.url,
                 fetcher_kwargs=runtime_kwargs
@@ -1316,14 +1298,14 @@ class ChannelSourceWorker(QRunnable):
 class SignatureAnalysisWorker(QRunnable):
     """
     Worker thread to analyze a list page and get all signature groups.
-    Refactored to use config dict and factories.
+    Consumes flat CRAWLER_CONFIG directly.
     """
 
     def __init__(self,
-                 discoverer_config: Dict[str, Any],  # 接收标准配置
+                 config: Dict[str, Any],  # flat CRAWLER_CONFIG
                  url_to_analyze: str):
-        super(SignatureAnalysisWorker, self).__init__()
-        self.config = discoverer_config
+        super().__init__()
+        self.config = config
         self.url_to_analyze = url_to_analyze
         self.signals = WorkerSignals()
 
@@ -1334,28 +1316,24 @@ class SignatureAnalysisWorker(QRunnable):
             log_callback(f"Starting signature analysis on {self.url_to_analyze}...")
 
             # 1. Setup Fetcher via Factory
-            fetcher_cfg = self.config.get('fetcher', {})
-            fetcher_params = fetcher_cfg.get('parameters', {}).copy()
+            fetcher_name = self.config.get('d_fetcher_name')
+            fetcher_params = self.config.get('d_fetcher_init_param', {}).copy()
             fetcher_params['log_callback'] = log_callback
 
-            fetcher = fetcher_factory(fetcher_cfg.get('class'), fetcher_params)
+            fetcher = fetcher_factory(fetcher_name, fetcher_params)
 
-            # 2. Setup Discoverer (Must be ListPageDiscoverer)
-            # 即使 config 里写的是其他名字，这里逻辑上也必须是 ListPage。
-            # 但既然 UI 做了限制，我们可以信任 config['class'] 就是 ListPageDiscoverer
-            discoverer_name = self.config.get('class')
-            discoverer_args = self.config.get('args', {}).copy()
+            # 2. Setup Discoverer
+            discoverer_name = self.config.get('discoverer_name')
+            discoverer_args = self.config.get('discoverer_init_param', {}).copy()
             discoverer_args['fetcher'] = fetcher
 
-            # 强制创建一个 Discoverer 实例
             discoverer = discoverer_factory(discoverer_name, discoverer_args)
 
-            # 双重检查类型，防止运行时错误
             if not hasattr(discoverer, 'get_signature_groups'):
                 raise ValueError(f"Discoverer '{discoverer_name}' does not support signature analysis.")
 
             # 3. Execution
-            runtime_kwargs = self.config.get('fetcher_kwargs', {})
+            runtime_kwargs = self.config.get('d_fetcher_kwargs', {})
 
             groups_data = discoverer.get_signature_groups(
                 self.url_to_analyze,
@@ -1870,29 +1848,25 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         # =========================================================
         # 在生成配置之前，必须先更新“最后使用的入口点”缓存
-        # 这样 _build_config_dict() 才能读到最新的值，
-        # 从而保证 Worker 和 代码生成器 都能拿到这次提交的 URL。
+        # 这样 _build_flat_config_dict() 才能读到最新的值。
         # =========================================================
         self.last_used_entry_point = channel_dict
 
         # 4. 现在可以安全地生成配置了
-        full_config = self._build_config_dict()
-        discoverer_config = full_config['discoverer']
+        flat_config = self._build_flat_config_dict()
 
         # 5. 准备日期过滤器
         start_date: Optional[datetime.datetime] = None
         end_date: Optional[datetime.datetime] = None
 
-        if discoverer_config.get('date_filter', {}).get('enabled'):
-            days = discoverer_config['date_filter']['days']
+        if flat_config.get('date_filter_enabled'):
+            days = flat_config.get('date_filter_days', 7)
             end_date = datetime.datetime.now()
             start_date = end_date - datetime.timedelta(days=days)
 
         # 6. 启动 Worker
-        # 注意：这里可以直接传 self.last_used_entry_point (它现在是新的了)
-        # 也可以传 entry_point_urls，两者现在相等。
         worker = ChannelDiscoveryWorker(
-            discoverer_config=discoverer_config,
+            config=flat_config,
             entry_point=self.last_used_entry_point,
             start_date=start_date,
             end_date=end_date
@@ -1914,11 +1888,10 @@ class CrawlerPlaygroundApp(QMainWindow):
         channel_item.setExpanded(True)
         self.status_bar.showMessage(f"Loading articles for {channel_url}...")
 
-        full_config = self._build_config_dict()
-        discoverer_config = full_config['discoverer']
+        flat_config = self._build_flat_config_dict()
 
         worker = ArticleListWorker(
-            discoverer_config=discoverer_config,
+            config=flat_config,
             channel_url=channel_url
         )
 
@@ -1937,13 +1910,10 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.status_bar.showMessage("Error: No article URL to analyze.")
             return
 
-        full_config = self._build_config_dict()
-        extractor_config = full_config['extractor']
-
-        url = self.article_url_input.text().strip()
+        flat_config = self._build_flat_config_dict()
 
         worker = ExtractionWorker(
-            extractor_config=extractor_config,
+            config=flat_config,
             url_to_extract=url
         )
 
@@ -1960,12 +1930,10 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.channel_source_viewer.setPlainText(f"Loading source from {url}...")
         self.tab_widget.setCurrentWidget(self.channel_source_viewer)
 
-        # [REFACTORED] Use unified config
-        full_config = self._build_config_dict()
-        discoverer_config = full_config['discoverer']
+        flat_config = self._build_flat_config_dict()
 
         worker = ChannelSourceWorker(
-            discoverer_config=discoverer_config,
+            config=flat_config,
             url=url
         )
 
@@ -1994,15 +1962,10 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         self.set_loading_state(True, f"Inspecting signatures for {url}...")
 
-        # [REFACTORED] Use unified config
-        full_config = self._build_config_dict()
-        discoverer_config = full_config['discoverer']
-
-        # 注意：_build_config_dict 已经根据 UI 状态获取了 scope_selector 等参数
-        # 并放入了 discoverer_config['args'] 中，所以这里不需要再手动获取 scope 并传入 Worker
+        flat_config = self._build_flat_config_dict()
 
         worker = SignatureAnalysisWorker(
-            discoverer_config=discoverer_config,
+            config=flat_config,
             url_to_analyze=url
         )
 
@@ -2320,18 +2283,14 @@ class CrawlerPlaygroundApp(QMainWindow):
     def update_generated_code(self):
         """
         Orchestrator for code generation.
-        Gathers all UI settings into a config dict, then generates
+        Gathers all UI settings into a **flat** config dict, then generates
         the corresponding Python code script.
-        (代码生成的协调器。
-         将所有UI设置收集到一个配置字典中，然后生成相应的Python代码脚本。)
         """
         try:
-            # Step 1: Read all UI controls into a structured dictionary
-            # (第 1 步：将所有 UI 控件读入结构化字典)
-            config_dict = self._build_config_dict()
+            # Step 1: Build flat config (single source of truth for serialization)
+            config_dict = self._build_flat_config_dict()
 
-            # Step 2: Pass the dictionary to the code generator
-            # (第 2 步：将字典传递给代码生成器)
+            # Step 2: Pass the flat dictionary to the code generator
             code_script = CrawlerCodeGenerator().generate_code_from_config(config_dict)
 
             # Step 3: Display the generated code
@@ -2409,47 +2368,48 @@ class CrawlerPlaygroundApp(QMainWindow):
             "channel_filter_keys": final_keys
         }
 
-    def _build_config_dict(self) -> dict:
+    def _build_flat_config_dict(self) -> dict:
         """
-        Assembles the nested runtime config from autonomous child widgets.
-        Playground is a pure aggregator — fields come from widgets already mapped.
+        Assembles the flat CRAWLER_CONFIG from autonomous child widgets.
+        This is the single source of truth for serialization and round-trip.
         """
-        d = self.discovery_fetcher_widget.get_config() if self.discovery_fetcher_widget else {}
-        e = self.article_fetcher_widget.get_config() if self.article_fetcher_widget else {}
-        disc = self.discoverer_panel.get_config() if self.discoverer_panel else {}
-        ext = self.extractor_panel.get_config() if self.extractor_panel else {}
+        config = {}
 
-        return {
-            "discoverer": {
-                "class": disc.get("discoverer_name", "SitemapDiscoverer"),
-                "args": {
-                    "entry_point": self.last_used_entry_point,
-                    "scope_selector": disc.get("discoverer_init_param", {}).get("scope_selector"),
-                    "manual_specified_signature": disc.get("discoverer_init_param", {}).get("manual_specified_signature"),
-                    "verbose": True,
-                },
-                "fetcher": {
-                    "class": d.get("d_fetcher_name", "RequestsFetcher"),
-                    "parameters": d.get("d_fetcher_init_param", {}),
-                },
-                "fetcher_kwargs": d.get("d_fetcher_kwargs", {}),
-                "date_filter": {
-                    "enabled": disc.get("date_filter_enabled", False),
-                    "days": disc.get("date_filter_days", 7),
-                }
-            },
-            "extractor": {
-                "class": ext.get("extractor_name", "Trafilatura"),
-                "args": ext.get("extractor_kwargs", {}),
-                "fetcher": {
-                    "class": e.get("e_fetcher_name", "RequestsFetcher"),
-                    "parameters": e.get("e_fetcher_init_param", {}),
-                },
-                "fetcher_kwargs": e.get("e_fetcher_kwargs", {}),
-            },
-            "channel_filter": self._build_channel_filter_config()
-        }
+        # Entry points
+        config['entry_points'] = self.last_used_entry_point or {}
 
+        # Autonomous panels / widgets (already output flat keys)
+        if self.discoverer_panel:
+            config.update(self.discoverer_panel.get_config())
+        if self.discovery_fetcher_widget:
+            config.update(self.discovery_fetcher_widget.get_config())
+        if self.extractor_panel:
+            config.update(self.extractor_panel.get_config())
+        if self.article_fetcher_widget:
+            config.update(self.article_fetcher_widget.get_config())
+
+        # Channel filter
+        ch_filter = self._build_channel_filter_config()
+        if ch_filter.get('channel_filter_keys'):
+            config['channel_filter'] = {'channel_list_filter': ch_filter['channel_filter_keys']}
+        else:
+            config['channel_filter'] = None
+
+        # Date filter → period_filter (runtime computed)
+        if config.get('date_filter_enabled'):
+            days = config.get('date_filter_days', 7)
+            end = datetime.datetime.now()
+            start = end - datetime.timedelta(days=days)
+            config['period_filter'] = (start, end)
+        else:
+            config['period_filter'] = (None, None)
+
+        # Runtime placeholders
+        config['article_filter'] = None
+        config['content_handler'] = None
+        config['exception_handler'] = None
+
+        return config
 
     def closeEvent(self, event):
         """Ensure threads are cleaned up on exit."""
@@ -2633,3 +2593,14 @@ class CrawlerPlaygroundApp(QMainWindow):
             QMessageBox.warning(self, "Load Error", f"Could not load configuration:\n{str(e)}")
 
 
+# =============================================================================
+#
+# Entry Point
+#
+# =============================================================================
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = CrawlerPlaygroundApp()
+    window.show()
+    sys.exit(app.exec_())
