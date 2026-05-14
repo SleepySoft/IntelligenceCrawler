@@ -687,33 +687,6 @@ class FetcherConfigWidget(QWidget):
             return "Stealth (Playwright)" if stealth else "Advanced (Playwright)"
         return class_name
 
-    # -----------------------------------------------------------------------
-    # Legacy compatibility wrapper (deprecated, use set_config instead)
-    # -----------------------------------------------------------------------
-
-    def load_from_config(self, fetcher_name: str, init_params: dict, runtime_kwargs: dict):
-        """
-        [DEPRECATED] Use set_config() instead.
-        Loads configuration back into the widget controls from split dicts.
-        """
-        is_playwright = "Playwright" in fetcher_name
-        stealth = init_params.get("stealth", False)
-        ui_name = self._map_class_to_ui_fetcher(fetcher_name, stealth)
-        self.fetcher_combo.setCurrentText(ui_name)
-
-        self.proxy_input.setText(init_params.get('proxy') or "")
-        self.timeout_spin.setValue(int(init_params.get('timeout_s', 30)))
-
-        if is_playwright:
-            self.pause_check.setChecked(init_params.get('pause_browser', False))
-            self.render_check.setChecked(init_params.get('render_page', False))
-
-        if is_playwright:
-            self.wait_until_combo.setCurrentText(runtime_kwargs.get('wait_until', 'networkidle'))
-            self.wait_selector_input.setText(runtime_kwargs.get('wait_for_selector') or "")
-            self.scroll_pages_spin.setValue(runtime_kwargs.get('scroll_pages', 0))
-
-
 # =============================================================================
 #
 # DiscovererConfigPanel — 自治的 Discoverer 配置面板
@@ -1374,10 +1347,6 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.discoverer_panel: Optional[DiscovererConfigPanel] = None
         self.extractor_panel: Optional[ExtractorConfigPanel] = None
 
-        # Cache for the *actual* entry_point (str or List[str])
-        # used in the last discovery run.
-        self.last_used_entry_point: Any = None
-
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(QThreadPool.globalInstance().maxThreadCount() // 2 + 1)
 
@@ -1850,9 +1819,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         # 在生成配置之前，必须先更新“最后使用的入口点”缓存
         # 这样 _build_flat_config_dict() 才能读到最新的值。
         # =========================================================
-        self.last_used_entry_point = channel_dict
-
-        # 4. 现在可以安全地生成配置了
+        # 4. 生成扁平配置（Workers 和代码生成器的统一输入）
         flat_config = self._build_flat_config_dict()
 
         # 5. 准备日期过滤器
@@ -1867,7 +1834,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         # 6. 启动 Worker
         worker = ChannelDiscoveryWorker(
             config=flat_config,
-            entry_point=self.last_used_entry_point,
+            entry_point=channel_dict,
             start_date=start_date,
             end_date=end_date
         )
@@ -2011,8 +1978,6 @@ class CrawlerPlaygroundApp(QMainWindow):
 
     def on_channel_discovery_result(self, channel_list: List[str]):
         """Slot for ChannelDiscoveryWorker 'result' signal."""
-        # 20260210 - Do not update last_used_entry_point with channel_list because it may lose channel name information.
-        # self.last_used_entry_point = channel_list
         if not channel_list:
             self.status_bar.showMessage("No channels found.")
             return
@@ -2375,8 +2340,20 @@ class CrawlerPlaygroundApp(QMainWindow):
         """
         config = {}
 
-        # Entry points
-        config['entry_points'] = self.last_used_entry_point or {}
+        # Entry points — 实时解析 URL 输入，消除缓存时序依赖
+        raw_url_text = self.url_input.currentText().strip()
+        if raw_url_text:
+            try:
+                config['entry_points'] = parse_input_to_channel_dict(
+                    raw_url_text,
+                    auto_scheme=True,
+                    group_by="domain",
+                    conflict_strategy="domain_then_suffix"
+                )
+            except ValueError:
+                config['entry_points'] = {}
+        else:
+            config['entry_points'] = {}
 
         # Autonomous panels / widgets (already output flat keys)
         if self.discoverer_panel:
@@ -2453,16 +2430,6 @@ class CrawlerPlaygroundApp(QMainWindow):
 
     def _re_generated_code(self):
         self.update_generated_code()
-
-    # --- [NEW] UI Helper Functions (for dynamic widgets) ---
-
-    def _update_discoverer_options_ui(self, discoverer_name: str):
-        """[DEPRECATED] DiscovererConfigPanel now manages its own visibility internally."""
-        pass
-
-    def _update_extractor_options_ui(self, extractor_name: str):
-        """[DEPRECATED] ExtractorConfigPanel now manages its own visibility internally."""
-        pass
 
     # --- NEW: URL History Management Methods ---
 
@@ -2560,19 +2527,6 @@ class CrawlerPlaygroundApp(QMainWindow):
             if entry_points:
                 url_text = " ".join(entry_points) if isinstance(entry_points, list) else str(entry_points)
                 self.url_input.setCurrentText(url_text)
-                self.last_used_entry_point = entry_points
-
-            # --- Compatibility: old configs used period_filter instead of date_filter_* ---
-            if 'period_filter' in config and 'date_filter_enabled' not in config:
-                period = config['period_filter']
-                if period and period[0]:
-                    import datetime
-                    delta = period[1] - period[0]
-                    config['date_filter_enabled'] = True
-                    config['date_filter_days'] = max(1, delta.days)
-                else:
-                    config['date_filter_enabled'] = False
-                    config['date_filter_days'] = 7
 
             # --- Pure dispatch to autonomous widgets ---
             if self.discoverer_panel:
