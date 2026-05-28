@@ -699,12 +699,19 @@ class DiscovererConfigPanel(QWidget):
 
     get_config() outputs flat keys:
         discoverer_name (str): e.g. 'SitemapDiscoverer', 'RSSDiscoverer', 'ListPageDiscoverer'
-        discoverer_init_param (dict): {'verbose': True, 'manual_specified_signature': ..., 'scope_selector': ...}
+        discoverer_init_param (dict): Factory init parameters
         date_filter_enabled (bool)
         date_filter_days (int)
 
     set_config(config) reads the same flat keys back into UI.
     """
+
+    EXTRACTION_MODE_ITEMS = [
+        ("Auto", "auto"),
+        ("Plain List", "plain_list"),
+        ("Card", "card"),
+        ("Signature", "signature"),
+    ]
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -725,6 +732,20 @@ class DiscovererConfigPanel(QWidget):
             "- Smart Analysis: AI-powered link signature detection."
         )
         layout.addWidget(self.discoverer_combo)
+
+        # --- [NEW] Extraction Mode ---
+        self.extraction_mode_label = QLabel("Mode:")
+        self.extraction_mode_combo = QComboBox()
+        for display, value in self.EXTRACTION_MODE_ITEMS:
+            self.extraction_mode_combo.addItem(display, value)
+        self.extraction_mode_combo.setToolTip(
+            "Auto: Try Plain List → Card → Signature.\n"
+            "Plain List: Scope should be a list container (e.g., div.Section or ul.List).\n"
+            "Card: Scope should be an article card (e.g., li.ArticleHeadlineListWrap).\n"
+            "Signature: Use legacy signature clustering."
+        )
+        layout.addWidget(self.extraction_mode_label)
+        layout.addWidget(self.extraction_mode_combo)
 
         self.manual_specified_signature_label = QLabel("AI Signature:")
         self.manual_specified_signature_input = QLineEdit()
@@ -765,15 +786,31 @@ class DiscovererConfigPanel(QWidget):
             lambda state: self.date_filter_days_spin.setEnabled(state == Qt.Checked)
         )
         self.discoverer_combo.currentTextChanged.connect(self._on_discoverer_changed)
+        self.extraction_mode_combo.currentTextChanged.connect(self._on_extraction_mode_changed)
         self._on_discoverer_changed(self.discoverer_combo.currentText())
 
     def _on_discoverer_changed(self, text: str):
         is_smart = (text == "Smart Analysis")
-        self.manual_specified_signature_label.setVisible(is_smart)
-        self.manual_specified_signature_input.setVisible(is_smart)
+        self.extraction_mode_label.setVisible(is_smart)
+        self.extraction_mode_combo.setVisible(is_smart)
         self.scope_selector_label.setVisible(is_smart)
         self.scope_selector_input.setVisible(is_smart)
-        self.inspect_signature_button.setVisible(is_smart)
+
+        if is_smart:
+            self._on_extraction_mode_changed(self.extraction_mode_combo.currentText())
+        else:
+            self.manual_specified_signature_label.setVisible(False)
+            self.manual_specified_signature_input.setVisible(False)
+            self.inspect_signature_button.setVisible(False)
+
+    def _on_extraction_mode_changed(self, text: str):
+        """Toggle Signature/Inspect visibility based on mode."""
+        mode = self.extraction_mode_combo.currentData()
+        # Signature and Inspect only make sense in signature-like modes
+        show_signature = mode in ("signature", "auto")
+        self.manual_specified_signature_label.setVisible(show_signature)
+        self.manual_specified_signature_input.setVisible(show_signature)
+        self.inspect_signature_button.setVisible(show_signature)
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -792,6 +829,7 @@ class DiscovererConfigPanel(QWidget):
         if class_name == "ListPageDiscoverer":
             init_param["manual_specified_signature"] = self.manual_specified_signature_input.text().strip() or None
             init_param["scope_selector"] = self.scope_selector_input.text().strip() or None
+            init_param["extraction_mode"] = self.extraction_mode_combo.currentData()
 
         return {
             "discoverer_name": class_name,
@@ -809,6 +847,13 @@ class DiscovererConfigPanel(QWidget):
         init_param = config.get("discoverer_init_param", {})
         self.manual_specified_signature_input.setText(init_param.get("manual_specified_signature") or "")
         self.scope_selector_input.setText(init_param.get("scope_selector") or "")
+
+        # Restore extraction_mode
+        mode_value = init_param.get("extraction_mode", "auto")
+        for i in range(self.extraction_mode_combo.count()):
+            if self.extraction_mode_combo.itemData(i) == mode_value:
+                self.extraction_mode_combo.setCurrentIndex(i)
+                break
 
         self.date_filter_check.setChecked(config.get("date_filter_enabled", False))
         self.date_filter_days_spin.setValue(config.get("date_filter_days", 7))
@@ -1707,6 +1752,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         # Config change triggers code refresh
         if self.discoverer_panel:
             self.discoverer_panel.discoverer_combo.currentTextChanged.connect(self.update_generated_code)
+            self.discoverer_panel.extraction_mode_combo.currentTextChanged.connect(self.update_generated_code)
         if self.extractor_panel:
             self.extractor_panel.extractor_combo.currentTextChanged.connect(self.update_generated_code)
         if self.discovery_fetcher_widget:

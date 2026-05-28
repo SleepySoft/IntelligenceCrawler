@@ -149,10 +149,11 @@ def discoverer_factory(name: str, init_params: dict):
         return ListPageDiscoverer(
             fetcher=init_params.get('fetcher'),
             verbose=init_params.get('verbose', False),
-            # min_group_count 可以在这里写死或者从 UI 获取，目前默认 5
             min_group_count=init_params.get('min_group_count', 5),
             scope_selector=init_params.get('scope_selector'),
-            manual_specified_signature=init_params.get('manual_specified_signature')
+            manual_specified_signature=init_params.get('manual_specified_signature'),
+            extraction_mode=init_params.get('extraction_mode', 'auto'),
+            smart_scope_mode=init_params.get('smart_scope_mode', True),
         )
 
     if name == 'Sitemap': return discoverer_factory('SitemapDiscoverer', init_params)
@@ -1048,12 +1049,32 @@ class ListPageDiscoverer(IDiscoverer):
                  verbose: bool = True,
                  min_group_count: int = 5,
                  scope_selector: Optional[str] = None,
-                 manual_specified_signature: Optional[str] = None):
+                 manual_specified_signature: Optional[str] = None,
+                 extraction_mode: str = "auto",
+                 smart_scope_mode: bool = True):
         super().__init__(fetcher, verbose)
+
         self.log_messages: List[str] = []
         self.min_group_count = min_group_count
+
+        # scope_selector 的语义由 extraction_mode 决定：
+        #   plain_list = 列表容器
+        #   card       = 文章卡片
+        #   signature  = 扫描范围
+        #   auto       = 自动尝试
         self.scope_selector = scope_selector
+
+        # 兼容旧配置：若未显式指定 extraction_mode，但 smart_scope_mode=False，
+        # 则映射为 signature 模式，保持旧行为。
+        if extraction_mode == "auto" and not smart_scope_mode:
+            self.extraction_mode = "signature"
+        else:
+            self.extraction_mode = extraction_mode or "auto"
+
+        # 如果用户或 AI 已经明确指定 signature，则它的优先级最高。
+        # 这种情况下不会优先走 SmartScope，以避免覆盖明确配置。
         self.manual_specified_signature = manual_specified_signature
+
         self.analysis_cache: Dict[str, Tuple[BeautifulSoup, List[LinkGroup]]] = {}
 
     def _log(self, message: str, indent: int = 0):
@@ -1084,9 +1105,11 @@ class ListPageDiscoverer(IDiscoverer):
         self._log(f"  [Analyze] 步骤 2: 聚类链接...", indent=1)
         groups = self._cluster_fingerprints(fingerprints)
         self._log(f"  [Analyze] 已完成. 发现 {len(fingerprints)} 个链接, 聚类为 {len(groups)} 组.", indent=1)
-        self.analysis_cache[url] = (soup, groups)
 
-        # 仅在没有 kwargs 时才写入缓存
+        # 仅在没有 fetcher_kwargs 时才写入缓存。
+        # 原因：
+        #   fetcher_kwargs 可能代表特殊请求参数、cookie、headers、代理、渲染策略等。
+        #   如果把这些结果写入普通 url 缓存，后续不带 kwargs 的分析可能拿到错误结果。
         if not fetcher_kwargs:
             self.analysis_cache[url] = (soup, groups)
 
@@ -1167,93 +1190,90 @@ class ListPageDiscoverer(IDiscoverer):
         return " > ".join(reversed(path))
 
     def _generate_fingerprints(self, soup: BeautifulSoup, base_url: str) -> List[LinkFingerprint]:
-        """
-        [重写] 核心改进：扩大搜索范围，查找所有带有 URL 信息的重复元素，
-        包括 <a href> 和带有 data-* 属性的标签。
-        """
         fingerprints = []
         seen_hrefs = set()
 
-        # 1. 如果用户指定了范围，优先使用
+        LINK_ATTRS = ['href', 'data-link', 'data-url', 'data-href', 'ng-href', 'data-ng-href']
+
+        # 1. 确定扫描范围 roots
         if self.scope_selector:
             self._log(f"  [Scope] 用户指定了搜索范围: '{self.scope_selector}'", indent=1)
             try:
-                main_content = soup.select_one(self.scope_selector)
+                scope_roots = soup.select(self.scope_selector)
             except Exception as e:
                 self._log(f"  [Scope] Error: 选择器语法错误: {e}", indent=2)
                 return []
 
-            if not main_content:
+            if not scope_roots:
                 self._log(f"  [Scope] Warning: 在页面中未找到符合 '{self.scope_selector}' 的元素。停止扫描。", indent=2)
-                return []  # 指定了范围但没找到，直接返回空，避免抓取到错误数据
+                return []
 
-        # 2. 如果没指定，使用默认策略
+            self._log(f"  [Scope] 命中 {len(scope_roots)} 个范围节点。", indent=1)
+
         else:
-            main_content = soup.find('main') or soup.find('article') or soup.body
+            default_root = soup.find('main') or soup.find('article') or soup.body
+            if default_root is None:
+                return []
+            scope_roots = [default_root]
 
-        if main_content is None:
-            return []
-
-        # 添加常见的前端框架路由属性
-        # ng-href (Angular), :href (Vue bind - 虽然后端渲染通常看不到 :href 但以防万一)
-        LINK_ATTRS = ['href', 'data-link', 'data-url', 'data-href', 'ng-href', 'data-ng-href']
-
-        # 2. 查找包含这些属性的标签
-        #    查找所有 <a href> 以及所有带有 data-link/url/href 的标签
-        #    使用 soup.select 是最高效的方法，但为了通用性，我们先用 find_all 遍历。
-
-        # [优化] 针对您的微信场景，我们知道它在 <li> 上，但我们应该保持通用性：
-
-        # 建立一个集合，存储所有匹配的标签，避免重复扫描
         potential_link_tags: Set[Tag] = set()
 
-        # 查找标准链接
-        for a_tag in main_content.find_all('a'):  # 移除 href=True 限制，先都抓进来
-            potential_link_tags.add(a_tag)
+        def add_if_potential_link(tag: Tag):
+            if not isinstance(tag, Tag):
+                return
 
-        # 查找非标准链接
-        for attr in LINK_ATTRS:
-            if attr == 'href': continue
-            for tag in main_content.find_all(attrs={attr: True}):
+            if tag.name == 'a':
                 potential_link_tags.add(tag)
+                return
 
-        # 3. 遍历所有潜在的链接标签并生成指纹
+            for attr in LINK_ATTRS:
+                if attr == 'href':
+                    continue
+                if tag.has_attr(attr):
+                    potential_link_tags.add(tag)
+                    return
+
+        # 2. 对每个 scope root 扫描
+        for root in scope_roots:
+            # 关键：先检查 root 自身
+            add_if_potential_link(root)
+
+            # 再检查 descendants
+            for a_tag in root.find_all('a'):
+                potential_link_tags.add(a_tag)
+
+            for attr in LINK_ATTRS:
+                if attr == 'href':
+                    continue
+                for tag in root.find_all(attrs={attr: True}):
+                    potential_link_tags.add(tag)
+
+        # 3. 遍历候选链接节点
         for item_tag in potential_link_tags:
             href = ""
             text = ""
 
-            # 尝试从所有可能的属性中获取 URL
             for attr in LINK_ATTRS:
                 if item_tag.has_attr(attr):
-                    # 避免在 <a href> 标签上重复获取 data-link
                     if item_tag.name == 'a' and attr != 'href':
                         continue
 
-                        # 避免获取不完整的链接（例如：a[data-link] 可能只是一个ID）
                     potential_href = item_tag[attr].strip()
                     if potential_href and ('http' in potential_href or potential_href.startswith('/')):
                         href = potential_href
-                        break  # 找到了一个合理的 URL，停止搜索属性
+                        break
 
             if not href:
                 continue
 
-            # 尝试获取链接文本
-            # 优先使用标签自身的文本
             text = item_tag.get_text(strip=True)
 
-            # 如果是列表项（如您给的 HTML），可能没有直接文本，文本在子元素中
             if not text:
-                # 尝试从 data-title 获取文本 (如微信列表项)
                 text = item_tag.get('data-title', '').strip()
 
-            # 过滤掉没有文本的链接（例如纯图标链接或空列表项）
             if not text:
                 continue
 
-            # --- 以下是原有的过滤和处理逻辑 ---
-
-            # 过滤
             if href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
                 continue
 
@@ -1262,18 +1282,23 @@ class ListPageDiscoverer(IDiscoverer):
             except Exception:
                 continue
 
-            # 过滤重复和指向同一页面的链接
             if full_url in seen_hrefs:
                 continue
+
             if urlparse(full_url).path == urlparse(base_url).path:
                 continue
 
             seen_hrefs.add(full_url)
 
-            # [调用结构签名] - 关键：对找到的标签本身生成签名
             signature = self._get_structural_signature(item_tag)
 
-            fingerprints.append(LinkFingerprint(href=full_url, text=text, signature=signature))
+            fingerprints.append(
+                LinkFingerprint(
+                    href=full_url,
+                    text=text,
+                    signature=signature
+                )
+            )
 
         self._log(f"  [Analyze] 步骤 1: 已完成. 发现 {len(fingerprints)} 个潜在链接.", indent=1)
         return fingerprints
@@ -1458,36 +1483,61 @@ class ListPageDiscoverer(IDiscoverer):
                 return group
         return None
 
-    # --- Core Logic: Extraction (已修复) ---
-
     def _extract_links_by_signature(self, soup: BeautifulSoup, signature: str, base_url: str) -> List[str]:
-        """
-        [已修复]
-        新的签名 (e.g., "div > h3 > a") 直接指向 <a> 标签。
-        因此，soup.select(signature) 会精确返回链接本身，而不是其父元素。
-        """
         self._log(f"    [Extract] 正在使用 CSS 选择器提取链接: '{signature}'...", indent=1)
 
-        # [修复] signature 现在直接选择 <a> 标签
-        link_tags = soup.select(signature)
+        LINK_ATTRS = ['href', 'data-link', 'data-url', 'data-href', 'ng-href', 'data-ng-href']
+
+        # 1. 确定提取范围
+        if self.scope_selector:
+            try:
+                roots = soup.select(self.scope_selector)
+            except Exception as e:
+                self._log(f"    [Extract] Scope selector 语法错误: {e}", indent=1)
+                return []
+
+            if not roots:
+                self._log(f"    [Extract] 未找到 scope_selector 对应节点。", indent=1)
+                return []
+        else:
+            roots = [soup]
 
         final_links = []
         seen_hrefs = set()
-        for a_tag in link_tags:
-            # 确保它确实是一个标签 (soup.select 可能返回 NavigableString 等)
-            if not isinstance(a_tag, Tag):
-                continue
 
-            href = a_tag.get('href', '').strip()
-            if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
-                continue
+        # 2. 只在 scope 内 select
+        for root in roots:
             try:
-                full_url = urljoin(base_url, href)
+                link_tags = root.select(signature)
+            except Exception as e:
+                self._log(f"    [Extract] CSS selector 语法错误: {e}", indent=1)
+                return []
+
+            for tag in link_tags:
+                if not isinstance(tag, Tag):
+                    continue
+
+                href = ""
+
+                for attr in LINK_ATTRS:
+                    if tag.has_attr(attr):
+                        potential_href = tag[attr].strip()
+                        if potential_href and not potential_href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                            href = potential_href
+                            break
+
+                if not href:
+                    continue
+
+                try:
+                    full_url = urljoin(base_url, href)
+                except Exception:
+                    continue
+
                 if full_url not in seen_hrefs:
                     final_links.append(full_url)
                     seen_hrefs.add(full_url)
-            except Exception:
-                continue
+
         self._log(f"    [Extract] 成功提取 {len(final_links)} 个链接。", indent=1)
         return final_links
 
@@ -1500,6 +1550,49 @@ class ListPageDiscoverer(IDiscoverer):
         # List Page Discoverer does not discover channels.
         return list(entry_point) if isinstance(entry_point, (list, tuple, set)) else [str(entry_point)]
 
+    def _extract_by_signature_heuristic(self,
+                                        soup: BeautifulSoup,
+                                        groups: List[LinkGroup],
+                                        base_url: str) -> List[str]:
+        """
+        使用旧 signature 聚类 + heuristic 推测主文章列表。
+        """
+        if not groups:
+            self._log("  分析失败或未找到链接组。", indent=1)
+            return []
+
+        self._log(
+            "  [Decision] 使用旧 heuristic 从链接结构中推测主文章列表。",
+            indent=1
+        )
+
+        winning_group = self._guess_by_heuristics(groups)
+
+        if not winning_group:
+            self._log("  [Decision] 无法确定获胜组。", indent=1)
+            return []
+
+        self._log(
+            f"  [Extract] 获胜签名: {winning_group.signature} "
+            f"(数量: {winning_group.count})",
+            indent=1
+        )
+
+        final_links = self._extract_links_by_signature(
+            soup,
+            winning_group.signature,
+            base_url
+        )
+
+        if not final_links and winning_group.all_links:
+            self._log(
+                "    [Extract] CSS 选择器提取失败，回退到使用已存储的链接。",
+                indent=1
+            )
+            final_links = [fp.href for fp in winning_group.all_links]
+
+        return final_links
+
     def get_articles_for_channel(self,
                                  channel_url: str,
                                  fetcher_kwargs: Optional[Dict[str, Any]] = None
@@ -1508,33 +1601,204 @@ class ListPageDiscoverer(IDiscoverer):
         self._log(f"开始从频道 (列表页) 提取文章: {channel_url}")
 
         soup, groups = self._analyze_page(channel_url, fetcher_kwargs=fetcher_kwargs)
-        if not soup or not groups:
-            self._log(f"  分析失败或未找到链接组。", indent=1)
+        if not soup:
+            self._log("  分析失败。", indent=1)
             return []
 
-        winning_group: Optional[LinkGroup] = None
+        # ------------------------------------------------------------
+        # 1. 手动 signature 优先级最高
+        # ------------------------------------------------------------
         if self.manual_specified_signature:
-            self._log(f"  [Decision] 正在使用预配置的 AI 签名: '{self.manual_specified_signature}'", indent=1)
-            winning_group = self._find_group_by_signature(groups, self.manual_specified_signature)
+            self._log(
+                f"  [Decision] 使用手动指定 signature: '{self.manual_specified_signature}'",
+                indent=1
+            )
+
+            if not groups:
+                self._log("  [Decision] 未找到任何签名组，无法使用手动 signature。", indent=1)
+                return []
+
+            winning_group = self._find_group_by_signature(
+                groups,
+                self.manual_specified_signature
+            )
+
+            if not winning_group:
+                self._log("  [Decision] 手动 signature 未匹配到任何 group。", indent=1)
+                return []
+
+            final_links = self._extract_links_by_signature(
+                soup,
+                winning_group.signature,
+                channel_url
+            )
+
+            if not final_links and winning_group.all_links:
+                self._log(
+                    "    [Extract] CSS 选择器提取失败，回退到 group 内已存储链接。",
+                    indent=1
+                )
+                final_links = [fp.href for fp in winning_group.all_links]
+
+            return final_links
+
+        # ------------------------------------------------------------
+        # 2. 根据 extraction_mode 分流
+        # ------------------------------------------------------------
+        mode = self.extraction_mode
+
+        if mode == "plain_list":
+            self._log("  [Decision] 使用 Plain List 模式提取。", indent=1)
+            return self._extract_articles_from_plain_lists(soup, channel_url)
+
+        if mode == "card":
+            self._log("  [Decision] 使用 Card 模式提取。", indent=1)
+            return self._extract_articles_from_scoped_cards(soup, channel_url)
+
+        if mode == "signature":
+            self._log("  [Decision] 使用 Signature 模式提取。", indent=1)
+            return self._extract_by_signature_heuristic(soup, groups, channel_url)
+
+        if mode == "auto":
+            if self.scope_selector:
+                self._log("  [Decision] Auto 模式: 先尝试 Plain List。", indent=1)
+                links = self._extract_articles_from_plain_lists(soup, channel_url)
+                if links:
+                    return links
+
+                self._log("  [Decision] Auto 模式: Plain List 失败，尝试 Card。", indent=1)
+                links = self._extract_articles_from_scoped_cards(soup, channel_url)
+                if links:
+                    return links
+
+            self._log("  [Decision] Auto 模式: 回退到 Signature Heuristic。", indent=1)
+            return self._extract_by_signature_heuristic(soup, groups, channel_url)
+
+        self._log(f"  [Error] 未知的 extraction_mode: {mode}", indent=1)
+        return []
+
+    def _extract_articles_from_plain_lists(self,
+                                           soup: BeautifulSoup,
+                                           base_url: str) -> List[str]:
+        """
+        Plain List 模式。
+        从传统 ul/ol > li > a 新闻列表中提取文章链接。
+        """
+        if not self.scope_selector:
+            roots = [soup]
         else:
-            self._log(f"  [Decision] 未提供 AI 签名, 正在使用启发式算法...", indent=1)
-            winning_group = self._guess_by_heuristics(groups)
+            try:
+                roots = soup.select(self.scope_selector)
+            except Exception as e:
+                self._log(f"  [PlainList] scope_selector 语法错误: {e}", indent=1)
+                return []
 
-        if not winning_group:
-            self._log(f"  [Decision] 无法确定获胜组。", indent=1)
-            return []
+            if not roots:
+                self._log(f"  [PlainList] 未找到 scope_selector: {self.scope_selector}", indent=1)
+                return []
 
-        self._log(f"  [Extract] 获胜签名: {winning_group.signature} (数量: {winning_group.count})", indent=1)
+        lists: List[Tag] = []
+        for root in roots:
+            if isinstance(root, Tag):
+                if root.name in ('ul', 'ol'):
+                    lists.append(root)
+                else:
+                    # 优先查找直接子级，减少深层误匹配
+                    direct = [c for c in root.find_all(['ul', 'ol'], recursive=False) if isinstance(c, Tag)]
+                    if direct:
+                        lists.extend(direct)
+                    else:
+                        lists.extend([c for c in root.find_all(['ul', 'ol']) if isinstance(c, Tag)])
 
-        # [调用修复后的提取逻辑]
-        final_links = self._extract_links_by_signature(soup, winning_group.signature, channel_url)
+        final_links: List[str] = []
+        seen_urls: Set[str] = set()
 
-        # [备用方案] 如果 CSS 选择器失败 (e.g., 动态页面), 从已存储的链接中提取
-        if not final_links and winning_group.all_links:
-            self._log(f"    [Extract] CSS 选择器提取失败，回退到使用已存储的链接。", indent=1)
-            final_links = [fp.href for fp in winning_group.all_links]
+        skipped_image = 0
+        skipped_no_link = 0
+        skipped_low_score = 0
+        skipped_duplicate = 0
 
+        for ul in lists:
+            for li in ul.find_all('li', recursive=False):
+                if not isinstance(li, Tag):
+                    continue
+
+                # 跳过明显是图片/缩略图/广告区的 li
+                if self._is_image_only_li(li):
+                    skipped_image += 1
+                    continue
+
+                candidates: List[Tag] = []
+                if li.name == 'a':
+                    candidates.append(li)
+                candidates.extend(li.find_all('a'))
+
+                if not candidates:
+                    skipped_no_link += 1
+                    continue
+
+                # 对 li 内所有 a 打分，选最佳
+                scored: List[Tuple[int, Tag, str, str]] = []
+                for a_tag in candidates:
+                    href = a_tag.get("href", "").strip()
+                    text = self._clean_link_text(a_tag)
+                    score = self._score_link_in_card(a_tag, li, base_url)
+                    scored.append((score, a_tag, href, text))
+
+                scored.sort(key=lambda x: x[0], reverse=True)
+                best_score, best_tag, best_href, best_text = scored[0]
+
+                if best_score < 0:
+                    skipped_low_score += 1
+                    continue
+
+                try:
+                    full_url = urljoin(base_url, best_href)
+                except Exception:
+                    continue
+
+                if full_url in seen_urls:
+                    skipped_duplicate += 1
+                    continue
+
+                seen_urls.add(full_url)
+                final_links.append(full_url)
+
+        self._log(
+            f"  [PlainList] 最终提取 {len(final_links)} 个链接。"
+            f"lists={len(lists)}, image_li={skipped_image}, no_link={skipped_no_link}, "
+            f"low_score={skipped_low_score}, duplicate={skipped_duplicate}",
+            indent=1
+        )
         return final_links
+
+    def _is_image_only_li(self, li: Tag) -> bool:
+        """
+        判断一个 li 是否主要是图片/缩略图/广告区，应被跳过。
+        """
+        if not isinstance(li, Tag):
+            return False
+
+        li_classes = " ".join(li.get("class", [])).lower()
+        li_id = (li.get("id") or "").lower()
+
+        image_keywords = [
+            'image', 'img', 'photo', 'thumbnail', 'thumb', 'pic', 'figure',
+            '广告', 'ad-', '-ad', 'banner', 'sprite',
+        ]
+
+        for kw in image_keywords:
+            if kw in li_classes or kw in li_id:
+                return True
+
+        # 如果 li 内没有有意义的文本，且只有图片/图标，也视为 image-only
+        text_content = li.get_text(strip=True)
+        has_meaningful_text = len(text_content) >= 3 and not text_content.startswith('http')
+
+        if li.find('img') and not has_meaningful_text:
+            return True
+
+        return False
 
     def get_signature_groups(self,
                              page_url: str,
@@ -1596,6 +1860,384 @@ class ListPageDiscoverer(IDiscoverer):
             self._log(f"  [Error] get_signature_groups 失败: {str(e)}")
             self._log(traceback.format_exc())
             return []
+
+    def _class_text(self, tag: Tag) -> str:
+        """
+        返回标签 class 的小写文本形式，方便做规则判断。
+        """
+        if not isinstance(tag, Tag):
+            return ""
+        return " ".join(tag.get("class", [])).lower()
+
+    def _ancestor_class_text(self, tag: Tag, max_depth: int = 6) -> str:
+        """
+        收集当前标签及其若干层父节点的 class 文本。
+        用于判断链接是否位于 headline/title/image/label 等区域。
+        """
+        parts = []
+        current = tag
+
+        for _ in range(max_depth):
+            if not current or not isinstance(current, Tag):
+                break
+
+            parts.append(self._class_text(current))
+            current = current.parent
+
+        return " ".join(parts).lower()
+
+    def _clean_link_text(self, tag: Tag) -> str:
+        """
+        清洗链接文本。
+        """
+        if not isinstance(tag, Tag):
+            return ""
+
+        text = tag.get_text(" ", strip=True)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    def _infer_cards_from_scope_root(self, root: Tag) -> List[Tag]:
+        """
+        当 scope_selector 只命中一个大容器时，尝试在容器内部自动推断文章卡片。
+
+        例如用户传了：
+            .ArticleList
+
+        但真正的卡片是：
+            li.ArticleHeadlineListWrap
+
+        这个函数会尝试在大容器里找重复的 li/article/item/card 节点。
+        """
+        if not isinstance(root, Tag):
+            return []
+
+        candidate_selectors = [
+            "li",
+            "article",
+            "[class*='ListWrap']",
+            "[class*='listwrap']",
+            "[class*='ListItem']",
+            "[class*='listitem']",
+            "[class*='Item']",
+            "[class*='item']",
+            "[class*='Card']",
+            "[class*='card']",
+        ]
+
+        best_cards: List[Tag] = []
+
+        for selector in candidate_selectors:
+            try:
+                cards = root.select(selector)
+            except Exception:
+                continue
+
+            # 只保留里面有链接的节点
+            cards = [
+                c for c in cards
+                if isinstance(c, Tag) and (c.name == "a" or c.find("a"))
+            ]
+
+            if len(cards) > len(best_cards):
+                best_cards = cards
+
+        return best_cards
+
+    def _score_link_in_card(self, a_tag: Tag, card: Tag, base_url: str) -> int:
+        """
+        对一张文章卡片内部的某个 <a> 链接打分。
+        分数越高，越可能是这张卡片的主链接。
+
+        重要语义：
+        - SmartScope 的目标不是只提取 /articles/*.html。
+        - SmartScope 的目标是：scope_selector 命中的每张卡片，尽量抽取一个“主链接”。
+        - 因此 /topics/、/special/ 这类列表卡片链接不应被强行过滤。
+        """
+        if not isinstance(a_tag, Tag):
+            return -10_000
+
+        href = a_tag.get("href", "").strip()
+        if not href:
+            return -10_000
+
+        href_lower = href.lower()
+        if href_lower.startswith(("#", "javascript:", "mailto:", "tel:")):
+            return -10_000
+
+        try:
+            full_url = urljoin(base_url, href)
+            parsed = urlparse(full_url)
+        except Exception:
+            return -10_000
+
+        score = 0
+
+        path = parsed.path.lower()
+        text = self._clean_link_text(a_tag)
+        text_len = len(text)
+
+        self_class = self._class_text(a_tag)
+        ancestor_class = self._ancestor_class_text(a_tag)
+
+        # ------------------------------------------------------------
+        # 1. URL 形态评分：文章 URL 加分，但不排斥 topic/special
+        # ------------------------------------------------------------
+
+        if "/articles/" in path:
+            score += 120
+
+        if path.endswith(".html"):
+            score += 40
+
+        if re.search(r"/articles/[A-Za-z0-9]+\.html", parsed.path):
+            score += 80
+
+        # special 页面也可能是页面主卡片
+        if "/special/" in path:
+            score += 50
+
+        # topics 是主题页，不一定是普通文章，但如果页面上就是一个卡片，也应允许提取
+        if "/topics/" in path:
+            score += 10
+
+        # 明显列表页稍微降权，但不要一票否决
+        if "/list.html" in path:
+            score -= 40
+
+        if "/rensai/" in path:
+            score -= 30
+
+        # ------------------------------------------------------------
+        # 2. 结构位置评分
+        # ------------------------------------------------------------
+
+        # 标题区域是最强信号
+        if "headline" in ancestor_class:
+            score += 160
+
+        if "title" in ancestor_class:
+            score += 100
+
+        # 朝日的覆盖链接，也可能是主链接
+        if "articleheadlinelink" in self_class:
+            score += 60
+
+        # 图片链接通常不是最佳语义链接，但如果没有标题链接，也可以作为 fallback
+        if a_tag.find("img"):
+            score -= 50
+
+        if "image" in ancestor_class:
+            score -= 40
+
+        # 标签、分类、作者、meta 等上下文降权
+        bad_context_keywords = [
+            "rensailabel",
+            "label",
+            "tag",
+            "category",
+            "breadcrumb",
+            "meta",
+            "author",
+            "series",
+            "related",
+            "recommend",
+        ]
+
+        for kw in bad_context_keywords:
+            if kw in self_class or kw in ancestor_class:
+                score -= 80
+
+        # 注意：不要把 topic 作为强负向。
+        # 因为有些页面里 topic card 本身就是列表项。
+
+        # ------------------------------------------------------------
+        # 3. 文本质量评分
+        # ------------------------------------------------------------
+
+        if text_len >= 12:
+            score += 70
+        elif text_len >= 6:
+            score += 35
+        elif text_len > 0:
+            score += 10
+        else:
+            score -= 80
+
+        low_value_texts = {
+            "写真・図版",
+            "画像",
+            "photo",
+            "image",
+            "read more",
+            "more",
+        }
+
+        if text.lower() in low_value_texts:
+            score -= 100
+
+        # ------------------------------------------------------------
+        # 4. 标题标签内的链接强加分
+        # ------------------------------------------------------------
+
+        parent = a_tag.parent
+        if isinstance(parent, Tag) and parent.name in {"h1", "h2", "h3", "h4"}:
+            score += 140
+
+        # ------------------------------------------------------------
+        # 5. 外链轻微降权
+        # ------------------------------------------------------------
+
+        base_host = urlparse(base_url).netloc
+        link_host = parsed.netloc
+
+        if base_host and link_host and base_host != link_host:
+            score -= 20
+
+        return score
+
+    def _extract_articles_from_scoped_cards(self,
+                                            soup: BeautifulSoup,
+                                            base_url: str) -> List[str]:
+        """
+        SmartScope 模式。
+
+        当用户指定 scope_selector 且 smart_scope_mode=True 时启用。
+
+        语义说明：
+        - scope_selector 命中多个节点：
+            每个节点视为一张候选卡片，系统在每张卡片内部选择一个主链接。
+        - scope_selector 命中一个大容器：
+            尝试在容器内部自动推断多张卡片。
+        - scope_selector 直接命中 <a>：
+            每个 <a> 自身就是候选主链接。
+
+        注意：
+        - SmartScope 不等于“只抓 /articles/*.html”。
+        - SmartScope 更接近“抓列表页中每张卡片的主链接”。
+        - 所以 /topics/、/special/ 等只要是卡片主链接，也会被保留。
+        - 如果想严格只保留普通文章 URL，应在更上层增加 URL filter，而不是在这里硬编码。
+        """
+        if not self.scope_selector:
+            return []
+
+        try:
+            cards = soup.select(self.scope_selector)
+        except Exception as e:
+            self._log(f"  [SmartScope] scope_selector 语法错误: {e}", indent=1)
+            return []
+
+        if not cards:
+            self._log(f"  [SmartScope] 未找到 scope_selector: {self.scope_selector}", indent=1)
+            return []
+
+        cards = [c for c in cards if isinstance(c, Tag)]
+
+        self._log(
+            f"  [SmartScope] scope_selector 命中 {len(cards)} 个节点。",
+            indent=1
+        )
+
+        # 如果只命中一个大容器，尝试自动推断内部 card。
+        if len(cards) == 1:
+            inferred_cards = self._infer_cards_from_scope_root(cards[0])
+
+            if len(inferred_cards) >= self.min_group_count:
+                self._log(
+                    f"  [SmartScope] scope 似乎是列表容器，自动推断出 {len(inferred_cards)} 张候选卡片。",
+                    indent=1
+                )
+                cards = inferred_cards
+
+        final_links: List[str] = []
+        seen_urls: Set[str] = set()
+
+        skipped_no_link = 0
+        skipped_low_score = 0
+        skipped_duplicate = 0
+
+        # 这个阈值不要太高。
+        # 现在 SmartScope 的目标是“每张卡片尽量抽主链接”，不是只抽传统文章。
+        min_accept_score = 20
+
+        for idx, card in enumerate(cards):
+            if not isinstance(card, Tag):
+                continue
+
+            candidates: List[Tag] = []
+
+            # 如果 card 本身就是 <a>
+            if card.name == "a":
+                candidates.append(card)
+
+            # card 内部所有 <a>
+            candidates.extend(card.find_all("a"))
+
+            if not candidates:
+                skipped_no_link += 1
+                self._log(
+                    f"    [SmartScope] card #{idx} 没有 <a>，跳过。",
+                    indent=2
+                )
+                continue
+
+            scored: List[Tuple[int, Tag, str, str]] = []
+
+            for a_tag in candidates:
+                href = a_tag.get("href", "").strip()
+                text = self._clean_link_text(a_tag)
+                score = self._score_link_in_card(a_tag, card, base_url)
+                scored.append((score, a_tag, href, text))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+            best_score, best_tag, best_href, best_text = scored[0]
+
+            if best_score < min_accept_score:
+                skipped_low_score += 1
+
+                # 打印 top3，方便看为什么没选。
+                top3 = []
+                for s, _, h, t in scored[:3]:
+                    top3.append(f"score={s}, text='{t[:30]}', href='{h[:80]}'")
+
+                self._log(
+                    f"    [SmartScope] card #{idx} 最高分过低，跳过。"
+                    f"最高分={best_score}, top={top3}",
+                    indent=2
+                )
+                continue
+
+            try:
+                full_url = urljoin(base_url, best_href)
+            except Exception:
+                continue
+
+            if full_url in seen_urls:
+                skipped_duplicate += 1
+                self._log(
+                    f"    [SmartScope] card #{idx} 与前面重复，跳过: {full_url}",
+                    indent=2
+                )
+                continue
+
+            seen_urls.add(full_url)
+            final_links.append(full_url)
+
+            self._log(
+                f"    [SmartScope] card #{idx} 选择主链接: "
+                f"score={best_score}, text='{best_text[:50]}', url={full_url}",
+                indent=2
+            )
+
+        self._log(
+            f"  [SmartScope] 最终提取 {len(final_links)} 个链接。"
+            f"cards={len(cards)}, no_link={skipped_no_link}, "
+            f"low_score={skipped_low_score}, duplicate={skipped_duplicate}",
+            indent=1
+        )
+
+        return final_links
 
     # --- AI Helper Method (已更新以使用 'sample_links' 属性) ---
     def generate_ai_discovery_prompt(self, entry_point_url: str) -> Optional[str]:
