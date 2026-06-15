@@ -173,6 +173,8 @@
                         <div class="text-xs text-gray-300">OK: <span class="font-mono text-emerald-300" x-text="currentEntryRound?.articles_success ?? 0"></span></div>
                         <div class="text-xs text-gray-300">Err: <span class="font-mono text-red-300" x-text="currentEntryRound?.articles_failed ?? 0"></span></div>
                         <div class="text-xs text-gray-300">Skip: <span class="font-mono text-yellow-300" x-text="currentEntryRound?.articles_skipped ?? 0"></span></div>
+                        <div class="text-xs text-gray-300">Cached: <span class="font-mono text-purple-300" x-text="currentEntryRound?.articles_cached ?? 0"></span></div>
+                        <div class="text-xs text-gray-300">Ignored: <span class="font-mono text-gray-400" x-text="currentEntryRound?.articles_ignored ?? 0"></span></div>
                     </div>
                 </div>
             </div>
@@ -232,42 +234,50 @@
 
                 <!-- Round history -->
                 <div x-show="viewMode === 'ROUND_HISTORY'" class="flex flex-col h-full" x-cloak>
-                    <div class="grid grid-cols-12 gap-2 px-4 py-2 bg-gray-900/50 border-b border-gray-800 text-xxs font-bold text-gray-500 uppercase shrink-0">
-                        <div class="col-span-1 text-center">Round</div>
-                        <div class="col-span-2">Started</div>
-                        <div class="col-span-1">Status</div>
-                        <div class="col-span-1">HTTP</div>
-                        <div class="col-span-1">Entry Dur</div>
-                        <div class="col-span-1">Total Dur</div>
-                        <div class="col-span-1 text-center">Exp</div>
-                        <div class="col-span-1 text-center">OK</div>
-                        <div class="col-span-1 text-center">Err</div>
-                        <div class="col-span-1 text-center">Skip</div>
-                        <div class="col-span-1 text-right">Action</div>
-                    </div>
-                    <div class="flex-1 overflow-y-auto">
-                        <template x-for="row in entryHistory" :key="row.id">
-                            <div class="grid grid-cols-12 gap-2 px-4 py-1.5 border-b border-gray-800/30 text-xs font-mono items-center hover:bg-gray-800/40"
-                                 :class="row.phase === 'ENTRY_FAILED' || (row.status >= 3 && row.status <= 6) ? 'bg-red-900/10' : ''">
-                                <div class="col-span-1 text-center text-blue-400 font-bold" x-text="'#' + row.round_id"></div>
-                                <div class="col-span-2 text-gray-500 text-[10px]" x-text="formatTime(row.started_at * 1000)"></div>
-                                <div class="col-span-1">
-                                    <span class="px-1 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-12 text-center"
-                                          :class="getStatusClass(row.status)" x-text="getStatusLabel(row.status)"></span>
-                                </div>
-                                <div class="col-span-1" :class="row.http_code >= 400 ? 'text-red-400' : 'text-emerald-500'" x-text="row.http_code || '-'"></div>
-                                <div class="col-span-1 text-gray-400" x-text="row.duration != null ? row.duration.toFixed(1) + 's' : '-'"></div>
-                                <div class="col-span-1 text-gray-400" x-text="row.total_duration != null ? row.total_duration.toFixed(1) + 's' : '-'"></div>
-                                <div class="col-span-1 text-center text-blue-300" x-text="row.articles_expected || 0"></div>
-                                <div class="col-span-1 text-center text-emerald-400" x-text="row.articles_success || 0"></div>
-                                <div class="col-span-1 text-center text-red-400" x-text="row.articles_failed || 0"></div>
-                                <div class="col-span-1 text-center text-yellow-400" x-text="row.articles_skipped || 0"></div>
-                                <div class="col-span-1 text-right">
-                                    <button @click="selectedEntryRoundId = row.id; viewMode = 'ARTICLES'; fetchEntryArticles()"
-                                            class="text-[10px] text-blue-400 hover:text-blue-300 underline">Articles</button>
-                                </div>
-                            </div>
-                        </template>
+                    <div class="flex-1 overflow-auto">
+                        <table class="w-full min-w-[900px] text-xs font-mono border-collapse">
+                            <thead class="bg-gray-900 text-xxs font-bold text-gray-500 uppercase sticky top-0">
+                                <tr class="border-b border-gray-800">
+                                    <th class="px-3 py-2 text-center w-16">Round</th>
+                                    <th class="px-3 py-2 text-left w-32">Started</th>
+                                    <th class="px-3 py-2 text-left w-16">Status</th>
+                                    <th class="px-3 py-2 text-center w-16">HTTP</th>
+                                    <th class="px-3 py-2 text-left w-40">Message</th>
+                                    <th class="px-3 py-2 text-center w-12">Exp</th>
+                                    <th class="px-3 py-2 text-center w-12">OK</th>
+                                    <th class="px-3 py-2 text-center w-12">Err</th>
+                                    <th class="px-3 py-2 text-center w-12">Skip</th>
+                                    <th class="px-3 py-2 text-center w-14">Cached</th>
+                                    <th class="px-3 py-2 text-center w-14">Ignored</th>
+                                    <th class="px-3 py-2 text-right w-16">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="row in entryHistory" :key="row.id">
+                                    <tr class="border-b border-gray-800/30 hover:bg-gray-800/40"
+                                        :class="row.phase === 'ENTRY_FAILED' || (row.status >= 3 && row.status <= 6) ? 'bg-red-900/10' : ''">
+                                        <td class="px-3 py-1.5 text-center text-blue-400 font-bold" x-text="'#' + row.round_id"></td>
+                                        <td class="px-3 py-1.5 text-gray-500 text-[10px]" x-text="formatTime(row.started_at * 1000)"></td>
+                                        <td class="px-3 py-1.5">
+                                            <span class="px-1 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-12 text-center"
+                                                  :class="getStatusClass(row.status)" x-text="getStatusLabel(row.status)"></span>
+                                        </td>
+                                        <td class="px-3 py-1.5 text-center" :class="row.http_code >= 400 ? 'text-red-400' : 'text-emerald-500'" x-text="row.http_code || '-'"></td>
+                                        <td class="px-3 py-1.5 truncate text-gray-400 max-w-[160px]" :title="row.state_msg" x-text="row.state_msg || '-'"></td>
+                                        <td class="px-3 py-1.5 text-center text-blue-300" x-text="row.articles_expected || 0"></td>
+                                        <td class="px-3 py-1.5 text-center text-emerald-400" x-text="row.articles_success || 0"></td>
+                                        <td class="px-3 py-1.5 text-center text-red-400" x-text="row.articles_failed || 0"></td>
+                                        <td class="px-3 py-1.5 text-center text-yellow-400" x-text="row.articles_skipped || 0"></td>
+                                        <td class="px-3 py-1.5 text-center text-purple-400" x-text="row.articles_cached || 0"></td>
+                                        <td class="px-3 py-1.5 text-center text-gray-400" x-text="row.articles_ignored || 0"></td>
+                                        <td class="px-3 py-1.5 text-right">
+                                            <button @click="selectedEntryRoundId = row.id; viewMode = 'ARTICLES'; fetchEntryArticles()"
+                                                    class="text-[10px] text-blue-400 hover:text-blue-300 underline">Articles</button>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
                         <div x-show="entryHistory.length === 0" class="p-8 text-center text-gray-600 text-xs italic">No entry round history found.</div>
                     </div>
                     <div class="px-4 py-2 bg-gray-900/50 border-t border-gray-800 flex justify-between items-center shrink-0 text-xs">

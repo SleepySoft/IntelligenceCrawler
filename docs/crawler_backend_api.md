@@ -327,6 +327,8 @@
 *   `articles_success` *(int, required)*：成功文章数
 *   `articles_failed` *(int, required)*：失败文章数
 *   `articles_skipped` *(int, required)*：跳过文章数
+*   `articles_cached` *(int, required)*：缓存命中文章数
+*   `articles_ignored` *(int, required)*：被忽略文章数
 *   `phase` *(string, required)*：`"RUNNING"` / `"IDLE"` / `"ENTRY_FAILED"`
 
 ***

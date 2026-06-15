@@ -197,6 +197,8 @@ class DatabaseHandler:
                     articles_success INTEGER DEFAULT 0,
                     articles_failed INTEGER DEFAULT 0,
                     articles_skipped INTEGER DEFAULT 0,
+                    articles_cached INTEGER DEFAULT 0,
+                    articles_ignored INTEGER DEFAULT 0,
                     UNIQUE(group_path, round_id)
                 )
             """)
@@ -228,6 +230,17 @@ class DatabaseHandler:
                     cur.execute("ALTER TABLE crawl_log ADD COLUMN entry_round_id INTEGER DEFAULT NULL")
                 except sqlite3.OperationalError as e:
                     logger.warning(f"Migration warning: {e}")
+
+            # Migrate entry_rounds table: add articles_cached / articles_ignored if missing
+            cur.execute("PRAGMA table_info(entry_rounds)")
+            entry_round_columns = {row[1] for row in cur.fetchall()}
+            for col in ("articles_cached", "articles_ignored"):
+                if col not in entry_round_columns:
+                    logger.info(f"Migrating DB: Adding '{col}' column to entry_rounds...")
+                    try:
+                        cur.execute(f"ALTER TABLE entry_rounds ADD COLUMN {col} INTEGER DEFAULT 0")
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"Migration warning: {e}")
 
             # --- 3. 初始化数据与索引 ---
 
@@ -1265,8 +1278,8 @@ class GovernanceManager:
                 """
                 INSERT INTO entry_rounds
                 (group_path, round_id, list_url, status, started_at, articles_expected,
-                 articles_success, articles_failed, articles_skipped)
-                VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0)
+                 articles_success, articles_failed, articles_skipped, articles_cached, articles_ignored)
+                VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0)
                 """,
                 (group_path, next_round_id, list_url, int(Status.RUNNING), now_ts)
             )
@@ -1287,6 +1300,8 @@ class GovernanceManager:
                 "articles_success": 0,
                 "articles_failed": 0,
                 "articles_skipped": 0,
+                "articles_cached": 0,
+                "articles_ignored": 0,
                 "phase": "RUNNING",
             }
             return db_id
@@ -1301,7 +1316,7 @@ class GovernanceManager:
             UPDATE entry_rounds
             SET status = ?, http_code = ?, state_msg = ?, finished_at = ?, duration = ?,
                 total_duration = ?, articles_expected = ?, articles_success = ?,
-                articles_failed = ?, articles_skipped = ?
+                articles_failed = ?, articles_skipped = ?, articles_cached = ?, articles_ignored = ?
             WHERE id = ?
             """,
             (
@@ -1315,6 +1330,8 @@ class GovernanceManager:
                 snapshot.get("articles_success"),
                 snapshot.get("articles_failed"),
                 snapshot.get("articles_skipped"),
+                snapshot.get("articles_cached"),
+                snapshot.get("articles_ignored"),
                 snapshot["db_id"],
             )
         )
@@ -1331,6 +1348,10 @@ class GovernanceManager:
                 snapshot["articles_failed"] += 1
             elif status == Status.SKIPPED:
                 snapshot["articles_skipped"] += 1
+            elif status == Status.CACHED:
+                snapshot["articles_cached"] += 1
+            elif status == Status.IGNORED:
+                snapshot["articles_ignored"] += 1
 
     def _update_entry_round_for_finished_task(self, url: str, group_path: str, status: Status, http_code: int, state_msg: str, duration: float):
         """
@@ -1445,6 +1466,14 @@ class GovernanceManager:
             """,
             (group_path, max(1, int(limit)), max(0, int(offset)))
         )
+        # Derive phase for historical rows (DB does not store phase)
+        for row in rows or []:
+            if row.get("finished_at") is None:
+                row["phase"] = "RUNNING"
+            elif int(row.get("status", 0)) in (Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED):
+                row["phase"] = "ENTRY_FAILED"
+            else:
+                row["phase"] = "IDLE"
         return rows or []
 
     def get_entry_round_articles(self, entry_round_db_id: int, limit: int = 100, offset: int = 0) -> List[Dict]:
@@ -1697,19 +1726,21 @@ class GovernanceManager:
             file_path: str = None,
             entry_round_id: int = None
     ):
-        # 1) crawl_log：保留记录（更新为 IGNORED/CACHED）
+        # 1) crawl_log: keep record (update to IGNORED/CACHED)
         self._update_crawl_log_finish(log_id, url, spider, group_path, status, duration, http_code, entry_round_id)
 
-        # 2) crawl_status：回滚到 session 前（不更新时间、不改最终态）
+        # 2) crawl_status: rollback to pre-session state (no timestamp/final state change)
         try:
             self._rollback_crawl_status(url, prev_exists, prev_snapshot)
         except Exception as e:
             logger.error(f"Memory-only rollback failed for {url}: {e}")
 
-        # 3) 内存事件 + round context
+        # 3) Memory event + round context
         self._finalize_event_in_memory(log_id, url, spider, group_path, status, duration, http_code, state_msg)
 
-        # 4) Entry Round: IGNORED/CACHED do not update stats; association is already in crawl_log
+        # 4) Entry Round: count CACHED/IGNORED as observed outcomes
+        if entry_round_id and status in (Status.CACHED, Status.IGNORED):
+            self._update_entry_round_article_stats(group_path, status)
 
     def reset_statistics(self):
         """

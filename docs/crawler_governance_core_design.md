@@ -83,7 +83,7 @@
 *   `list_url`：入口 URL
 *   `status / http_code / state_msg`：入口自身抓取结果
 *   `started_at / finished_at / duration / total_duration`：入口开始时间、整轮结束时间、入口耗时、整轮总耗时
-*   `articles_expected / articles_success / articles_failed / articles_skipped`：该轮预期/成功/失败/跳过的文章数
+*   `articles_expected / articles_success / articles_failed / articles_skipped / articles_cached / articles_ignored`：该轮预期/成功/失败/跳过/缓存/忽略的文章数
 *   作用：**持久化每个入口的抓取轮次**，包括入口失败的轮次，使历史可追溯。
 
 ***
