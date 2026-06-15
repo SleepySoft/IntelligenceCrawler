@@ -181,9 +181,9 @@
 
             <div class="px-4 py-2 bg-gray-900 border-b border-gray-800 flex justify-between items-center shrink-0">
                 <div class="flex bg-gray-950 p-1 rounded border border-gray-700 gap-1">
-                    <button @click="viewMode = 'LIVE_ROUND'" :class="viewMode === 'LIVE_ROUND' ? 'bg-gray-800 text-emerald-400 shadow-sm' : 'text-gray-500'" class="px-3 py-1 text-xs rounded transition-all font-bold">实时轮次</button>
-                    <button @click="viewMode = 'ROUND_HISTORY'" :class="viewMode === 'ROUND_HISTORY' ? 'bg-gray-800 text-blue-400 shadow-sm' : 'text-gray-500'" class="px-3 py-1 text-xs rounded transition-all font-bold">轮次历史</button>
-                    <button @click="viewMode = 'ARTICLES'" :class="viewMode === 'ARTICLES' ? 'bg-gray-800 text-purple-400 shadow-sm' : 'text-gray-500'" class="px-3 py-1 text-xs rounded transition-all font-bold">文章明细</button>
+                    <button @click="viewMode = 'LIVE_ROUND'" :class="viewMode === 'LIVE_ROUND' ? 'bg-gray-800 text-emerald-400 shadow-sm' : 'text-gray-500'" class="px-3 py-1 text-xs rounded transition-all font-bold">Live Round</button>
+                    <button @click="viewMode = 'ROUND_HISTORY'" :class="viewMode === 'ROUND_HISTORY' ? 'bg-gray-800 text-blue-400 shadow-sm' : 'text-gray-500'" class="px-3 py-1 text-xs rounded transition-all font-bold">Round History</button>
+                    <button @click="viewMode = 'ARTICLES'" :class="viewMode === 'ARTICLES' ? 'bg-gray-800 text-purple-400 shadow-sm' : 'text-gray-500'" class="px-3 py-1 text-xs rounded transition-all font-bold">Articles</button>
                     <button @click="viewMode = 'CHART'" :class="viewMode === 'CHART' ? 'bg-gray-800 text-orange-400 shadow-sm' : 'text-gray-500'" class="px-3 py-1 text-xs rounded transition-all font-bold">Chart</button>
                 </div>
 
@@ -698,10 +698,12 @@
                         return;
                     }
 
-                    const end = Date.now() / 1000;
-                    const start = end - (parseInt(this.chartRange) * 3600);
-                    // Smart bucket sizing
-                    const bucket = parseInt(this.chartRange) <= 1 ? 1 : (parseInt(this.chartRange) <= 6 ? 5 : 60);
+                    const now = Date.now() / 1000;
+                    const hours = parseInt(this.chartRange);
+                    // Align to whole hours, use 1-hour buckets
+                    const end = Math.ceil(now / 3600) * 3600;
+                    const start = end - (hours * 3600);
+                    const bucket = 60;
 
                     const params = new URLSearchParams({
                         start_ts: start,
