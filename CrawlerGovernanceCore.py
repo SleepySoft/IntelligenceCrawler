@@ -179,6 +179,28 @@ class DatabaseHandler:
                 )
             """)
 
+            # 5. Entry Rounds (snapshot of entry fetch rounds)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS entry_rounds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_path TEXT NOT NULL,
+                    round_id INTEGER NOT NULL,
+                    list_url TEXT NOT NULL,
+                    status INTEGER,
+                    http_code INTEGER,
+                    state_msg TEXT,
+                    started_at INTEGER NOT NULL,
+                    finished_at INTEGER,
+                    duration REAL,
+                    total_duration REAL,
+                    articles_expected INTEGER DEFAULT 0,
+                    articles_success INTEGER DEFAULT 0,
+                    articles_failed INTEGER DEFAULT 0,
+                    articles_skipped INTEGER DEFAULT 0,
+                    UNIQUE(group_path, round_id)
+                )
+            """)
+
             # --- 2. 自动迁移 (针对老用户) ---
 
             # 检查 crawl_status 表是否缺少 url_hash 字段
@@ -194,6 +216,17 @@ class DatabaseHandler:
                     cur.execute("ALTER TABLE crawl_status ADD COLUMN url_hash TEXT NOT NULL DEFAULT ''")
                 except sqlite3.OperationalError as e:
                     # 防止极少数情况表其实不存在
+                    logger.warning(f"Migration warning: {e}")
+
+            # Check if crawl_log table is missing the entry_round_id column
+            cur.execute("PRAGMA table_info(crawl_log)")
+            log_columns = {row[1] for row in cur.fetchall()}
+
+            if "entry_round_id" not in log_columns:
+                logger.info("Migrating DB: Adding 'entry_round_id' column to crawl_log...")
+                try:
+                    cur.execute("ALTER TABLE crawl_log ADD COLUMN entry_round_id INTEGER DEFAULT NULL")
+                except sqlite3.OperationalError as e:
                     logger.warning(f"Migration warning: {e}")
 
             # --- 3. 初始化数据与索引 ---
@@ -212,6 +245,10 @@ class DatabaseHandler:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_log_url ON crawl_log(url)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_log_created ON crawl_log(created_at)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_log_group_created ON crawl_log(group_path, created_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_log_entry_round ON crawl_log(entry_round_id)")
+
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_entry_rounds_group ON entry_rounds(group_path, round_id DESC)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_entry_rounds_started ON entry_rounds(started_at)")
 
             self.conn.commit()
 
@@ -482,11 +519,12 @@ class CrawlSession:
         http_code: int = 0
 
 
-    def __init__(self, manager, url: str, spider: str, group_path: Union[str, List[str], None]):
+    def __init__(self, manager, url: str, spider: str, group_path: Union[str, List[str], None], entry_round_db_id: Optional[int] = None):
         self.manager = manager
         self.url = url
         self.spider = spider
         self.group_path = _normalize_group_path(group_path)
+        self.entry_round_db_id = entry_round_db_id
         self.start_time = time.time()
 
         # 记录“原来的状态”
@@ -660,7 +698,8 @@ class CrawlSession:
             duration=duration,
             http_code=self.http_code,
             state_msg=self.state_msg,
-            file_path=self.file_path
+            file_path=self.file_path,
+            entry_round_id=self.entry_round_db_id
         )
         self._finished = True
 
@@ -688,7 +727,8 @@ class CrawlSession:
             http_code=self.http_code,
             state_msg=self.state_msg,
             prev_exists=self._has_prev_row,
-            prev_snapshot=self._prev_row_snapshot
+            prev_snapshot=self._prev_row_snapshot,
+            entry_round_id=self.entry_round_db_id
         )
 
         self._finished = True
@@ -885,6 +925,10 @@ class GovernanceManager:
         # RoundContext 容器
         # Key: group_path, Value: GroupRoundContext
         self.round_contexts: Dict[str, GroupRoundContext] = {}
+
+        # Entry Round in-memory snapshot
+        # Key: group_path, Value: dict (see _ensure_entry_round for structure)
+        self.entry_round_snapshots: Dict[str, Dict[str, Any]] = {}
 
         self.known_anchors = set()
 
@@ -1159,12 +1203,22 @@ class GovernanceManager:
         """
         Starts a crawling session.
         group_path: Can be "spider/news" or ["spider", "news"]
+        Automatically detects Entry URLs and associates the session with the current Entry Round.
         """
         # STEP 1: Normalize Input
         norm_group_path = _normalize_group_path(group_path)
         spider_name = _extract_spider_name(norm_group_path)
 
-        return CrawlSession(self, url, spider_name, norm_group_path)
+        # STEP 2: Entry Round association
+        entry_round_db_id = None
+        if self._is_entry_url(url, norm_group_path):
+            entry_round_db_id = self._ensure_entry_round(norm_group_path, url)
+        else:
+            snapshot = self.entry_round_snapshots.get(norm_group_path)
+            if snapshot and snapshot.get("phase") in ("RUNNING",):
+                entry_round_db_id = snapshot.get("db_id")
+
+        return CrawlSession(self, url, spider_name, norm_group_path, entry_round_db_id=entry_round_db_id)
 
     # --- Round Management ---
 
@@ -1174,12 +1228,158 @@ class GovernanceManager:
             self.round_contexts[group_path] = GroupRoundContext(group_path)
         return self.round_contexts[group_path]
 
+    # --- Entry Round management (internal) ---
+
+    def _is_entry_url(self, url: str, group_path: str) -> bool:
+        """Check whether the given URL is the entry (list_url) for the group."""
+        # 1. Prefer in-memory runtime_groups
+        runtime_group = self.runtime_groups.get(group_path)
+        if runtime_group and runtime_group.get("list_url") == url:
+            return True
+        # 2. Fall back to DB task_groups
+        row = self.db.fetch_one(
+            "SELECT list_url FROM task_groups WHERE group_path = ?",
+            (group_path,)
+        )
+        return bool(row and row["list_url"] == url)
+
+    def _ensure_entry_round(self, group_path: str, list_url: str) -> int:
+        """
+        Ensure a RUNNING Entry Round exists for the group; create one if not.
+        Returns the DB id from entry_rounds.
+        """
+        with self.stats_lock:
+            snapshot = self.entry_round_snapshots.get(group_path)
+            if snapshot and snapshot.get("phase") in ("RUNNING",):
+                return snapshot["db_id"]
+
+            # Get current max round_id from DB
+            row = self.db.fetch_one(
+                "SELECT COALESCE(MAX(round_id), 0) AS max_round FROM entry_rounds WHERE group_path = ?",
+                (group_path,)
+            )
+            next_round_id = int(row["max_round"]) + 1 if row else 1
+
+            now_ts = int(time.time())
+            db_id = self.db.execute(
+                """
+                INSERT INTO entry_rounds
+                (group_path, round_id, list_url, status, started_at, articles_expected,
+                 articles_success, articles_failed, articles_skipped)
+                VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0)
+                """,
+                (group_path, next_round_id, list_url, int(Status.RUNNING), now_ts)
+            )
+
+            self.entry_round_snapshots[group_path] = {
+                "db_id": db_id,
+                "round_id": next_round_id,
+                "list_url": list_url,
+                "status": int(Status.RUNNING),
+                "http_code": None,
+                "state_msg": None,
+                "started_at": float(now_ts),
+                "entry_finished_at": None,
+                "finished_at": None,
+                "duration": None,
+                "total_duration": None,
+                "articles_expected": 0,
+                "articles_success": 0,
+                "articles_failed": 0,
+                "articles_skipped": 0,
+                "phase": "RUNNING",
+            }
+            return db_id
+
+    def _persist_entry_round_to_db(self, group_path: str):
+        """Persist the in-memory Entry Round snapshot to DB."""
+        snapshot = self.entry_round_snapshots.get(group_path)
+        if not snapshot:
+            return
+        self.db.execute(
+            """
+            UPDATE entry_rounds
+            SET status = ?, http_code = ?, state_msg = ?, finished_at = ?, duration = ?,
+                total_duration = ?, articles_expected = ?, articles_success = ?,
+                articles_failed = ?, articles_skipped = ?
+            WHERE id = ?
+            """,
+            (
+                snapshot.get("status"),
+                snapshot.get("http_code"),
+                snapshot.get("state_msg"),
+                int(snapshot["finished_at"]) if snapshot.get("finished_at") else None,
+                snapshot.get("duration"),
+                snapshot.get("total_duration"),
+                snapshot.get("articles_expected"),
+                snapshot.get("articles_success"),
+                snapshot.get("articles_failed"),
+                snapshot.get("articles_skipped"),
+                snapshot["db_id"],
+            )
+        )
+
+    def _update_entry_round_article_stats(self, group_path: str, status: Status):
+        """Accumulate article statistics into the associated Entry Round when an article finishes."""
+        with self.stats_lock:
+            snapshot = self.entry_round_snapshots.get(group_path)
+            if not snapshot or snapshot.get("phase") not in ("RUNNING",):
+                return
+            if status == Status.SUCCESS:
+                snapshot["articles_success"] += 1
+            elif status in (Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED):
+                snapshot["articles_failed"] += 1
+            elif status == Status.SKIPPED:
+                snapshot["articles_skipped"] += 1
+
+    def _update_entry_round_for_finished_task(self, url: str, group_path: str, status: Status, http_code: int, state_msg: str, duration: float):
+        """
+        Update the associated Entry Round when a CrawlSession finishes.
+        - If the URL is an entry: update entry status; on failure, persist immediately and mark ENTRY_FAILED.
+        - If the URL is a regular article: accumulate article statistics.
+        """
+        with self.stats_lock:
+            snapshot = self.entry_round_snapshots.get(group_path)
+            if not snapshot:
+                return
+
+            is_entry = self._is_entry_url(url, group_path)
+            if is_entry:
+                snapshot["status"] = int(status)
+                snapshot["http_code"] = http_code
+                snapshot["state_msg"] = state_msg
+                snapshot["duration"] = duration
+                snapshot["entry_finished_at"] = time.time()
+
+                if status in (Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED):
+                    snapshot["finished_at"] = time.time()
+                    snapshot["total_duration"] = round(snapshot["finished_at"] - snapshot["started_at"], 3)
+                    snapshot["phase"] = "ENTRY_FAILED"
+                    self._persist_entry_round_to_db(group_path)
+            else:
+                self._update_entry_round_article_stats(group_path, status)
+
     def start_round(self, group_path: Union[str, List[str]], expected_count: int):
-        """业务层调用：告诉系统这组任务开始了一轮"""
+        """Business call: notify the system that a round of tasks has started."""
         group_path = _normalize_group_path(group_path)
         with self.stats_lock:
             if ctx := self._get_round_context(group_path):
                 ctx.start(expected_count)
+
+            # Sync current Entry Round expected article count
+            snapshot = self.entry_round_snapshots.get(group_path)
+            if snapshot and snapshot.get("phase") in ("RUNNING",):
+                snapshot["articles_expected"] = expected_count
+            else:
+                # Fallback: when start_round is called directly without transaction,
+                # auto-create Entry Round from task_groups.list_url
+                row = self.db.fetch_one(
+                    "SELECT list_url FROM task_groups WHERE group_path = ?",
+                    (group_path,)
+                )
+                if row and row["list_url"]:
+                    self._ensure_entry_round(group_path, row["list_url"])
+                    self.entry_round_snapshots[group_path]["articles_expected"] = expected_count
 
     def skip_round_step(self, group_path: Union[str, List[str]], count: int = 1):
         group_path = _normalize_group_path(group_path)
@@ -1194,19 +1394,72 @@ class GovernanceManager:
                 ctx.reduce_expected(count)
 
     def finish_round(self, group_path: Union[str, List[str]], next_run_delay: int = 0):
-        """业务层调用：告诉系统这组任务这一轮结束了"""
+        """Business call: notify the system that the current round has finished."""
         group_path = _normalize_group_path(group_path)
         with self.stats_lock:
             if ctx := self._get_round_context(group_path):
                 ctx.finish(next_run_delay=next_run_delay)
 
+            # Sync finish current Entry Round (unless already failed)
+            snapshot = self.entry_round_snapshots.get(group_path)
+            if snapshot and snapshot.get("phase") == "RUNNING":
+                now = time.time()
+                snapshot["finished_at"] = now
+                snapshot["total_duration"] = round(now - snapshot["started_at"], 3)
+                snapshot["phase"] = "IDLE"
+                self._persist_entry_round_to_db(group_path)
+
     def get_group_round_status(self, group_path: str) -> Dict:
-        """API 调用：获取实时轮次状态"""
+        """API: get live round status."""
         group_path = _normalize_group_path(group_path)
         with self.stats_lock:
             if group_path in self.round_contexts:
                 return self.round_contexts[group_path].get_snapshot()
-            return {}  # 或者返回一个默认空对象
+            return {}  # or return an empty default object
+
+    def get_entry_round_status(self, group_path: str) -> Dict:
+        """API: get current Entry Round live snapshot (memory)."""
+        group_path = _normalize_group_path(group_path)
+        with self.stats_lock:
+            snapshot = self.entry_round_snapshots.get(group_path)
+            if not snapshot:
+                return {}
+            result = dict(snapshot)
+            # Compute current running duration
+            now = time.time()
+            if result.get("phase") == "RUNNING":
+                result["current_total_duration"] = round(now - result["started_at"], 1)
+            else:
+                result["current_total_duration"] = result.get("total_duration")
+            return result
+
+    def get_entry_round_history(self, group_path: str, limit: int = 50, offset: int = 0) -> List[Dict]:
+        """API: query Entry Round history from DB."""
+        group_path = _normalize_group_path(group_path)
+        rows = self.db.fetch_all_dict(
+            """
+            SELECT * FROM entry_rounds
+            WHERE group_path = ?
+            ORDER BY round_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (group_path, max(1, int(limit)), max(0, int(offset)))
+        )
+        return rows or []
+
+    def get_entry_round_articles(self, entry_round_db_id: int, limit: int = 100, offset: int = 0) -> List[Dict]:
+        """API: query article crawl records under an Entry Round."""
+        rows = self.db.fetch_all_dict(
+            """
+            SELECT id, url, group_path, spider_name, status, http_code, duration, created_at
+            FROM crawl_log
+            WHERE entry_round_id = ?
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (int(entry_round_db_id), max(1, int(limit)), max(0, int(offset)))
+        )
+        return rows or []
 
     def get_pending_count(self) -> int:
         row = self.db.fetch_one("SELECT COUNT(1) AS c FROM crawl_status WHERE status=?", (int(Status.PENDING),))
@@ -1300,17 +1553,17 @@ class GovernanceManager:
 
         return log_id
 
-    def _update_crawl_log_finish(self, log_id, url, spider, group_path, status, duration, http_code):
+    def _update_crawl_log_finish(self, log_id, url, spider, group_path, status, duration, http_code, entry_round_id=None):
         if log_id:
             self.db.execute(
-                "UPDATE crawl_log SET status=?, duration=?, http_code=? WHERE id=?",
-                (int(status), duration, http_code, log_id)
+                "UPDATE crawl_log SET status=?, duration=?, http_code=?, entry_round_id=? WHERE id=?",
+                (int(status), duration, http_code, entry_round_id, log_id)
             )
         else:
             now_ts = int(time.time())
             self.db.execute(
-                "INSERT INTO crawl_log (url, group_path, spider_name, status, http_code, duration, created_at) VALUES (?,?,?,?,?,?,?)",
-                (url, group_path, spider, int(status), http_code, duration, now_ts)
+                "INSERT INTO crawl_log (url, group_path, spider_name, status, http_code, duration, created_at, entry_round_id) VALUES (?,?,?,?,?,?,?,?)",
+                (url, group_path, spider, int(status), http_code, duration, now_ts, entry_round_id)
             )
 
     def _finalize_event_in_memory(self, log_id, url, spider, group_path, status, duration, http_code, state_msg):
@@ -1419,12 +1672,12 @@ class GovernanceManager:
             # 原本没有该 URL：撤销 start 时插入的行
             self.db.execute("DELETE FROM crawl_status WHERE url = ?", (url,))
 
-    def _handle_task_finish(self, log_id, url, spider, group_path, status, duration, http_code, state_msg, file_path):
+    def _handle_task_finish(self, log_id, url, spider, group_path, status, duration, http_code, state_msg, file_path, entry_round_id=None):
         if status in (Status.IGNORED, Status.CACHED):
             raise RuntimeError("IGNORED/CACHED must use _handle_task_memory_only_finish")
 
         # 1) crawl_log：保留记录
-        self._update_crawl_log_finish(log_id, url, spider, group_path, status, duration, http_code)
+        self._update_crawl_log_finish(log_id, url, spider, group_path, status, duration, http_code, entry_round_id)
 
         # 2) crawl_status：更新最终状态
         self._update_crawl_status_finish(url, spider, status, duration, http_code, state_msg, file_path)
@@ -1432,15 +1685,20 @@ class GovernanceManager:
         # 3) 内存事件 + round context
         self._finalize_event_in_memory(log_id, url, spider, group_path, status, duration, http_code, state_msg)
 
+        # 4) Entry Round stats / status update
+        if entry_round_id:
+            self._update_entry_round_for_finished_task(url, group_path, status, http_code, state_msg, duration)
+
     def _handle_task_memory_only_finish(
             self, log_id, url, spider, group_path,
             status: Status, duration: float, state_msg: str,
             prev_exists: bool, prev_snapshot: dict,
             http_code: int = None,
-            file_path: str = None
+            file_path: str = None,
+            entry_round_id: int = None
     ):
         # 1) crawl_log：保留记录（更新为 IGNORED/CACHED）
-        self._update_crawl_log_finish(log_id, url, spider, group_path, status, duration, http_code)
+        self._update_crawl_log_finish(log_id, url, spider, group_path, status, duration, http_code, entry_round_id)
 
         # 2) crawl_status：回滚到 session 前（不更新时间、不改最终态）
         try:
@@ -1450,6 +1708,8 @@ class GovernanceManager:
 
         # 3) 内存事件 + round context
         self._finalize_event_in_memory(log_id, url, spider, group_path, status, duration, http_code, state_msg)
+
+        # 4) Entry Round: IGNORED/CACHED do not update stats; association is already in crawl_log
 
     def reset_statistics(self):
         """

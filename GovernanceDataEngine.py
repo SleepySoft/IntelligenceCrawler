@@ -434,6 +434,10 @@ class GovernanceDataEngine:
                     if ctx:
                         round_obj = ctx.get_snapshot()
 
+                entry_round_obj = None
+                if include_round and hasattr(self.gov, "get_entry_round_status"):
+                    entry_round_obj = self.gov.get_entry_round_status(gp) or None
+
                 groups_out.append(
                     {
                         "group_path": gp,
@@ -443,6 +447,7 @@ class GovernanceDataEngine:
                         "anchor": anchor,
                         "stats": st,
                         "round": round_obj,
+                        "entry_round": entry_round_obj,
                     }
                 )
 

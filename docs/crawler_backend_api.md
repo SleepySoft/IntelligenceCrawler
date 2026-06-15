@@ -282,6 +282,55 @@
 
 ***
 
+## 9.5 EntryRound（入口轮次对象）
+
+**来源接口**：
+
+*   `GET /api/entry/status?group=...`（内存快照）
+*   `GET /api/entry/history?group=...`（DB 历史）
+
+```json
+{
+  "db_id": 42,
+  "group_path": "spider/news/tech",
+  "round_id": 5,
+  "list_url": "https://example.com/list",
+  "status": 2,
+  "http_code": 200,
+  "state_msg": "OK",
+  "started_at": 1706935200,
+  "finished_at": 1706935260,
+  "duration": 0.5,
+  "total_duration": 60.0,
+  "articles_expected": 100,
+  "articles_success": 92,
+  "articles_failed": 5,
+  "articles_skipped": 3,
+  "phase": "IDLE"
+}
+```
+
+字段定义：
+
+*   `db_id` *(int, required)*：`entry_rounds` 表自增 ID，用于关联文章明细
+*   `group_path` *(string, required)*：分组路径
+*   `round_id` *(int, required)*：该 group 下的轮次序号
+*   `list_url` *(string, required)*：入口 URL
+*   `status` *(int, required)*：入口自身最终状态（Status）
+*   `http_code` *(int|null, optional)*：入口 HTTP 状态码
+*   `state_msg` *(string|null, optional)*：入口状态/错误信息
+*   `started_at` *(int, required)*：入口开始时间（Unix 秒）
+*   `finished_at` *(int|null, optional)*：整轮结束时间（Unix 秒）
+*   `duration` *(number|null, optional)*：入口自身耗时（秒）
+*   `total_duration` *(number|null, optional)*：整轮总耗时（秒）
+*   `articles_expected` *(int, required)*：预期文章数
+*   `articles_success` *(int, required)*：成功文章数
+*   `articles_failed` *(int, required)*：失败文章数
+*   `articles_skipped` *(int, required)*：跳过文章数
+*   `phase` *(string, required)*：`"RUNNING"` / `"IDLE"` / `"ENTRY_FAILED"`
+
+***
+
 ## 10. TrendBucket（趋势图桶对象 / 柱状图点）
 
 **来源接口**：`GET /api/dashboard/chart`

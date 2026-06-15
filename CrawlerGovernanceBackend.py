@@ -92,6 +92,13 @@ class CrawlerGovernanceBackend:
         self.app.add_url_rule(build_url('/api/dashboard/chart'), 'get_trend_chart',
                               maybe_wrap(self.get_trend_chart), methods=['GET'])
 
+        self.app.add_url_rule(build_url('/api/entry/status'), 'get_entry_status',
+                              maybe_wrap(self.get_entry_status), methods=['GET'])
+        self.app.add_url_rule(build_url('/api/entry/history'), 'get_entry_history',
+                              maybe_wrap(self.get_entry_history), methods=['GET'])
+        self.app.add_url_rule(build_url('/api/entry/articles'), 'get_entry_articles',
+                              maybe_wrap(self.get_entry_articles), methods=['GET'])
+
         self.app.add_url_rule(build_url('/api/history/stats'), 'get_history_stats',
                               maybe_wrap(self.get_history_stats), methods=['GET'])
         self.app.add_url_rule(build_url('/api/group/round_status'), 'get_group_round_status',
@@ -358,6 +365,92 @@ class CrawlerGovernanceBackend:
         # 调用 Governor 新增的接口
         status_data = self.governor.get_group_round_status(group_path)
         return jsonify(status_data)
+
+    def get_entry_status(self):
+        """
+        [API] Get the current Entry Round live snapshot (memory) for a group.
+        Query Params:
+            - group: string (required)
+        """
+        if not self.governor:
+            return jsonify({"error": "Init failed"}), 500
+
+        group_path = request.args.get('group')
+        if not group_path:
+            return jsonify({"error": "Missing group parameter"}), 400
+
+        snapshot = self.governor.get_entry_round_status(group_path)
+        return jsonify({
+            "meta": {
+                "mode": "LIVE",
+                "source": "MEMORY",
+                "schema": 1,
+                "server_ts_ms": int(time.time() * 1000),
+            },
+            "entry_round": snapshot or {},
+        })
+
+    def get_entry_history(self):
+        """
+        [API] Get Entry Round history for a group (DB).
+        Query Params:
+            - group: string (required)
+            - limit: int (default 50)
+            - offset: int (default 0)
+        """
+        if not self.governor:
+            return jsonify({"error": "Init failed"}), 500
+
+        group_path = request.args.get('group')
+        if not group_path:
+            return jsonify({"error": "Missing group parameter"}), 400
+
+        limit = request.args.get('limit', default=50, type=int)
+        offset = request.args.get('offset', default=0, type=int)
+
+        items = self.governor.get_entry_round_history(group_path, limit=limit, offset=offset)
+        return jsonify({
+            "meta": {
+                "mode": "QUERY",
+                "source": "DB",
+                "schema": 1,
+                "server_ts_ms": int(time.time() * 1000),
+                "limit": limit,
+                "offset": offset,
+            },
+            "items": items,
+        })
+
+    def get_entry_articles(self):
+        """
+        [API] Get article crawl records under an Entry Round (DB).
+        Query Params:
+            - entry_round_id: int (required)
+            - limit: int (default 100)
+            - offset: int (default 0)
+        """
+        if not self.governor:
+            return jsonify({"error": "Init failed"}), 500
+
+        entry_round_id = request.args.get('entry_round_id', type=int)
+        if entry_round_id is None:
+            return jsonify({"error": "Missing entry_round_id parameter"}), 400
+
+        limit = request.args.get('limit', default=100, type=int)
+        offset = request.args.get('offset', default=0, type=int)
+
+        items = self.governor.get_entry_round_articles(entry_round_id, limit=limit, offset=offset)
+        return jsonify({
+            "meta": {
+                "mode": "QUERY",
+                "source": "DB",
+                "schema": 1,
+                "server_ts_ms": int(time.time() * 1000),
+                "limit": limit,
+                "offset": offset,
+            },
+            "items": items,
+        })
 
     def export_data(self, target):
         """

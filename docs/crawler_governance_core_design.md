@@ -76,6 +76,16 @@
 *   `signal`：NORMAL/PAUSE/IMMEDIATE
 *   用于跨进程/重启保持控制状态。
 
+#### 5）`entry_rounds`：入口轮次快照表
+
+*   `id`：自增主键，关联 `crawl_log.entry_round_id`
+*   `group_path / round_id`：联合唯一，标识某个 group 的第 N 轮入口抓取
+*   `list_url`：入口 URL
+*   `status / http_code / state_msg`：入口自身抓取结果
+*   `started_at / finished_at / duration / total_duration`：入口开始时间、整轮结束时间、入口耗时、整轮总耗时
+*   `articles_expected / articles_success / articles_failed / articles_skipped`：该轮预期/成功/失败/跳过的文章数
+*   作用：**持久化每个入口的抓取轮次**，包括入口失败的轮次，使历史可追溯。
+
 ***
 
 ## 4. 状态机设计与流转
@@ -171,6 +181,23 @@
     *   sleep 前将 `ctx.next_run_ts = now + seconds`，支持 UI 展示倒计时
     *   支持 PAUSE/IMMEDIATE/stop\_event 中断或跳过等待
 
+### 5.4 Entry Round（入口轮次）流程
+
+入口轮次表示“针对某个 group 的 `list_url` 的一次完整处理周期”，从入口 URL 开始抓取，到该入口下所有文章提取结束。
+
+与现有 `start_round/finish_round`（文章提取轮次）不同，Entry Round 由 `transaction(url, group_path)` **自动识别**并管理，业务侧无需新增调用：
+
+*   **自动识别 Entry**：当 `transaction()` 发现 `url == task_groups.list_url` 时，自动创建或复用当前 RUNNING 的 Entry Round。
+*   **Entry 成功**：入口抓取成功后，Entry Round 保持 `RUNNING` 状态，等待文章提取阶段。
+*   **Entry 失败**：入口抓取失败后（TEMP\_FAIL / PERM\_FAIL / STOPPED），Entry Round 立即标记为 `ENTRY_FAILED` 并持久化；后续不会进入文章提取。
+*   **文章提取阶段**：`start_round(group_path, expected_count)` 自动更新 Entry Round 的 `articles_expected`；每篇文章结束时自动累加 `articles_success / failed / skipped`。
+*   **整轮结束**：`finish_round(group_path)` 自动计算 `finished_at` 与 `total_duration`，并将最终统计写回 `entry_rounds`。
+
+内存与 DB 双轨：
+
+*   内存 `entry_round_snapshots[group_path]` 保存当前 RUNNING 的 Entry Round，供 UI 实时轮询。
+*   DB `entry_rounds` 保存历史轮次，进程重启后仍可查询。
+
 ***
 
 ## 6. 统计口径与数据流（Traffic vs Results）
@@ -242,6 +269,11 @@ DB 模式下的妥协：
 *   历史统计：
     *   `get_db_history_stats(days)`
     *   daily trend 基于 crawl\_log；当前分布基于 crawl\_status
+
+*   Entry Round（新增）：
+    *   `get_entry_round_status(group_path)`：当前 Entry Round 内存快照（实时）
+    *   `get_entry_round_history(group_path, limit, offset)`：历史入口轮次（DB）
+    *   `get_entry_round_articles(entry_round_db_id, limit, offset)`：某轮次下的文章明细（DB）
 
 *   导出：
     *   `get_export_csv(export_type, group_path)`：全局/组状态/组日志导出
