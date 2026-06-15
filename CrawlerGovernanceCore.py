@@ -194,6 +194,7 @@ class DatabaseHandler:
                     duration REAL,
                     total_duration REAL,
                     articles_expected INTEGER DEFAULT 0,
+                    articles_processed INTEGER DEFAULT 0,
                     articles_success INTEGER DEFAULT 0,
                     articles_failed INTEGER DEFAULT 0,
                     articles_skipped INTEGER DEFAULT 0,
@@ -231,10 +232,10 @@ class DatabaseHandler:
                 except sqlite3.OperationalError as e:
                     logger.warning(f"Migration warning: {e}")
 
-            # Migrate entry_rounds table: add articles_cached / articles_ignored if missing
+            # Migrate entry_rounds table: add new article counters if missing
             cur.execute("PRAGMA table_info(entry_rounds)")
             entry_round_columns = {row[1] for row in cur.fetchall()}
-            for col in ("articles_cached", "articles_ignored"):
+            for col in ("articles_processed", "articles_cached", "articles_ignored"):
                 if col not in entry_round_columns:
                     logger.info(f"Migrating DB: Adding '{col}' column to entry_rounds...")
                     try:
@@ -768,7 +769,7 @@ class GroupRoundContext:
 
         # 实时分类统计
         self.stats = {
-            "success": 0, "failed": 0, "skipped": 0, "other": 0
+            "success": 0, "failed": 0, "skipped": 0, "cached": 0, "ignored": 0, "other": 0
         }
 
         # --- 调度信息 ---
@@ -785,7 +786,7 @@ class GroupRoundContext:
 
         # 重置当前轮次计数
         self.processed_count = 0
-        self.stats = {"success": 0, "failed": 0, "skipped": 0, "other": 0}
+        self.stats = {"success": 0, "failed": 0, "skipped": 0, "cached": 0, "ignored": 0, "other": 0}
         self.next_run_ts = 0.0  # 清除之前的倒计时
 
         logger.info(f"[Round Start] {self.group_path} (Round #{self.round_id}, Plan: {expected_count})")
@@ -815,8 +816,10 @@ class GroupRoundContext:
             self.stats["failed"] += 1
         elif status in [Status.SKIPPED]:
             self.stats["skipped"] += 1
-        elif status in [Status.IGNORED, Status.CACHED]:
-            pass
+        elif status in [Status.CACHED]:
+            self.stats["cached"] += 1
+        elif status in [Status.IGNORED]:
+            self.stats["ignored"] += 1
         else:
             self.stats["other"] += 1
 
@@ -1277,9 +1280,9 @@ class GovernanceManager:
             db_id = self.db.execute(
                 """
                 INSERT INTO entry_rounds
-                (group_path, round_id, list_url, status, started_at, articles_expected,
+                (group_path, round_id, list_url, status, started_at, articles_expected, articles_processed,
                  articles_success, articles_failed, articles_skipped, articles_cached, articles_ignored)
-                VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0)
+                VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0)
                 """,
                 (group_path, next_round_id, list_url, int(Status.RUNNING), now_ts)
             )
@@ -1297,6 +1300,7 @@ class GovernanceManager:
                 "duration": None,
                 "total_duration": None,
                 "articles_expected": 0,
+                "articles_processed": 0,
                 "articles_success": 0,
                 "articles_failed": 0,
                 "articles_skipped": 0,
@@ -1315,7 +1319,7 @@ class GovernanceManager:
             """
             UPDATE entry_rounds
             SET status = ?, http_code = ?, state_msg = ?, finished_at = ?, duration = ?,
-                total_duration = ?, articles_expected = ?, articles_success = ?,
+                total_duration = ?, articles_expected = ?, articles_processed = ?, articles_success = ?,
                 articles_failed = ?, articles_skipped = ?, articles_cached = ?, articles_ignored = ?
             WHERE id = ?
             """,
@@ -1327,6 +1331,7 @@ class GovernanceManager:
                 snapshot.get("duration"),
                 snapshot.get("total_duration"),
                 snapshot.get("articles_expected"),
+                snapshot.get("articles_processed"),
                 snapshot.get("articles_success"),
                 snapshot.get("articles_failed"),
                 snapshot.get("articles_skipped"),
@@ -1342,6 +1347,7 @@ class GovernanceManager:
             snapshot = self.entry_round_snapshots.get(group_path)
             if not snapshot or snapshot.get("phase") not in ("RUNNING",):
                 return
+            snapshot["articles_processed"] += 1
             if status == Status.SUCCESS:
                 snapshot["articles_success"] += 1
             elif status in (Status.TEMP_FAIL, Status.PERM_FAIL, Status.STOPPED):
@@ -1452,6 +1458,10 @@ class GovernanceManager:
                 result["current_total_duration"] = round(now - result["started_at"], 1)
             else:
                 result["current_total_duration"] = result.get("total_duration")
+            # Compute how many articles are still in progress
+            expected = int(result.get("articles_expected") or 0)
+            processed = int(result.get("articles_processed") or 0)
+            result["articles_running"] = max(0, expected - processed)
             return result
 
     def get_entry_round_history(self, group_path: str, limit: int = 50, offset: int = 0) -> List[Dict]:

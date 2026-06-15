@@ -602,10 +602,16 @@ class GovernanceDataEngine:
         group_filter: Optional[str] = None,
         use_updated_at: bool = True,
         include_cached_as_success: bool = False,
+        mode: str = "status",
     ) -> Dict[str, Any]:
         """
         QUERY: Trend buckets for bar chart (DB-only).
         This intentionally does not run on a timer; frontend triggers it manually.
+
+        Modes:
+          - status:  one row per URL, uses crawl_status (legacy). Excludes CACHED/IGNORED.
+          - attempts: one row per crawl attempt, uses crawl_log. Includes CACHED/IGNORED/SKIPPED
+                      so the chart aligns with Entry Round accounting.
         """
         if not getattr(self.gov, "db", None):
             return {
@@ -619,27 +625,51 @@ class GovernanceDataEngine:
                 "items": [],
             }
 
+        mode = (mode or "status").lower()
         bucket_seconds = max(1, int(bucket_minutes)) * 60
-        time_col = "updated_at" if use_updated_at else "last_run_at"
 
-        sql = f"""
-            SELECT
-                (s.{time_col} / ?) * ? as bucket_ts,
-                s.status as status,
-                COUNT(*) as cnt
-            FROM crawl_status s
-            LEFT JOIN task_groups g ON s.url = g.list_url
-            WHERE s.{time_col} IS NOT NULL
-              AND s.{time_col} BETWEEN ? AND ?
-              AND g.list_url IS NULL
-        """
-        params: List[Any] = [bucket_seconds, bucket_seconds, int(start_ts), int(end_ts)]
+        if mode == "attempts":
+            # crawl_log records every attempt including CACHED/IGNORED.
+            # Use created_at as the bucket time.
+            sql = """
+                SELECT
+                    (l.created_at / ?) * ? as bucket_ts,
+                    l.status as status,
+                    COUNT(*) as cnt
+                FROM crawl_log l
+                LEFT JOIN task_groups g ON l.url = g.list_url
+                WHERE l.created_at IS NOT NULL
+                  AND l.created_at BETWEEN ? AND ?
+                  AND g.list_url IS NULL
+            """
+            params: List[Any] = [bucket_seconds, bucket_seconds, int(start_ts), int(end_ts)]
 
-        if group_filter:
-            sql += " AND s.group_path = ?"
-            params.append(group_filter)
+            if group_filter:
+                sql += " AND l.group_path = ?"
+                params.append(group_filter)
 
-        sql += " GROUP BY bucket_ts, status ORDER BY bucket_ts ASC"
+            sql += " GROUP BY bucket_ts, status ORDER BY bucket_ts ASC"
+            time_col = "created_at"
+        else:
+            time_col = "updated_at" if use_updated_at else "last_run_at"
+            sql = f"""
+                SELECT
+                    (s.{time_col} / ?) * ? as bucket_ts,
+                    s.status as status,
+                    COUNT(*) as cnt
+                FROM crawl_status s
+                LEFT JOIN task_groups g ON s.url = g.list_url
+                WHERE s.{time_col} IS NOT NULL
+                  AND s.{time_col} BETWEEN ? AND ?
+                  AND g.list_url IS NULL
+            """
+            params = [bucket_seconds, bucket_seconds, int(start_ts), int(end_ts)]
+
+            if group_filter:
+                sql += " AND s.group_path = ?"
+                params.append(group_filter)
+
+            sql += " GROUP BY bucket_ts, status ORDER BY bucket_ts ASC"
 
         rows = self.gov.db.fetch_all_dict(sql, tuple(params)) or []
 
@@ -657,6 +687,9 @@ class GovernanceDataEngine:
                 "bucket_ts_ms": int(cur * 1000),
                 "success": 0,
                 "fail": 0,
+                "cached": 0,
+                "ignored": 0,
+                "skipped": 0,
                 "total": 0,
             }
             cur += bucket_seconds
@@ -672,19 +705,45 @@ class GovernanceDataEngine:
             st = int(r.get("status") or 0)
             cnt = int(r.get("cnt") or 0)
             if b not in timeline:
-                timeline[b] = {"bucket_ts_ms": int(b * 1000), "success": 0, "fail": 0, "total": 0}
+                timeline[b] = {
+                    "bucket_ts_ms": int(b * 1000),
+                    "success": 0,
+                    "fail": 0,
+                    "cached": 0,
+                    "ignored": 0,
+                    "skipped": 0,
+                    "total": 0,
+                }
+
+            counted = False
             if st in success_set:
                 timeline[b]["success"] += cnt
-                timeline[b]["total"] += cnt
+                counted = True
             elif st in fail_set:
                 timeline[b]["fail"] += cnt
+                counted = True
+
+            # attempts mode aligns with Entry Round accounting and includes
+            # CACHED/IGNORED/SKIPPED; status mode keeps legacy crawl_status semantics.
+            if mode == "attempts":
+                if st == STATUS_CACHED:
+                    timeline[b]["cached"] += cnt
+                    counted = True
+                elif st == STATUS_IGNORED:
+                    timeline[b]["ignored"] += cnt
+                    counted = True
+                elif st == STATUS_SKIPPED:
+                    timeline[b]["skipped"] += cnt
+                    counted = True
+
+            if counted:
                 timeline[b]["total"] += cnt
-            else:
-                # ignore pending/running/skipped/ignored by default
-                pass
 
         items = [timeline[k] for k in sorted(timeline.keys())]
-        watermark = f"db:trend:{int(start_ts)}:{int(end_ts)}:{bucket_minutes}:{group_filter or 'all'}:{int(use_updated_at)}:{int(include_cached_as_success)}"
+        watermark = (
+            f"db:trend:{int(start_ts)}:{int(end_ts)}:{bucket_minutes}:"
+            f"{group_filter or 'all'}:{int(use_updated_at)}:{int(include_cached_as_success)}:{mode}"
+        )
 
         return {
             "meta": {
@@ -693,7 +752,12 @@ class GovernanceDataEngine:
                 "schema": 1,
                 "server_ts_ms": self._now_ms(),
                 "watermark": watermark,
-                "window": {"start_ts": int(start_ts), "end_ts": int(end_ts), "bucket_minutes": int(bucket_minutes)},
+                "window": {
+                    "start_ts": int(start_ts),
+                    "end_ts": int(end_ts),
+                    "bucket_minutes": int(bucket_minutes),
+                    "mode": mode,
+                },
             },
             "items": items,
         }

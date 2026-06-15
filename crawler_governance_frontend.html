@@ -162,19 +162,26 @@
                         <div class="flex justify-between text-[9px] text-gray-400 font-mono">
                             <span>OK: <span class="text-emerald-400" x-text="currentRound?.stats?.success"></span></span>
                             <span>Err: <span class="text-red-400" x-text="currentRound?.stats?.failed"></span></span>
+                            <span>Skip: <span class="text-yellow-400" x-text="currentRound?.stats?.skipped"></span></span>
+                            <span>Cached: <span class="text-purple-400" x-text="currentRound?.stats?.cached"></span></span>
+                            <span>Ign: <span class="text-gray-400" x-text="currentRound?.stats?.ignored"></span></span>
                             <span><span x-text="currentRound?.processed"></span>/<span x-text="currentRound?.expected"></span></span>
                         </div>
                     </div>
 
                     <!-- Entry Round Progress Card -->
-                    <div class="w-48 bg-gray-800/50 border border-gray-700 rounded p-3 shrink-0">
-                        <div class="text-[10px] font-bold text-gray-500 uppercase mb-1">Entry Round</div>
-                        <div class="text-xs text-gray-300">Exp: <span class="font-mono text-blue-300" x-text="currentEntryRound?.articles_expected ?? 0"></span></div>
-                        <div class="text-xs text-gray-300">OK: <span class="font-mono text-emerald-300" x-text="currentEntryRound?.articles_success ?? 0"></span></div>
-                        <div class="text-xs text-gray-300">Err: <span class="font-mono text-red-300" x-text="currentEntryRound?.articles_failed ?? 0"></span></div>
-                        <div class="text-xs text-gray-300">Skip: <span class="font-mono text-yellow-300" x-text="currentEntryRound?.articles_skipped ?? 0"></span></div>
-                        <div class="text-xs text-gray-300">Cached: <span class="font-mono text-purple-300" x-text="currentEntryRound?.articles_cached ?? 0"></span></div>
-                        <div class="text-xs text-gray-300">Ignored: <span class="font-mono text-gray-400" x-text="currentEntryRound?.articles_ignored ?? 0"></span></div>
+                    <div class="w-56 bg-gray-800/50 border border-gray-700 rounded p-3 shrink-0">
+                        <div class="text-[10px] font-bold text-gray-500 uppercase mb-2">Current Entry Round</div>
+                        <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-300">
+                            <div>Exp: <span class="font-mono text-blue-300" x-text="currentEntryRound?.articles_expected ?? 0"></span></div>
+                            <div>Proc: <span class="font-mono text-blue-200" x-text="currentEntryRound?.articles_processed ?? 0"></span></div>
+                            <div>Run: <span class="font-mono text-blue-400 animate-pulse" x-text="currentEntryRound?.articles_running ?? 0"></span></div>
+                            <div>OK: <span class="font-mono text-emerald-300" x-text="currentEntryRound?.articles_success ?? 0"></span></div>
+                            <div>Err: <span class="font-mono text-red-300" x-text="currentEntryRound?.articles_failed ?? 0"></span></div>
+                            <div>Skip: <span class="font-mono text-yellow-300" x-text="currentEntryRound?.articles_skipped ?? 0"></span></div>
+                            <div>Cached: <span class="font-mono text-purple-300" x-text="currentEntryRound?.articles_cached ?? 0"></span></div>
+                            <div>Ignored: <span class="font-mono text-gray-400" x-text="currentEntryRound?.articles_ignored ?? 0"></span></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -244,6 +251,7 @@
                                     <th class="px-3 py-2 text-center w-16">HTTP</th>
                                     <th class="px-3 py-2 text-left w-40">Message</th>
                                     <th class="px-3 py-2 text-center w-12">Exp</th>
+                                    <th class="px-3 py-2 text-center w-12">Proc</th>
                                     <th class="px-3 py-2 text-center w-12">OK</th>
                                     <th class="px-3 py-2 text-center w-12">Err</th>
                                     <th class="px-3 py-2 text-center w-12">Skip</th>
@@ -265,6 +273,7 @@
                                         <td class="px-3 py-1.5 text-center" :class="row.http_code >= 400 ? 'text-red-400' : 'text-emerald-500'" x-text="row.http_code || '-'"></td>
                                         <td class="px-3 py-1.5 truncate text-gray-400 max-w-[160px]" :title="row.state_msg" x-text="row.state_msg || '-'"></td>
                                         <td class="px-3 py-1.5 text-center text-blue-300" x-text="row.articles_expected || 0"></td>
+                                        <td class="px-3 py-1.5 text-center text-blue-200" x-text="row.articles_processed || 0"></td>
                                         <td class="px-3 py-1.5 text-center text-emerald-400" x-text="row.articles_success || 0"></td>
                                         <td class="px-3 py-1.5 text-center text-red-400" x-text="row.articles_failed || 0"></td>
                                         <td class="px-3 py-1.5 text-center text-yellow-400" x-text="row.articles_skipped || 0"></td>
@@ -346,8 +355,11 @@
                         </div>
 
                         <div class="flex items-center gap-3 text-[10px] text-gray-500 uppercase font-bold tracking-wider">
-                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-600"></span> Success</div>
-                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-600"></span> Fail</div>
+                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-600"></span> OK</div>
+                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-600"></span> Err</div>
+                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-purple-600"></span> Cached</div>
+                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-gray-500"></span> Ignored</div>
+                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-yellow-600"></span> Skip</div>
                         </div>
                     </div>
 
@@ -389,10 +401,14 @@
 
                                             <div class="absolute inset-x-[-2px] bottom-0 top-[-20px] bg-white/5 opacity-0 group-hover/bar:opacity-100 transition-opacity rounded-sm pointer-events-none"></div>
 
-                                            <div class="w-[8px] mx-auto transition-all duration-200 rounded-t-[1px] relative flex flex-col justify-end overflow-hidden"
-                                                    :class="bar.total === 0 ? 'bg-gray-800 h-[1px]' : 'bg-emerald-600 hover:bg-emerald-500'"
-                                                    :style="`height: ${Math.max(0.5, (bar.total / (chartMax || 1)) * 100)}%`">
-                                                    <div class="w-full bg-red-500" :style="`height: ${bar.total > 0 ? (bar.fail / bar.total) * 100 : 0}%`"></div>
+                                            <div class="w-[8px] mx-auto transition-all duration-200 rounded-t-[1px] relative flex flex-col-reverse overflow-hidden"
+                                                 :class="bar.total === 0 ? 'bg-gray-800 h-[1px]' : ''"
+                                                 :style="`height: ${Math.max(0.5, ((bar.total || 0) / (chartMax || 1)) * 100)}%`">
+                                                <div class="w-full bg-red-600 transition-all" :style="`height: ${((bar.fail || 0) / (chartMax || 1)) * 100}%`" title="Fail"></div>
+                                                <div class="w-full bg-emerald-600 transition-all" :style="`height: ${((bar.success || 0) / (chartMax || 1)) * 100}%`" title="Success"></div>
+                                                <div class="w-full bg-purple-600 transition-all" :style="`height: ${((bar.cached || 0) / (chartMax || 1)) * 100}%`" title="Cached"></div>
+                                                <div class="w-full bg-gray-500 transition-all" :style="`height: ${((bar.ignored || 0) / (chartMax || 1)) * 100}%`" title="Ignored"></div>
+                                                <div class="w-full bg-yellow-600 transition-all" :style="`height: ${((bar.skipped || 0) / (chartMax || 1)) * 100}%`" title="Skipped"></div>
                                             </div>
 
                                             <div class="absolute top-full mt-2 left-1/2 -translate-x-1/2 text-[9px] text-gray-600 font-mono whitespace-nowrap"
@@ -422,14 +438,23 @@
                              x-text="formatTime(hoverBar?.bucket_ts_ms)"></div>
 
                         <div class="grid grid-cols-2 gap-x-4 gap-y-1 font-mono">
-                            <span class="text-emerald-400">Success:</span>
-                            <span class="text-right text-gray-200" x-text="hoverBar?.success"></span>
+                            <span class="text-emerald-400">OK:</span>
+                            <span class="text-right text-gray-200" x-text="hoverBar?.success || 0"></span>
 
-                            <span class="text-red-400">Fail:</span>
-                            <span class="text-right text-gray-200" x-text="hoverBar?.fail"></span>
+                            <span class="text-red-400">Err:</span>
+                            <span class="text-right text-gray-200" x-text="hoverBar?.fail || 0"></span>
+
+                            <span class="text-purple-400">Cached:</span>
+                            <span class="text-right text-gray-200" x-text="hoverBar?.cached || 0"></span>
+
+                            <span class="text-gray-400">Ignored:</span>
+                            <span class="text-right text-gray-200" x-text="hoverBar?.ignored || 0"></span>
+
+                            <span class="text-yellow-400">Skip:</span>
+                            <span class="text-right text-gray-200" x-text="hoverBar?.skipped || 0"></span>
 
                             <span class="text-gray-500">Total:</span>
-                            <span class="text-right text-gray-400" x-text="hoverBar?.total"></span>
+                            <span class="text-right text-gray-400" x-text="hoverBar?.total || 0"></span>
                         </div>
                     </div>
 
@@ -709,7 +734,8 @@
                         start_ts: start,
                         end_ts: end,
                         bucket_minutes: bucket,
-                        group_filter: this.selectedGroup
+                        group_filter: this.selectedGroup,
+                        mode: 'attempts'
                     });
 
                     const res = await fetch(`/api/dashboard/chart?${params}`);

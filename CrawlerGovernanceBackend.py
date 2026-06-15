@@ -305,6 +305,8 @@ class CrawlerGovernanceBackend:
           - group_filter: str (optional)
           - use_updated_at: int 1/0 (default 1)
           - include_cached_as_success: int 1/0 (default 0)
+          - mode: str ('status' | 'attempts', default 'status')
+                  'attempts' uses crawl_log and includes CACHED/IGNORED/SKIPPED.
         """
         if not self.governor:
             return jsonify({"error": "Init failed"}), 500
@@ -329,6 +331,7 @@ class CrawlerGovernanceBackend:
 
         use_updated_at = request.args.get('use_updated_at', default=1, type=int)
         include_cached = request.args.get('include_cached_as_success', default=0, type=int)
+        mode = request.args.get('mode', default='status', type=str)
 
         payload = self.data_engine.query_trend(
             start_ts=float(start_ts),
@@ -336,7 +339,8 @@ class CrawlerGovernanceBackend:
             bucket_minutes=int(bucket_minutes),
             group_filter=group_filter,
             use_updated_at=bool(int(use_updated_at)),
-            include_cached_as_success=bool(int(include_cached))
+            include_cached_as_success=bool(int(include_cached)),
+            mode=mode
         )
         return jsonify(payload)
 
