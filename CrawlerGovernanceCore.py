@@ -946,6 +946,11 @@ class GovernanceManager:
         # Key: group_path, Value: dict (see _ensure_entry_round for structure)
         self.entry_round_snapshots: Dict[str, Dict[str, Any]] = {}
 
+        # Track the first Entry Round id created for each group in this process.
+        # This lets UI/API distinguish "this session" rounds from historical ones.
+        # Key: group_path, Value: int (first round_id created after startup)
+        self.entry_round_startup_ids: Dict[str, int] = {}
+
         self.known_anchors = set()
 
         # --- Anchor status cache (LIVE, memory-only) ---
@@ -1287,6 +1292,11 @@ class GovernanceManager:
                 (group_path, next_round_id, list_url, int(Status.RUNNING), now_ts)
             )
 
+            # Remember the first round id created for this group in this process.
+            # This is useful for "show only this session" filtering.
+            if group_path not in self.entry_round_startup_ids:
+                self.entry_round_startup_ids[group_path] = next_round_id
+
             self.entry_round_snapshots[group_path] = {
                 "db_id": db_id,
                 "round_id": next_round_id,
@@ -1462,20 +1472,24 @@ class GovernanceManager:
             expected = int(result.get("articles_expected") or 0)
             processed = int(result.get("articles_processed") or 0)
             result["articles_running"] = max(0, expected - processed)
+            # Expose the first round id created for this group in this process
+            result["startup_round_id"] = self.entry_round_startup_ids.get(group_path)
             return result
 
-    def get_entry_round_history(self, group_path: str, limit: int = 50, offset: int = 0) -> List[Dict]:
+    def get_entry_round_history(self, group_path: str, limit: int = 50, offset: int = 0, since_round_id: Optional[int] = None) -> List[Dict]:
         """API: query Entry Round history from DB."""
         group_path = _normalize_group_path(group_path)
-        rows = self.db.fetch_all_dict(
-            """
-            SELECT * FROM entry_rounds
-            WHERE group_path = ?
-            ORDER BY round_id DESC
-            LIMIT ? OFFSET ?
-            """,
-            (group_path, max(1, int(limit)), max(0, int(offset)))
-        )
+        sql = "SELECT * FROM entry_rounds WHERE group_path = ?"
+        params: List[Any] = [group_path]
+
+        if since_round_id is not None:
+            sql += " AND round_id >= ?"
+            params.append(int(since_round_id))
+
+        sql += " ORDER BY round_id DESC LIMIT ? OFFSET ?"
+        params.extend([max(1, int(limit)), max(0, int(offset))])
+
+        rows = self.db.fetch_all_dict(sql, tuple(params))
         # Derive phase for historical rows (DB does not store phase)
         for row in rows or []:
             if row.get("finished_at") is None:

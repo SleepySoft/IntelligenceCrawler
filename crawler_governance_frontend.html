@@ -67,6 +67,10 @@
                 <span>⬇ Report</span>
             </a>
 
+            <button @click="legendOpen = true" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-400 px-3 py-1 rounded border border-gray-700" title="Status abbreviations key">
+                ? Key
+            </button>
+
             <div class="flex items-center gap-2 border-l border-gray-700 pl-4">
                 <span class="text-gray-500 uppercase text-[10px]">Total Results</span>
                 <span class="font-mono font-bold text-gray-200" x-text="globalStats.results?.total || 0"></span>
@@ -138,15 +142,21 @@
                             <div class="flex items-center gap-2">
                                 <span class="text-[10px] font-mono"
                                       :class="currentEntryRound?.http_code >= 400 ? 'text-red-400' : 'text-emerald-400'"
-                                      x-text="currentEntryRound?.http_code ? 'HTTP ' + currentEntryRound.http_code : (currentGroupData?.anchor?.http_code ? 'HTTP ' + currentGroupData.anchor.http_code : 'NO STATUS')"></span>
+                                      x-text="currentEntryRound?.http_code ? 'HTTP ' + currentEntryRound.http_code : (currentGroupData?.anchor?.http_code ? 'HTTP ' + currentGroupData.anchor.http_code : 'NO HTTP')"></span>
                                 <span class="text-[10px] font-mono text-blue-400" x-show="currentEntryRound?.round_id > 0">R#<span x-text="currentEntryRound.round_id"></span></span>
                             </div>
                         </div>
                         <div class="text-xs text-gray-300 truncate font-mono mb-1" x-text="currentGroupData?.list_url || 'No URL'"></div>
                         <div class="flex justify-between text-[10px]">
-                            <span class="text-gray-500 truncate" x-text="currentEntryRound?.state_msg || currentGroupData?.anchor?.state_msg || 'System Normal'"></span>
+                            <span class="truncate"
+                                  :class="currentEntryRound?.phase === 'ENTRY_FAILED' ? 'text-red-400' : 'text-gray-500'"
+                                  x-text="currentEntryRound?.state_msg || currentGroupData?.anchor?.state_msg || 'System Normal'"></span>
                             <span class="font-mono" :class="currentEntryRound?.phase === 'RUNNING' ? 'text-blue-400 animate-pulse' : (currentEntryRound?.phase === 'ENTRY_FAILED' ? 'text-red-400' : 'text-gray-500')"
                                   x-text="currentEntryRound?.phase || 'IDLE'"></span>
+                        </div>
+                        <div class="mt-2 text-[10px] text-gray-600 font-mono border-t border-gray-700/50 pt-1 flex justify-between">
+                            <span>Session from R#<span x-text="currentStartupRoundId || '-'"></span></span>
+                            <span x-show="currentEntryRound?.round_id > 0 && currentStartupRoundId && currentEntryRound.round_id >= currentStartupRoundId" class="text-emerald-600">current session</span>
                         </div>
                     </div>
 
@@ -160,12 +170,12 @@
                             <div class="h-full bg-blue-500 transition-all duration-500" :style="`width: ${currentRound?.progress_pct}%`"></div>
                         </div>
                         <div class="flex justify-between text-[9px] text-gray-400 font-mono">
-                            <span>OK: <span class="text-emerald-400" x-text="currentRound?.stats?.success"></span></span>
-                            <span>Err: <span class="text-red-400" x-text="currentRound?.stats?.failed"></span></span>
-                            <span>Skip: <span class="text-yellow-400" x-text="currentRound?.stats?.skipped"></span></span>
-                            <span>Cached: <span class="text-purple-400" x-text="currentRound?.stats?.cached"></span></span>
-                            <span>Ign: <span class="text-gray-400" x-text="currentRound?.stats?.ignored"></span></span>
-                            <span><span x-text="currentRound?.processed"></span>/<span x-text="currentRound?.expected"></span></span>
+                            <span title="Success">OK: <span class="text-emerald-400" x-text="currentRound?.stats?.success"></span></span>
+                            <span title="Failed (TMP + PRM + STOP)">Fail: <span class="text-red-400" x-text="currentRound?.stats?.failed"></span></span>
+                            <span title="Skipped">SKIP: <span class="text-yellow-400" x-text="currentRound?.stats?.skipped"></span></span>
+                            <span title="Cached">CACHED: <span class="text-purple-400" x-text="currentRound?.stats?.cached"></span></span>
+                            <span title="Ignored">IGN: <span class="text-gray-400" x-text="currentRound?.stats?.ignored"></span></span>
+                            <span title="Processed / Expected"><span x-text="currentRound?.processed"></span>/<span x-text="currentRound?.expected"></span></span>
                         </div>
                     </div>
 
@@ -173,14 +183,14 @@
                     <div class="w-56 bg-gray-800/50 border border-gray-700 rounded p-3 shrink-0">
                         <div class="text-[10px] font-bold text-gray-500 uppercase mb-2">Current Entry Round</div>
                         <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-300">
-                            <div>Exp: <span class="font-mono text-blue-300" x-text="currentEntryRound?.articles_expected ?? 0"></span></div>
-                            <div>Proc: <span class="font-mono text-blue-200" x-text="currentEntryRound?.articles_processed ?? 0"></span></div>
-                            <div>Run: <span class="font-mono text-blue-400 animate-pulse" x-text="currentEntryRound?.articles_running ?? 0"></span></div>
-                            <div>OK: <span class="font-mono text-emerald-300" x-text="currentEntryRound?.articles_success ?? 0"></span></div>
-                            <div>Err: <span class="font-mono text-red-300" x-text="currentEntryRound?.articles_failed ?? 0"></span></div>
-                            <div>Skip: <span class="font-mono text-yellow-300" x-text="currentEntryRound?.articles_skipped ?? 0"></span></div>
-                            <div>Cached: <span class="font-mono text-purple-300" x-text="currentEntryRound?.articles_cached ?? 0"></span></div>
-                            <div>Ignored: <span class="font-mono text-gray-400" x-text="currentEntryRound?.articles_ignored ?? 0"></span></div>
+                            <div title="Expected articles">Exp: <span class="font-mono text-blue-300" x-text="currentEntryRound?.articles_expected ?? 0"></span></div>
+                            <div title="Processed articles">Proc: <span class="font-mono text-blue-200" x-text="currentEntryRound?.articles_processed ?? 0"></span></div>
+                            <div title="Articles still running">Run: <span class="font-mono text-blue-400 animate-pulse" x-text="currentEntryRound?.articles_running ?? 0"></span></div>
+                            <div title="Success">OK: <span class="font-mono text-emerald-300" x-text="currentEntryRound?.articles_success ?? 0"></span></div>
+                            <div title="Failed (TMP + PRM + STOP)">Fail: <span class="font-mono text-red-300" x-text="currentEntryRound?.articles_failed ?? 0"></span></div>
+                            <div title="Skipped">SKIP: <span class="font-mono text-yellow-300" x-text="currentEntryRound?.articles_skipped ?? 0"></span></div>
+                            <div title="Cached">CACHED: <span class="font-mono text-purple-300" x-text="currentEntryRound?.articles_cached ?? 0"></span></div>
+                            <div title="Ignored">IGN: <span class="font-mono text-gray-400" x-text="currentEntryRound?.articles_ignored ?? 0"></span></div>
                         </div>
                     </div>
                 </div>
@@ -195,6 +205,10 @@
                 </div>
 
                 <div class="flex gap-2" x-show="viewMode === 'ROUND_HISTORY'" x-cloak>
+                    <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
+                        <input type="checkbox" x-model="entryHistorySessionOnly" @change="entryHistoryOffset = 0; fetchEntryHistory()" class="accent-emerald-600 w-3.5 h-3.5">
+                        <span>Since R#<span x-text="currentStartupRoundId || '-'"></span></span>
+                    </label>
                     <button @click="fetchEntryHistory()" class="text-xs bg-blue-900/30 text-blue-300 border border-blue-800 px-2 rounded hover:bg-blue-900/50">Refresh</button>
                 </div>
                 <div class="flex gap-2" x-show="viewMode === 'ARTICLES'" x-cloak>
@@ -226,7 +240,7 @@
                                 <div class="col-span-2 text-gray-500 text-[10px]" x-text="formatTime(row.updated_ts_ms || row.start_ts_ms)"></div>
                                 <div class="col-span-1">
                                     <span class="px-1.5 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-12 text-center"
-                                          :class="getStatusClass(row.status)" x-text="getStatusLabel(row.status)"></span>
+                                          :class="getStatusClass(row.status)" x-text="getStatusLabel(row.status)" :title="getStatusTitle(row.status)"></span>
                                 </div>
                                 <div class="col-span-6 truncate text-gray-400 hover:text-white cursor-pointer" :title="row.url">
                                     <a :href="row.url" target="_blank" x-text="row.url"></a>
@@ -250,13 +264,13 @@
                                     <th class="px-3 py-2 text-left w-16">Status</th>
                                     <th class="px-3 py-2 text-center w-16">HTTP</th>
                                     <th class="px-3 py-2 text-left w-40">Message</th>
-                                    <th class="px-3 py-2 text-center w-12">Exp</th>
-                                    <th class="px-3 py-2 text-center w-12">Proc</th>
-                                    <th class="px-3 py-2 text-center w-12">OK</th>
-                                    <th class="px-3 py-2 text-center w-12">Err</th>
-                                    <th class="px-3 py-2 text-center w-12">Skip</th>
-                                    <th class="px-3 py-2 text-center w-14">Cached</th>
-                                    <th class="px-3 py-2 text-center w-14">Ignored</th>
+                                    <th class="px-3 py-2 text-center w-12" title="Expected">Exp</th>
+                                    <th class="px-3 py-2 text-center w-12" title="Processed">Proc</th>
+                                    <th class="px-3 py-2 text-center w-12" title="Success">OK</th>
+                                    <th class="px-3 py-2 text-center w-12" title="Failed (TMP + PRM + STOP)">Fail</th>
+                                    <th class="px-3 py-2 text-center w-12" title="Skipped">SKIP</th>
+                                    <th class="px-3 py-2 text-center w-14" title="Cached">CACHED</th>
+                                    <th class="px-3 py-2 text-center w-14" title="Ignored">IGN</th>
                                     <th class="px-3 py-2 text-right w-16">Action</th>
                                 </tr>
                             </thead>
@@ -268,7 +282,7 @@
                                         <td class="px-3 py-1.5 text-gray-500 text-[10px]" x-text="formatTime(row.started_at * 1000)"></td>
                                         <td class="px-3 py-1.5">
                                             <span class="px-1 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-12 text-center"
-                                                  :class="getStatusClass(row.status)" x-text="getStatusLabel(row.status)"></span>
+                                                  :class="getStatusClass(row.status)" x-text="getStatusLabel(row.status)" :title="getStatusTitle(row.status)"></span>
                                         </td>
                                         <td class="px-3 py-1.5 text-center" :class="row.http_code >= 400 ? 'text-red-400' : 'text-emerald-500'" x-text="row.http_code || '-'"></td>
                                         <td class="px-3 py-1.5 truncate text-gray-400 max-w-[160px]" :title="row.state_msg" x-text="row.state_msg || '-'"></td>
@@ -316,7 +330,7 @@
                                 <div class="col-span-2 text-gray-500 text-[10px]" x-text="formatTime(row.created_at * 1000)"></div>
                                 <div class="col-span-1">
                                     <span class="px-1.5 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-12 text-center"
-                                          :class="getStatusClass(row.status)" x-text="getStatusLabel(row.status)"></span>
+                                          :class="getStatusClass(row.status)" x-text="getStatusLabel(row.status)" :title="getStatusTitle(row.status)"></span>
                                 </div>
                                 <div class="col-span-6 truncate text-gray-400 hover:text-white cursor-pointer" :title="row.url">
                                     <a :href="row.url" target="_blank" x-text="row.url"></a>
@@ -355,11 +369,11 @@
                         </div>
 
                         <div class="flex items-center gap-3 text-[10px] text-gray-500 uppercase font-bold tracking-wider">
-                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-600"></span> OK</div>
-                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-600"></span> Err</div>
-                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-purple-600"></span> Cached</div>
-                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-gray-500"></span> Ignored</div>
-                            <div class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-yellow-600"></span> Skip</div>
+                            <div class="flex items-center gap-1" title="Success"><span class="w-2 h-2 rounded-full bg-emerald-600"></span> OK</div>
+                            <div class="flex items-center gap-1" title="Failed (TMP + PRM + STOP)"><span class="w-2 h-2 rounded-full bg-red-600"></span> Fail</div>
+                            <div class="flex items-center gap-1" title="Cached"><span class="w-2 h-2 rounded-full bg-purple-600"></span> CACHED</div>
+                            <div class="flex items-center gap-1" title="Ignored"><span class="w-2 h-2 rounded-full bg-gray-500"></span> IGN</div>
+                            <div class="flex items-center gap-1" title="Skipped"><span class="w-2 h-2 rounded-full bg-yellow-600"></span> SKIP</div>
                         </div>
                     </div>
 
@@ -404,11 +418,11 @@
                                             <div class="w-[8px] mx-auto transition-all duration-200 rounded-t-[1px] relative flex flex-col-reverse overflow-hidden"
                                                  :class="bar.total === 0 ? 'bg-gray-800 h-[1px]' : ''"
                                                  :style="`height: ${Math.max(0.5, ((bar.total || 0) / (chartMax || 1)) * 100)}%`">
-                                                <div class="w-full bg-red-600 transition-all" :style="`height: ${((bar.fail || 0) / (chartMax || 1)) * 100}%`" title="Fail"></div>
-                                                <div class="w-full bg-emerald-600 transition-all" :style="`height: ${((bar.success || 0) / (chartMax || 1)) * 100}%`" title="Success"></div>
-                                                <div class="w-full bg-purple-600 transition-all" :style="`height: ${((bar.cached || 0) / (chartMax || 1)) * 100}%`" title="Cached"></div>
-                                                <div class="w-full bg-gray-500 transition-all" :style="`height: ${((bar.ignored || 0) / (chartMax || 1)) * 100}%`" title="Ignored"></div>
-                                                <div class="w-full bg-yellow-600 transition-all" :style="`height: ${((bar.skipped || 0) / (chartMax || 1)) * 100}%`" title="Skipped"></div>
+                                                <div class="w-full bg-red-600 transition-all" :style="`height: ${((bar.fail || 0) / (chartMax || 1)) * 100}%`" title="Fail (TMP + PRM + STOP)"></div>
+                                                <div class="w-full bg-emerald-600 transition-all" :style="`height: ${((bar.success || 0) / (chartMax || 1)) * 100}%`" title="OK"></div>
+                                                <div class="w-full bg-purple-600 transition-all" :style="`height: ${((bar.cached || 0) / (chartMax || 1)) * 100}%`" title="CACHED"></div>
+                                                <div class="w-full bg-gray-500 transition-all" :style="`height: ${((bar.ignored || 0) / (chartMax || 1)) * 100}%`" title="IGN"></div>
+                                                <div class="w-full bg-yellow-600 transition-all" :style="`height: ${((bar.skipped || 0) / (chartMax || 1)) * 100}%`" title="SKIP"></div>
                                             </div>
 
                                             <div class="absolute top-full mt-2 left-1/2 -translate-x-1/2 text-[9px] text-gray-600 font-mono whitespace-nowrap"
@@ -441,16 +455,16 @@
                             <span class="text-emerald-400">OK:</span>
                             <span class="text-right text-gray-200" x-text="hoverBar?.success || 0"></span>
 
-                            <span class="text-red-400">Err:</span>
+                            <span class="text-red-400">Fail:</span>
                             <span class="text-right text-gray-200" x-text="hoverBar?.fail || 0"></span>
 
-                            <span class="text-purple-400">Cached:</span>
+                            <span class="text-purple-400">CACHED:</span>
                             <span class="text-right text-gray-200" x-text="hoverBar?.cached || 0"></span>
 
-                            <span class="text-gray-400">Ignored:</span>
+                            <span class="text-gray-400">IGN:</span>
                             <span class="text-right text-gray-200" x-text="hoverBar?.ignored || 0"></span>
 
-                            <span class="text-yellow-400">Skip:</span>
+                            <span class="text-yellow-400">SKIP:</span>
                             <span class="text-right text-gray-200" x-text="hoverBar?.skipped || 0"></span>
 
                             <span class="text-gray-500">Total:</span>
@@ -543,6 +557,58 @@
         </div>
     </div>
 
+    <!-- Status Legend Modal -->
+    <div x-show="legendOpen" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm" @click.self="legendOpen = false">
+        <div class="bg-gray-900 w-[480px] max-h-[80vh] rounded border border-gray-700 flex flex-col shadow-xl overflow-hidden">
+            <div class="h-10 bg-gray-800 flex justify-between items-center px-4 border-b border-gray-700 shrink-0">
+                <div class="flex items-center gap-2">
+                    <span class="text-xs font-bold text-gray-200">Status Key</span>
+                </div>
+                <button @click="legendOpen=false" class="text-gray-400 hover:text-white">✕</button>
+            </div>
+
+            <div class="p-4 overflow-y-auto text-xs custom-scrollbar">
+                <div class="text-[10px] text-gray-500 mb-3 uppercase font-bold tracking-wider">Detailed statuses</div>
+                <div class="space-y-1.5">
+                    <template x-for="[code, meta] in Object.entries(statusMeta).filter(([k,v]) => k !== 'fail')" :key="code">
+                        <div class="flex items-center gap-3 py-1 border-b border-gray-800/30 last:border-0">
+                            <span class="px-1.5 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-14 text-center"
+                                  :class="getStatusClass(parseInt(code))" x-text="meta.label"></span>
+                            <div class="flex-1">
+                                <div class="text-gray-300 font-bold" x-text="meta.name"></div>
+                                <div class="text-[10px] text-gray-500" x-text="meta.desc"></div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+
+                <div class="mt-4 text-[10px] text-gray-500 mb-3 uppercase font-bold tracking-wider">Summary cards</div>
+                <div class="space-y-1.5">
+                    <div class="flex items-center gap-3 py-1 border-b border-gray-800/30">
+                        <span class="px-1.5 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-14 text-center bg-emerald-900/40 text-emerald-300 border-emerald-800">OK</span>
+                        <div class="text-gray-300">Success</div>
+                    </div>
+                    <div class="flex items-center gap-3 py-1 border-b border-gray-800/30">
+                        <span class="px-1.5 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-14 text-center bg-red-900/40 text-red-300 border-red-800">Fail</span>
+                        <div class="text-gray-300">Total failures = TMP + PRM + STOP</div>
+                    </div>
+                    <div class="flex items-center gap-3 py-1 border-b border-gray-800/30">
+                        <span class="px-1.5 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-14 text-center bg-yellow-900/40 text-yellow-300 border-yellow-800">SKIP</span>
+                        <div class="text-gray-300">Skipped by logic</div>
+                    </div>
+                    <div class="flex items-center gap-3 py-1 border-b border-gray-800/30">
+                        <span class="px-1.5 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-14 text-center bg-purple-900/40 text-purple-300 border-purple-800">CACHED</span>
+                        <div class="text-gray-300">Served from cache</div>
+                    </div>
+                    <div class="flex items-center gap-3 py-1">
+                        <span class="px-1.5 py-0.5 rounded-[2px] text-[10px] font-bold border inline-block w-14 text-center bg-gray-800 text-gray-500 border-gray-700">IGN</span>
+                        <div class="text-gray-300">Ignored this attempt</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         function dashboard() {
             return {
@@ -575,6 +641,7 @@
                 entryHistory: [],
                 entryHistoryLimit: 50,
                 entryHistoryOffset: 0,
+                entryHistorySessionOnly: false,
 
                 // Entry Articles
                 entryArticles: [],
@@ -592,6 +659,7 @@
                 controlState: 'NORMAL',
                 flowInterval: null,
                 flowModalOpen: false,
+                legendOpen: false,
 
                 init() {
                     this.poll();
@@ -682,13 +750,22 @@
                     }
                 },
 
+                get currentStartupRoundId() {
+                    const g = this.groups.find(g => g.group_path === this.selectedGroup);
+                    return g?.startup_round_id;
+                },
+
                 async fetchEntryHistory() {
                     if (!this.selectedGroup) {
                         this.entryHistory = [];
                         return;
                     }
                     try {
-                        const url = `/api/entry/history?group=${encodeURIComponent(this.selectedGroup)}&limit=${this.entryHistoryLimit}&offset=${this.entryHistoryOffset}`;
+                        const startupId = this.currentStartupRoundId;
+                        let url = `/api/entry/history?group=${encodeURIComponent(this.selectedGroup)}&limit=${this.entryHistoryLimit}&offset=${this.entryHistoryOffset}`;
+                        if (this.entryHistorySessionOnly && startupId) {
+                            url += `&since_round_id=${startupId}`;
+                        }
                         const res = await fetch(url);
                         const json = await res.json();
                         this.entryHistory = json.items || [];
@@ -847,6 +924,21 @@
                     return index % step === 0;
                 },
 
+                // Unified status metadata: code -> label, tooltip, color.
+                // Aggregate 'Fail' covers TMP/PRM/STOP for summary cards/charts.
+                statusMeta: {
+                    0: { label: 'PEND', name: 'Pending', desc: 'Waiting to be processed', color: 'gray' },
+                    1: { label: 'RUN', name: 'Running', desc: 'Currently being processed', color: 'blue' },
+                    2: { label: 'OK', name: 'Success', desc: 'Finished successfully', color: 'emerald' },
+                    3: { label: 'TMP', name: 'Temp Fail', desc: 'Retryable error (network, timeout, 5xx)', color: 'yellow' },
+                    4: { label: 'PRM', name: 'Perm Fail', desc: 'Permanent error (404, parse error)', color: 'red' },
+                    5: { label: 'SKIP', name: 'Skipped', desc: 'Skipped by logic (filtered content)', color: 'yellow' },
+                    6: { label: 'STOP', name: 'Stopped', desc: 'Manually stopped or interrupted', color: 'red' },
+                    7: { label: 'CACHED', name: 'Cached', desc: 'Served from cache, no state change', color: 'emerald' },
+                    8: { label: 'IGN', name: 'Ignored', desc: 'Ignored this attempt, no state change', color: 'gray' },
+                    fail: { label: 'Fail', name: 'Failed', desc: 'Total failures: TMP + PRM + STOP', color: 'red' },
+                },
+
                 getNodeHealthColor(g) {
                     // Prefer entry_round status
                     const entryStatus = g?.entry_round?.status;
@@ -863,15 +955,41 @@
                 },
 
                 getStatusLabel(s) {
-                    return {0:'PEND',1:'RUN',2:'OK',3:'TMP',4:'PRM',5:'SKIP',6:'STOP',7:'CACHED',8:'IGN'}[s] || s;
+                    return this.statusMeta[s]?.label || s;
+                },
+
+                getStatusName(s) {
+                    return this.statusMeta[s]?.name || s;
+                },
+
+                getStatusTitle(s) {
+                    const m = this.statusMeta[s];
+                    return m ? `${m.name}: ${m.desc}` : '';
                 },
 
                 getStatusClass(s) {
-                    if (s === 1) return 'bg-blue-900/40 text-blue-300 border-blue-800';
-                    if (s === 2 || s === 7) return 'bg-emerald-900/40 text-emerald-300 border-emerald-800';
-                    if (s === 3) return 'bg-yellow-900/40 text-yellow-300 border-yellow-800';
-                    if (s === 4) return 'bg-red-900/40 text-red-300 border-red-800';
+                    const color = this.statusMeta[s]?.color || 'gray';
+                    if (color === 'blue') return 'bg-blue-900/40 text-blue-300 border-blue-800';
+                    if (color === 'emerald') return 'bg-emerald-900/40 text-emerald-300 border-emerald-800';
+                    if (color === 'yellow') return 'bg-yellow-900/40 text-yellow-300 border-yellow-800';
+                    if (color === 'red') return 'bg-red-900/40 text-red-300 border-red-800';
                     return 'bg-gray-800 text-gray-500 border-gray-700';
+                },
+
+                statusColorClass(key) {
+                    const map = {
+                        OK: 'bg-emerald-600',
+                        Fail: 'bg-red-600',
+                        TMP: 'bg-yellow-600',
+                        PRM: 'bg-red-600',
+                        STOP: 'bg-red-700',
+                        SKIP: 'bg-yellow-600',
+                        CACHED: 'bg-purple-600',
+                        IGN: 'bg-gray-500',
+                        PEND: 'bg-gray-600',
+                        RUN: 'bg-blue-600',
+                    };
+                    return map[key] || 'bg-gray-600';
                 }
             }
         }

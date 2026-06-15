@@ -401,6 +401,9 @@ class CrawlerGovernanceBackend:
             - group: string (required)
             - limit: int (default 50)
             - offset: int (default 0)
+            - since_round_id: int (optional)
+                  When provided, only returns rounds with round_id >= since_round_id.
+                  Useful for "show only this session" filtering.
         """
         if not self.governor:
             return jsonify({"error": "Init failed"}), 500
@@ -411,8 +414,11 @@ class CrawlerGovernanceBackend:
 
         limit = request.args.get('limit', default=50, type=int)
         offset = request.args.get('offset', default=0, type=int)
+        since_round_id = request.args.get('since_round_id', default=None, type=int)
 
-        items = self.governor.get_entry_round_history(group_path, limit=limit, offset=offset)
+        items = self.governor.get_entry_round_history(
+            group_path, limit=limit, offset=offset, since_round_id=since_round_id
+        )
         return jsonify({
             "meta": {
                 "mode": "QUERY",
@@ -421,6 +427,7 @@ class CrawlerGovernanceBackend:
                 "server_ts_ms": int(time.time() * 1000),
                 "limit": limit,
                 "offset": offset,
+                "since_round_id": since_round_id,
             },
             "items": items,
         })
