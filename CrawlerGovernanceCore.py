@@ -6,7 +6,6 @@ import hashlib
 import datetime
 import threading
 import collections
-import traceback
 from pathlib import Path
 from enum import IntEnum, Enum
 from dataclasses import dataclass
@@ -14,10 +13,20 @@ from typing import Optional, Union, List, Dict, Any
 from contextlib import contextmanager, nullcontext
 
 try:
-    from CrawlerFlowScheduler import FlowScheduler
-except Exception as e:
-    print(str(e))
     from .CrawlerFlowScheduler import FlowScheduler
+except ImportError:
+    # 兼容直接从 IntelligenceCrawler 目录运行该模块。
+    from CrawlerFlowScheduler import FlowScheduler
+
+
+def _load_governance_data_engine():
+    """同时支持包导入与目录内直接运行，不为正常回退打印异常栈。"""
+
+    try:
+        from .GovernanceDataEngine import GovernanceDataEngine
+    except ImportError:
+        from GovernanceDataEngine import GovernanceDataEngine
+    return GovernanceDataEngine
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1023,13 +1032,7 @@ class GovernanceManager:
             time.sleep(3)
 
             try:
-                try:
-                    from GovernanceDataEngine import GovernanceDataEngine
-                except ImportError as e:
-                    print(str(e))
-                    traceback.print_exc()
-                    from IntelligenceCrawler.GovernanceDataEngine import GovernanceDataEngine
-                    print("Import GovernanceDataEngine from IntelligenceCrawler successful.")
+                GovernanceDataEngine = _load_governance_data_engine()
 
                 # 实例化临时 Engine
                 # 注意：这里传入 self (GovernanceManager)，形成了临时的闭环引用，

@@ -10,12 +10,12 @@ from flask_cors import CORS
 from flask import Flask, jsonify, request, send_file, render_template
 
 try:
+    from .CrawlerGovernanceCore import GovernanceManager
+    from .GovernanceDataEngine import GovernanceDataEngine
+except ImportError:
+    # 兼容直接从 IntelligenceCrawler 目录运行该模块。
     from CrawlerGovernanceCore import GovernanceManager
     from GovernanceDataEngine import GovernanceDataEngine
-except Exception as e:
-    print(str(e))
-    from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager
-    from IntelligenceCrawler.GovernanceDataEngine import GovernanceDataEngine
 
 self_path = os.path.dirname(os.path.abspath(__file__))
 
