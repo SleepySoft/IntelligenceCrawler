@@ -1427,11 +1427,24 @@ class GovernanceManager:
             ctx = self._get_round_context(group_path)
             ctx.increase_progressed(count)
 
+            # 同步持久化轮次快照：已抓取过的条目走这里跳过，必须计入 processed/ignored，
+            # 否则 entry_rounds 中“发现≠处理”，治理台无法还原真实漏斗。
+            snapshot = self.entry_round_snapshots.get(group_path)
+            if snapshot and snapshot.get("phase") == "RUNNING":
+                snapshot["articles_processed"] += count
+                snapshot["articles_ignored"] += count
+
     def reduce_round_step(self, group_path: Union[str, List[str]], count: int = 1):
         group_path = _normalize_group_path(group_path)
         with self.stats_lock:
             if ctx := self._get_round_context(group_path):
                 ctx.reduce_expected(count)
+
+            # 同步缩减持久化快照的 expected（如空链接条目），保持 expected 与可处理数一致。
+            snapshot = self.entry_round_snapshots.get(group_path)
+            if snapshot and snapshot.get("phase") == "RUNNING":
+                snapshot["articles_expected"] = max(
+                    0, int(snapshot.get("articles_expected") or 0) - count)
 
     def finish_round(self, group_path: Union[str, List[str]], next_run_delay: int = 0):
         """Business call: notify the system that the current round has finished."""
