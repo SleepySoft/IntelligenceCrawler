@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import datetime
+import threading
 import traceback
 import tldextract
 from functools import partial
@@ -159,6 +160,10 @@ class CrawlPipeline:
         self.articles = []
         self.contents = []
 
+    def _raise_if_stopped(self, stop_event: Optional[threading.Event]) -> None:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError(f"Pipeline {self.name!r} was stopped.")
+
     def _unique_fetchers(self) -> List[Fetcher]:
         """Return pipeline fetchers once each, preserving their execution order."""
         unique: List[Fetcher] = []
@@ -268,7 +273,8 @@ class CrawlPipeline:
         entry_point: str | List[str],
         start_date: Optional[datetime.datetime] = None,
         end_date: Optional[datetime.datetime] = None,
-        fetcher_kwargs: Optional[dict] = None
+        fetcher_kwargs: Optional[dict] = None,
+        stop_event: Optional[threading.Event] = None
     ) -> List[str]:
         """
         Step 1: Discovers all channels from a list of entry point URLs.
@@ -284,8 +290,10 @@ class CrawlPipeline:
         channels: List[str] = []
 
         for job in self.discover_channel_jobs(entry_point, start_date, end_date, fetcher_kwargs):
+            self._raise_if_stopped(stop_event)
             channel_url = job.channel_url
             channels_found, exception = job.run()
+            self._raise_if_stopped(stop_event)
 
             if exception is None:
                 channels.extend(channels_found)
@@ -328,7 +336,8 @@ class CrawlPipeline:
         self,
         channel_tables: Optional[Dict] = None,
         channel_filter: Optional[Callable[[str], bool]] = None,
-        fetcher_kwargs: Optional[dict] = None
+        fetcher_kwargs: Optional[dict] = None,
+        stop_event: Optional[threading.Event] = None
     ) -> List[Tuple[str, str]]:
         """
         Step 2: Discovers article URLs from channels.
@@ -342,12 +351,14 @@ class CrawlPipeline:
 
         filtered_channels: List[str] = []
         for channel_url in self.channels:
+            self._raise_if_stopped(stop_event)
             if channel_filter and not channel_filter(channel_url):
                 self.log(f"Skipping channel (filtered): {channel_url}")
                 continue
             filtered_channels.append(channel_url)
 
         for job in self.discover_articles_jobs(filtered_channels, fetcher_kwargs):
+            self._raise_if_stopped(stop_event)
             channel_url = job.channel_url
             channel_group = channel_tables.get(channel_url, "default")
 
@@ -358,6 +369,7 @@ class CrawlPipeline:
 
             with context as task:
                 articles_in_channel, exception = job.run()
+                self._raise_if_stopped(stop_event)
                 if exception is None:
                     count_new = 0
                     for article_url in articles_in_channel:
@@ -413,7 +425,8 @@ class CrawlPipeline:
         content_handler: Optional[Callable[[str, str, "ExtractionResult"], bool]] = None,
         exception_handler: Optional[Callable[[str, Exception], None]] = None,
         fetcher_kwargs: Optional[dict] = None,
-        extractor_kwargs: Optional[dict] = None
+        extractor_kwargs: Optional[dict] = None,
+        stop_event: Optional[threading.Event] = None
     ) -> List[Tuple[str, "ExtractionResult"]]:
         """
         Step 3: Fetches and extracts content from all discovered articles.
@@ -432,9 +445,11 @@ class CrawlPipeline:
         contents: List[Tuple[str, str, "ExtractionResult"]] = []
 
         for channel_group, article_urls in grouped.items():
+            self._raise_if_stopped(stop_event)
             # Apply per-group filtering
             extract_article_urls: List[str] = []
             for article_url in article_urls:
+                self._raise_if_stopped(stop_event)
                 if article_filter and not article_filter(article_url):
                     self.log(f"Skipping article (filtered): {article_url}")
                     continue
@@ -449,6 +464,7 @@ class CrawlPipeline:
                 fetcher_kwargs=fetcher_kwargs,
                 extractor_kwargs=extractor_kwargs
             ):
+                self._raise_if_stopped(stop_event)
                 article_url = job.article_url
 
                 ctx = nullcontext()
@@ -461,6 +477,7 @@ class CrawlPipeline:
                         continue
 
                     result, exception = job.run()
+                    self._raise_if_stopped(stop_event)
 
                     if exception is None:
                         if result:
@@ -598,12 +615,18 @@ def build_pipeline(
     return pipeline
 
 
-def drive_pipeline_batch(pipeline: CrawlPipeline, config: dict):
+def drive_pipeline_batch(
+        pipeline: CrawlPipeline,
+        config: dict,
+        stop_event: Optional[threading.Event] = None):
     with pipeline.lifecycle():
-        _drive_pipeline_batch_active(pipeline, config)
+        _drive_pipeline_batch_active(pipeline, config, stop_event)
 
 
-def _drive_pipeline_batch_active(pipeline: CrawlPipeline, config: dict):
+def _drive_pipeline_batch_active(
+        pipeline: CrawlPipeline,
+        config: dict,
+        stop_event: Optional[threading.Event] = None):
     """Run one batch while the caller owns the pipeline lifecycle."""
     entry_points = config.get('entry_points', {})
     start_date, end_date = config.get('period_filter', (None, None))
@@ -622,7 +645,9 @@ def _drive_pipeline_batch_active(pipeline: CrawlPipeline, config: dict):
         entry_point=entry_points_list,
         start_date=start_date,
         end_date=end_date,
-        fetcher_kwargs=d_fetcher_kwargs)
+        fetcher_kwargs=d_fetcher_kwargs,
+        stop_event=stop_event)
+    pipeline._raise_if_stopped(stop_event)
 
     # ============== 2. Discover Articles ==============
 
@@ -637,7 +662,9 @@ def _drive_pipeline_batch_active(pipeline: CrawlPipeline, config: dict):
     pipeline.discover_articles(
         channel_tables=channel_tables,
         channel_filter=channel_filter,
-        fetcher_kwargs=d_fetcher_kwargs)
+        fetcher_kwargs=d_fetcher_kwargs,
+        stop_event=stop_event)
+    pipeline._raise_if_stopped(stop_event)
 
     # =============== 3. Extract Articles ===============
 
@@ -653,7 +680,8 @@ def _drive_pipeline_batch_active(pipeline: CrawlPipeline, config: dict):
         content_handler=content_handler,
         exception_handler=exception_handler,
         fetcher_kwargs=e_fetcher_kwargs,
-        extractor_kwargs=extractor_kwargs
+        extractor_kwargs=extractor_kwargs,
+        stop_event=stop_event
     )
 
 

@@ -1,4 +1,5 @@
 import types
+import threading
 
 import pytest
 
@@ -45,6 +46,33 @@ def test_drive_pipeline_batch_deduplicates_fetcher_and_ends_on_error():
         drive_pipeline_batch(pipeline, {"entry_points": []})
 
     assert events == ["begin", "work", "end"]
+    assert pipeline._pipeline_active is False
+
+
+def test_drive_pipeline_batch_stops_between_stages_and_releases_fetcher():
+    events = []
+    stop_event = threading.Event()
+    fetcher = RecordingFetcher(events)
+    pipeline = CrawlPipeline(
+        name="test",
+        d_fetcher=fetcher,
+        discoverer=None,
+        e_fetcher=fetcher,
+        extractor=None,
+        log_callback=lambda *_: None,
+    )
+
+    def stop_after_discovery(**_kwargs):
+        events.append("discover")
+        stop_event.set()
+
+    pipeline.discover_channels = stop_after_discovery
+    pipeline.discover_articles = lambda **_kwargs: events.append("articles")
+
+    with pytest.raises(InterruptedError, match="was stopped"):
+        drive_pipeline_batch(pipeline, {"entry_points": []}, stop_event=stop_event)
+
+    assert events == ["begin", "discover", "end"]
     assert pipeline._pipeline_active is False
 
 
