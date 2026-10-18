@@ -84,20 +84,29 @@ except Exception as e:
     sync_playwright = None
     PlaywrightError = None
 
-# --- Smart Import for playwright-stealth (v1 and v2) ---
-sync_stealth = None  # For v2.x
-Stealth = None  # For v1.x
+# --- Smart import for supported playwright-stealth variants ---
+sync_stealth = None
+Stealth = None
 try:
-    from playwright_stealth import sync_stealth
+    # tf-playwright-stealth 1.x (the dependency pinned by this project).
+    from playwright_stealth import stealth_sync as sync_stealth
 
-    print("Imported playwright-stealth v2.x ('sync_stealth') successfully.")
+    print("Imported playwright-stealth ('stealth_sync') successfully.")
 except ImportError:
     try:
-        from playwright_stealth.stealth import Stealth
+        # Compatibility with packages that expose the reversed function name.
+        from playwright_stealth import sync_stealth
 
-        print("Imported playwright-stealth v1.x ('Stealth') successfully.")
+        print("Imported playwright-stealth ('sync_stealth') successfully.")
     except ImportError:
-        print("!!! IMPORT ERROR: Could not import 'playwright_stealth' v1 or v2.")
+        try:
+            from playwright_stealth.stealth import Stealth
+
+            print("Imported playwright-stealth ('Stealth') successfully.")
+        except ImportError:
+            print("!!! IMPORT ERROR: Could not import a supported 'playwright_stealth' API.")
+        except Exception:
+            pass
     except Exception:
         pass
 except Exception:

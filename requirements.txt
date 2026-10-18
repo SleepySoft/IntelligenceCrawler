@@ -13,7 +13,10 @@ ultimate-sitemap-parser # For discovering and parsing website sitemaps (from usp
 # (Used for rendering JavaScript-heavy pages)
 # -----------------------------------------------------------------
 playwright              # Core library for browser automation (enables dynamic fetching).
-playwright-stealth      # Addon to make Playwright sessions less detectable by anti-bot measures.
+# Crawl4AI 0.6.3 imports StealthConfig from this fork.  Do not install the
+# unrelated playwright-stealth 2.x package: both distributions use the same
+# Python module name and 2.x overwrites the API Crawl4AI needs.
+tf-playwright-stealth==1.2.0
 
 # -----------------------------------------------------------------
 # Content Extraction & Conversion

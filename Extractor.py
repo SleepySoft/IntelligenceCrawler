@@ -9,6 +9,7 @@ for extracting main content from HTML and converting it to Markdown.
 import re
 import copy
 import json
+import asyncio
 import html2text
 import traceback
 import lxml.etree
@@ -51,15 +52,20 @@ except ImportError:
     print("!!! Please install it: pip install newspaper3k")
 
 try:
-    from crawl4ai.crawler import Crawler
-    from crawl4ai.extraction import SmartExtractor
+    from crawl4ai import (
+        AsyncWebCrawler, CacheMode, CrawlerRunConfig,
+        LLMConfig, LLMExtractionStrategy,
+    )
 
     print("Success: Imported 'crawl4ai'. Crawl4AIExtractor is available.")
-except ImportError:
-    Crawler = None
-    SmartExtractor = None
-    print("!!! FAILED to import 'crawl4ai'. Crawl4AIExtractor will NOT be available.")
-    print("!!! Please install it: pip install crawl4ai")
+except ImportError as e:
+    AsyncWebCrawler = None
+    CacheMode = None
+    CrawlerRunConfig = None
+    LLMConfig = None
+    LLMExtractionStrategy = None
+    print(f"!!! FAILED to import the supported 'crawl4ai' API: {e}")
+    print("!!! Please ensure crawl4ai==0.6.3 is installed.")
 
 # --- Type Alias for Unicode Sanitizer ---
 try:
@@ -317,7 +323,7 @@ def extractor_factory(name: str, init_params: dict):
 
     if name == 'Crawl4AIExtractor' or name == 'Crawl4AI':
         return Crawl4AIExtractor(
-            model_name=init_params.get('model_name', 'default_model'),
+            model_name=init_params.get('model_name', 'gpt-3.5-turbo'),
             verbose=init_params.get('verbose', False)
         )
 
@@ -755,16 +761,16 @@ class Crawl4AIExtractor(IExtractor):
 
     def extract(self, content: bytes, url: str, **kwargs) -> ExtractionResult:
         """
-        Extracts content using crawl4ai's SmartExtractor.
+        Extracts content using crawl4ai's asynchronous LLM extraction strategy.
 
         :param content: IGNORED.
         :param url: The URL to crawl and extract from.
-        :param kwargs: Passed to `SmartExtractor`.
+        :param kwargs: Passed to `LLMExtractionStrategy`.
                        Example: `extraction_prompt="Extract only user comments"`
         :return: Markdown string.
         """
         self._log(f"Extracting with Crawl4AIExtractor from {url}")
-        if not Crawler or not SmartExtractor:
+        if not AsyncWebCrawler or not LLMExtractionStrategy:
             error_str = "crawl4ai library not found."
             self._log(f"[Error] {error_str}")
             return ExtractionResult(error=error_str)
@@ -772,22 +778,50 @@ class Crawl4AIExtractor(IExtractor):
         self._log("[Warning] Crawl4AIExtractor ignores pre-fetched content and is re-fetching the URL.")
 
         try:
-            extractor = SmartExtractor(model=self.model_name, **kwargs)
-            crawler = Crawler(extractor=extractor)
-            result = crawler.run(url)
+            strategy_options = dict(kwargs)
+            instruction = strategy_options.pop('extraction_prompt', None)
+            provider = self.model_name
+            if '/' not in provider:
+                provider = f'openai/{provider}'
 
-            if result and (result.markdown or result.structured_data):
-                # crawl4ai returns markdown AND structured_data (which is our metadata)
-                metadata = result.structured_data or {}
+            extraction_strategy = LLMExtractionStrategy(
+                llm_config=LLMConfig(provider=provider),
+                instruction=instruction,
+                **strategy_options,
+            )
+            run_config = CrawlerRunConfig(
+                extraction_strategy=extraction_strategy,
+                cache_mode=CacheMode.BYPASS,
+            )
+
+            async def _crawl():
+                async with AsyncWebCrawler() as crawler:
+                    return await crawler.arun(url=url, config=run_config)
+
+            result = asyncio.run(_crawl())
+            markdown = getattr(getattr(result, 'markdown', None), 'raw_markdown', '')
+            extracted_content = getattr(result, 'extracted_content', None)
+
+            if result and (markdown or extracted_content):
+                metadata = dict(getattr(result, 'metadata', None) or {})
+                if extracted_content:
+                    try:
+                        metadata['structured_data'] = json.loads(extracted_content)
+                    except (TypeError, json.JSONDecodeError):
+                        metadata['structured_data'] = extracted_content
                 metadata['url'] = url
                 metadata['extractor'] = self.name
                 metadata['content_type'] = 'markdown'
 
                 return ExtractionResult(
                     raw_content = content,
-                    markdown_content=sanitize_unicode_string(result.markdown),
+                    markdown_content=sanitize_unicode_string(markdown),
                     metadata=metadata
                 )
+
+            if result and not getattr(result, 'success', True):
+                error_message = getattr(result, 'error_message', None) or 'unknown crawl error'
+                return ExtractionResult(error=f"Crawl4AI failed: {error_message}")
 
             self._log("[Info] Crawl4AI ran but returned no markdown or data.")
             return ExtractionResult(error="Crawl4AI returned no content.")
