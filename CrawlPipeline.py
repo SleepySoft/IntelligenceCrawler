@@ -6,7 +6,7 @@ import traceback
 import tldextract
 from functools import partial
 from dataclasses import dataclass
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from urllib.parse import urlparse
 from collections import defaultdict
 from typing import Callable, Dict, Iterator, List, Optional, Tuple, DefaultDict
@@ -151,15 +151,71 @@ class CrawlPipeline:
         self.channels: List[str] = []
         self.articles: List[str] = []
         self.contents: List[Tuple[str, ExtractionResult]] = []
+        self._pipeline_active = False
+        self._active_fetchers: List[Fetcher] = []
 
     def reset(self):
         self.channels = []
         self.articles = []
         self.contents = []
 
+    def _unique_fetchers(self) -> List[Fetcher]:
+        """Return pipeline fetchers once each, preserving their execution order."""
+        unique: List[Fetcher] = []
+        seen = set()
+        for fetcher in (self.d_fetcher, self.e_fetcher):
+            if fetcher is not None and id(fetcher) not in seen:
+                seen.add(id(fetcher))
+                unique.append(fetcher)
+        return unique
+
+    def begin_pipeline(self) -> None:
+        """Notify all fetchers that one complete pipeline batch is starting."""
+        if self._pipeline_active:
+            raise RuntimeError(f"Pipeline {self.name!r} is already active.")
+
+        started: List[Fetcher] = []
+        try:
+            for fetcher in self._unique_fetchers():
+                fetcher.begin_pipeline()
+                started.append(fetcher)
+        except Exception:
+            for fetcher in reversed(started):
+                try:
+                    fetcher.end_pipeline()
+                except Exception as cleanup_error:
+                    self.log(f"[Error] Pipeline begin rollback failed: {cleanup_error}")
+            raise
+
+        self._active_fetchers = started
+        self._pipeline_active = True
+
+    def end_pipeline(self) -> None:
+        """End the active batch and release fetcher runtime resources."""
+        if not self._pipeline_active:
+            return
+
+        for fetcher in reversed(self._active_fetchers):
+            try:
+                fetcher.end_pipeline()
+            except Exception as e:
+                self.log(f"[Error] Failed to end fetcher pipeline lifecycle: {e}")
+        self._active_fetchers = []
+        self._pipeline_active = False
+
+    @contextmanager
+    def lifecycle(self):
+        """Guarantee balanced pipeline lifecycle notifications on every exit path."""
+        self.begin_pipeline()
+        try:
+            yield self
+        finally:
+            self.end_pipeline()
+
     def shutdown(self):
         """Gracefully closes both fetcher instances."""
         self.log("--- 5. Shutting down fetchers ---")
+        self.end_pipeline()
         try:
             if self.d_fetcher: self.d_fetcher.close()
         except Exception as e:
@@ -543,6 +599,12 @@ def build_pipeline(
 
 
 def drive_pipeline_batch(pipeline: CrawlPipeline, config: dict):
+    with pipeline.lifecycle():
+        _drive_pipeline_batch_active(pipeline, config)
+
+
+def _drive_pipeline_batch_active(pipeline: CrawlPipeline, config: dict):
+    """Run one batch while the caller owns the pipeline lifecycle."""
     entry_points = config.get('entry_points', {})
     start_date, end_date = config.get('period_filter', (None, None))
     d_fetcher_kwargs = config.get('d_fetcher_kwargs', {})
@@ -603,7 +665,10 @@ def run_pipeline(
     if not config:
         raise ValueError("Config is required for pipeline.")
     pipeline = build_pipeline(name, config, log_callback, crawler_governor)
-    drive_pipeline_batch(pipeline, config)
+    try:
+        drive_pipeline_batch(pipeline, config)
+    finally:
+        pipeline.shutdown()
 
 
 # ----------------------------------------------------------------------------------------------------------------------

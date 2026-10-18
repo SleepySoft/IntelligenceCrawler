@@ -111,6 +111,17 @@ class Fetcher(ABC):
         """
         pass
 
+    def begin_pipeline(self) -> None:
+        """Notify the fetcher that one pipeline batch is starting.
+
+        Lightweight fetchers do not need a per-batch lifecycle. Stateful
+        implementations may override this hook, but must keep resource
+        ownership inside the fetcher itself.
+        """
+
+    def end_pipeline(self) -> None:
+        """Notify the fetcher that the current pipeline batch has ended."""
+
 
 def fetcher_factory(name: str, init_params: dict) -> Fetcher:
     if name == 'RequestsFetcher':
@@ -280,8 +291,9 @@ class PlaywrightFetcher(Fetcher):
                  default_allowed_domains: Optional[list] = None
 ):
         """
-        Initializes the Fetcher and starts the background Playwright worker thread.
-        This method will block until the browser is successfully launched or fails.
+        Initializes the Fetcher and starts its lightweight worker thread.
+        Playwright/browser/context resources are created lazily by that worker on
+        the first request of a pipeline batch.
 
         Args:
             log_callback (callable): Function to use for logging.
@@ -328,10 +340,13 @@ class PlaywrightFetcher(Fetcher):
 
         # --- Queues for thread communication ---
         self.job_queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
-        self.startup_queue: "queue.Queue[Any]" = queue.Queue(maxsize=1)
 
         # --- Threading resources ---
         self.worker_thread: Optional[threading.Thread] = None
+        self._worker_ready = threading.Event()
+        self._lifecycle_lock = threading.Lock()
+        self._pipeline_depth = 0
+        self._closed = False
 
         # --- 1. Verify Library Availability ---
         if not sync_playwright:
@@ -367,21 +382,14 @@ class PlaywrightFetcher(Fetcher):
                 self._log(f"!!! WARNING: Invalid proxy format '{proxy}'. Ignoring proxy. Error: {e}")
                 self.proxy_config = None
 
-        # --- 3. Start Worker Thread ---
+        # --- 3. Start the dormant Worker Thread ---
         self._log("Starting Playwright worker thread...")
         self.worker_thread = threading.Thread(name=f"Fetch_Worker", target=self._worker_loop, daemon=True)
         self.worker_thread.start()
-
-        # --- 4. Wait for Browser to Launch ---
-        try:
-            # Wait up to 60s for browser to start
-            startup_result = self.startup_queue.get(timeout=60)
-            if isinstance(startup_result, Exception):
-                raise startup_result  # Re-raise the exception from the worker thread
-            self._log("Playwright worker thread started successfully.")
-        except queue.Empty:
+        if not self._worker_ready.wait(timeout=5):
             self._log("[Fatal Error] Playwright worker thread timed out on startup.")
             raise TimeoutError("Playwright worker thread failed to start in time.")
+        self._log("Playwright worker thread started in dormant mode.")
 
     def _create_context(self):
         """[Worker Thread] Create a long-lived context for same-site crawling."""
@@ -519,6 +527,54 @@ class PlaywrightFetcher(Fetcher):
             finally:
                 self.playwright = None
 
+    def _ensure_playwright_runtime(self) -> None:
+        """[Worker Thread] Lazily create a complete, usable browser runtime."""
+        if not getattr(self, "playwright", None) or not getattr(self, "browser", None):
+            self._stop_playwright()
+            if not self._start_playwright():
+                raise RuntimeError("Worker failed to start Playwright.")
+            self._create_context()
+            return
+
+        self._ensure_context()
+
+    def begin_pipeline(self) -> None:
+        """Mark a pipeline batch active without eagerly launching Chromium."""
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("PlaywrightFetcher is closed.")
+            self._pipeline_depth += 1
+            if self._pipeline_depth == 1:
+                self._log("PlaywrightFetcher pipeline lifecycle started.")
+
+    def end_pipeline(self) -> None:
+        """Release this batch's browser runtime on the Playwright worker thread."""
+        should_suspend = False
+        with self._lifecycle_lock:
+            if self._pipeline_depth == 0:
+                return
+            self._pipeline_depth -= 1
+            should_suspend = self._pipeline_depth == 0 and not self._closed
+
+        if should_suspend:
+            self._send_control("suspend", timeout=20)
+            self._log("PlaywrightFetcher pipeline lifecycle ended; runtime released.")
+
+    def _send_control(self, job_type: str, timeout: float) -> None:
+        """Send an ordered lifecycle command to the worker and await completion."""
+        if not self.worker_thread or not self.worker_thread.is_alive():
+            raise RuntimeError("Playwright worker thread is not running.")
+
+        result_queue: "queue.Queue[Any]" = queue.Queue(maxsize=1)
+        self.job_queue.put((job_type, None, result_queue))
+        try:
+            result = result_queue.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise TimeoutError(
+                f"Playwright worker did not acknowledge {job_type!r} within {timeout}s.") from exc
+        if isinstance(result, Exception):
+            raise result
+
     def get_content(self, url: str, **kwargs) -> Optional[bytes]:
         """
         Fetches content from a URL with flexible wait conditions.
@@ -638,7 +694,7 @@ class PlaywrightFetcher(Fetcher):
             TimeoutError:
                 - If timeout_s is provided and exceeded.
         """
-        if not self.worker_thread or not self.worker_thread.is_alive():
+        if self._closed or not self.worker_thread or not self.worker_thread.is_alive():
             raise RuntimeError(
                 "Playwright worker thread is not running. Fetcher may have been closed or failed to start.")
 
@@ -721,62 +777,53 @@ class PlaywrightFetcher(Fetcher):
 
     def _worker_loop(self):
         """
-        [Worker Thread] Main loop with Robust Lifecycle Management.
-        Removed the 'initial verification' to prevent redundant browser flickering.
+        [Worker Thread] Own every Playwright resource for its complete lifetime.
+
+        The thread itself remains dormant between pipeline batches. ``get_content``
+        lazily creates the runtime, while ``suspend`` releases context, browser and
+        driver in queue order after all preceding work.
         """
         MAX_REQUESTS_PER_BROWSER = 500
-        shutdown_requested = False
+        request_count = 0
+        self._worker_ready.set()
 
-        while not shutdown_requested:
-            try:
-                # Direct start without pre-verification
-                if not self._start_playwright():
-                    self.startup_queue.put(RuntimeError("Worker failed to start Playwright."))
-                    threading.Event().wait(5)
+        try:
+            while True:
+                job_data = self.job_queue.get()
+                if not job_data:
+                    continue
+                job_type, data, result_queue = job_data
+
+                if job_type == 'shutdown':
+                    self._stop_playwright()
+                    result_queue.put(True)
+                    return
+
+                if job_type == 'suspend':
+                    self._stop_playwright()
+                    request_count = 0
+                    result_queue.put(True)
                     continue
 
-                # Signal success to the main thread waiting in __init__
-                if self.startup_queue.empty():
-                    self.startup_queue.put(True)
+                if job_type != 'get_content':
+                    result_queue.put(RuntimeError(f"Unknown Playwright worker job: {job_type}"))
+                    continue
 
-                request_count = 0
-                self._create_context()
-
-                while not shutdown_requested:
+                try:
                     if request_count >= MAX_REQUESTS_PER_BROWSER:
-                        break
-
-                    try:
-                        self._ensure_context()
-                    except Exception:
-                        break
-
-                    try:
-                        job_data = self.job_queue.get(timeout=1.0)
-                    except queue.Empty:
-                        continue
-
-                    if not job_data: continue
-                    job_type, data, result_queue = job_data
-
-                    if job_type == 'shutdown':
-                        result_queue.put(True)
-                        shutdown_requested = True
-                        break
-
-                    if job_type == 'get_content':
-                        try:
-                            content = self._fetch_page_content(data)
-                            result_queue.put(content)
-                        except Exception as e:
-                            result_queue.put(e)
-                        finally:
-                            request_count += 1
-            except Exception as e:
-                self._log(f"[Worker Critical] Loop error: {e}")
-                threading.Event().wait(2)
-            finally:
-                self._stop_playwright()
+                        self._stop_playwright()
+                        request_count = 0
+                    self._ensure_playwright_runtime()
+                    content = self._fetch_page_content(data)
+                    result_queue.put(content)
+                except Exception as e:
+                    result_queue.put(e)
+                finally:
+                    request_count += 1
+        except Exception as e:
+            self._log(f"[Worker Critical] Loop error: {e}")
+        finally:
+            self._stop_playwright()
 
     def _fetch_page_content(self, job_payload: dict) -> Optional[bytes]:
         """
@@ -987,16 +1034,18 @@ class PlaywrightFetcher(Fetcher):
         """
         [Main Thread] Shuts down the Playwright worker thread and browser.
         """
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._pipeline_depth = 0
+
         self._log("Sending shutdown signal to worker thread...")
         if hasattr(self, 'worker_thread') and self.worker_thread and self.worker_thread.is_alive():
             try:
-                # Use a queue to wait for acknowledgment
-                shutdown_queue: "queue.Queue[Any]" = queue.Queue(maxsize=1)
-                self.job_queue.put(('shutdown', None, shutdown_queue))
-                # Wait 10s for acknowledgment
-                shutdown_queue.get(timeout=10)
-            except queue.Empty:
-                self._log("[Warning] Worker did not acknowledge shutdown signal.")
+                self._send_control("shutdown", timeout=20)
+            except (RuntimeError, TimeoutError) as e:
+                self._log(f"[Warning] Worker shutdown failed: {e}")
 
             # Wait for thread to fully exit
             self.worker_thread.join(timeout=10)
