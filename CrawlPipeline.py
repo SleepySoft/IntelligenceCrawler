@@ -99,6 +99,20 @@ def format_exception_compact(exception: Exception, max_frames: int = 5) -> str:
     return ''.join(tb_lines)
 
 
+def summarize_expected_crawl_exception(exception: Exception) -> Optional[Tuple[str, str]]:
+    """把已知、可恢复的抓取失败归纳为稳定的单行分类。"""
+    message = ' '.join(str(exception).split())
+    if (
+        'Page.content:' in message
+        and 'page is navigating and changing the content' in message
+    ):
+        return (
+            'page_navigation_in_progress',
+            'rendered content requested while the page was still navigating',
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class ChannelJob:
     """A deferred unit of work keyed by channel_url."""
@@ -381,8 +395,20 @@ class CrawlPipeline:
                     self.log(f"Found {count_new} new articles in channel {channel_url}.")
                 else:
                     if task: task.fail_temp(state_msg=f"Fail by exception: {str(exception)}")
-                    full_traceback = format_exception_with_traceback(exception)
-                    self.log(f"[Error] Failed to discover articles from {channel_url}: \n{full_traceback}")
+                    expected = summarize_expected_crawl_exception(exception)
+                    if expected:
+                        category, reason = expected
+                        self.log(
+                            "[ExpectedFailure] stage=discover_articles "
+                            f"category={category} url={channel_url} "
+                            f"action=retry_later reason={reason}"
+                        )
+                    else:
+                        full_traceback = format_exception_with_traceback(exception)
+                        self.log(
+                            f"[Error] Failed to discover articles from {channel_url}: "
+                            f"\n{full_traceback}"
+                        )
 
         self.articles = discovered_results
         self.log(f"Discovered {len(self.articles)} unique articles.")
@@ -490,6 +516,20 @@ class CrawlPipeline:
                             if task: task.skip()
                     else:
                         if isinstance(exception, CrawlSession.Flow): raise exception        # Handled by context
+
+                        expected = summarize_expected_crawl_exception(exception)
+                        if expected:
+                            category, reason = expected
+                            self.log(
+                                "[ExpectedFailure] stage=extract_article "
+                                f"category={category} url={article_url} "
+                                f"action=retry_later reason={reason}"
+                            )
+                            if task:
+                                task.fail_temp(
+                                    state_msg=f"{category}: {reason}"
+                                )
+                            continue
 
                         full_traceback = format_exception_with_traceback(exception)
                         self.log(f"[Error] Failed to extract {article_url}: \n{full_traceback}")
