@@ -154,6 +154,8 @@ def discoverer_factory(name: str, init_params: dict):
             manual_specified_signature=init_params.get('manual_specified_signature'),
             extraction_mode=init_params.get('extraction_mode', 'auto'),
             smart_scope_mode=init_params.get('smart_scope_mode', True),
+            same_host_only=init_params.get('same_host_only', True),
+            allowed_article_hosts=init_params.get('allowed_article_hosts'),
         )
 
     if name == 'Sitemap': return discoverer_factory('SitemapDiscoverer', init_params)
@@ -1051,7 +1053,9 @@ class ListPageDiscoverer(IDiscoverer):
                  scope_selector: Optional[str] = None,
                  manual_specified_signature: Optional[str] = None,
                  extraction_mode: str = "auto",
-                 smart_scope_mode: bool = True):
+                 smart_scope_mode: bool = True,
+                 same_host_only: bool = True,
+                 allowed_article_hosts: Optional[List[str]] = None):
         super().__init__(fetcher, verbose)
 
         self.log_messages: List[str] = []
@@ -1074,6 +1078,20 @@ class ListPageDiscoverer(IDiscoverer):
         # 如果用户或 AI 已经明确指定 signature，则它的优先级最高。
         # 这种情况下不会优先走 SmartScope，以避免覆盖明确配置。
         self.manual_specified_signature = manual_specified_signature
+
+        # 列表页常混有广告、专题站、App 跳转等外链。默认只接受与当前列表页
+        # hostname 完全一致的文章；确有跨域发布时，由任务显式追加精确白名单。
+        self.same_host_only = bool(same_host_only)
+        configured_hosts = (
+            [allowed_article_hosts]
+            if isinstance(allowed_article_hosts, str)
+            else (allowed_article_hosts or [])
+        )
+        self.allowed_article_hosts = {
+            self._normalize_hostname(host)
+            for host in configured_hosts
+            if self._normalize_hostname(host)
+        }
 
         self.analysis_cache: Dict[str, Tuple[BeautifulSoup, List[LinkGroup]]] = {}
 
@@ -1640,7 +1658,7 @@ class ListPageDiscoverer(IDiscoverer):
                 )
                 final_links = [fp.href for fp in winning_group.all_links]
 
-            return final_links
+            return self._filter_article_urls(channel_url, final_links)
 
         # ------------------------------------------------------------
         # 2. 根据 extraction_mode 分流
@@ -1649,33 +1667,88 @@ class ListPageDiscoverer(IDiscoverer):
 
         if mode == "plain_list":
             self._log("  [Decision] 使用 Plain List 模式提取。", indent=1)
-            return self._extract_articles_from_plain_lists(soup, channel_url)
+            return self._filter_article_urls(
+                channel_url,
+                self._extract_articles_from_plain_lists(soup, channel_url),
+            )
 
         if mode == "card":
             self._log("  [Decision] 使用 Card 模式提取。", indent=1)
-            return self._extract_articles_from_scoped_cards(soup, channel_url)
+            return self._filter_article_urls(
+                channel_url,
+                self._extract_articles_from_scoped_cards(soup, channel_url),
+            )
 
         if mode == "signature":
             self._log("  [Decision] 使用 Signature 模式提取。", indent=1)
-            return self._extract_by_signature_heuristic(soup, groups, channel_url)
+            return self._filter_article_urls(
+                channel_url,
+                self._extract_by_signature_heuristic(soup, groups, channel_url),
+            )
 
         if mode == "auto":
             if self.scope_selector:
                 self._log("  [Decision] Auto 模式: 先尝试 Plain List。", indent=1)
                 links = self._extract_articles_from_plain_lists(soup, channel_url)
                 if links:
-                    return links
+                    return self._filter_article_urls(channel_url, links)
 
                 self._log("  [Decision] Auto 模式: Plain List 失败，尝试 Card。", indent=1)
                 links = self._extract_articles_from_scoped_cards(soup, channel_url)
                 if links:
-                    return links
+                    return self._filter_article_urls(channel_url, links)
 
             self._log("  [Decision] Auto 模式: 回退到 Signature Heuristic。", indent=1)
-            return self._extract_by_signature_heuristic(soup, groups, channel_url)
+            return self._filter_article_urls(
+                channel_url,
+                self._extract_by_signature_heuristic(soup, groups, channel_url),
+            )
 
         self._log(f"  [Error] 未知的 extraction_mode: {mode}", indent=1)
         return []
+
+    @staticmethod
+    def _normalize_hostname(value: str) -> str:
+        """接受 hostname 或 URL 配置，统一成小写、无尾点的 hostname。"""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        parsed = urlparse(text if "://" in text else f"//{text}")
+        return str(parsed.hostname or "").lower().rstrip(".")
+
+    def _filter_article_urls(self, channel_url: str, links: List[str]) -> List[str]:
+        """在所有提取模式的共同出口执行文章 hostname 白名单。"""
+        if not self.same_host_only and not self.allowed_article_hosts:
+            return links
+
+        channel_host = self._normalize_hostname(channel_url)
+        allowed = set(self.allowed_article_hosts)
+        if self.same_host_only and channel_host:
+            allowed.add(channel_host)
+
+        accepted: List[str] = []
+        rejected_hosts: Dict[str, int] = defaultdict(int)
+        for link in links:
+            host = self._normalize_hostname(link)
+            if host and host in allowed:
+                accepted.append(link)
+            else:
+                rejected_hosts[host or "<invalid>"] += 1
+
+        if rejected_hosts:
+            ranked_hosts = sorted(
+                rejected_hosts.items(), key=lambda item: (-item[1], item[0]))
+            summary = ", ".join(
+                f"{host}={count}"
+                for host, count in ranked_hosts[:10]
+            )
+            if len(ranked_hosts) > 10:
+                summary += f", 其它{len(ranked_hosts) - 10}个hostname"
+            self._log(
+                f"  [HostFilter] 拒绝 {sum(rejected_hosts.values())} 个非白名单链接: {summary}",
+                indent=1,
+            )
+        return accepted
 
     def _extract_articles_from_plain_lists(self,
                                            soup: BeautifulSoup,

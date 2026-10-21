@@ -155,3 +155,22 @@ playground还能载入上次生成的配置文件，从而能在之前的基础�
 # TIPS
 
 + 由于playground的选项组合过多，仅凭借个人力量难以进行全面测试。所以如果某些组合存在问题，请告诉我。
+
+## 列表页文章域名边界
+
+`ListPageDiscoverer` 默认启用 `same_host_only=True`：无论使用自动聚类、手工
+signature、Plain List 还是 Card 模式，最终只返回与当前列表页 hostname 完全一致的
+文章 URL，防止列表页中的广告、专题站和 App 跳转链接被误认为文章。
+
+确有合法跨 hostname 发布时，在任务配置中追加精确白名单：
+
+```python
+'discoverer_init_param': {
+    'same_host_only': True,
+    'allowed_article_hosts': ['partner.example.com'],
+}
+```
+
+白名单只接受精确 hostname，不把整个注册域及其所有子域自动视为可信。极少数确实
+需要任意外链的任务可以显式设置 `same_host_only=False`；更细的文章路径限制继续使用
+`article_filter`，它会与 IIS 的本地去重过滤组合执行。

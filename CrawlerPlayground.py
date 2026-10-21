@@ -725,6 +725,10 @@ class DiscovererConfigPanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
+        # hostname 边界通常无需 UI 调整，但必须在加载/再次生成配置时无损保留。
+        self._same_host_only = True
+        self._allowed_article_hosts: List[str] = []
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
@@ -839,6 +843,9 @@ class DiscovererConfigPanel(QWidget):
             init_param["manual_specified_signature"] = self.manual_specified_signature_input.text().strip() or None
             init_param["scope_selector"] = self.scope_selector_input.text().strip() or None
             init_param["extraction_mode"] = self.extraction_mode_combo.currentData()
+            init_param["same_host_only"] = self._same_host_only
+            if self._allowed_article_hosts:
+                init_param["allowed_article_hosts"] = list(self._allowed_article_hosts)
 
         return {
             "discoverer_name": class_name,
@@ -854,6 +861,11 @@ class DiscovererConfigPanel(QWidget):
         self.discoverer_combo.setCurrentText(ui_name)
 
         init_param = config.get("discoverer_init_param", {})
+        self._same_host_only = bool(init_param.get("same_host_only", True))
+        configured_hosts = init_param.get("allowed_article_hosts") or []
+        if isinstance(configured_hosts, str):
+            configured_hosts = [configured_hosts]
+        self._allowed_article_hosts = [str(host) for host in configured_hosts]
         self.manual_specified_signature_input.setText(init_param.get("manual_specified_signature") or "")
         self.scope_selector_input.setText(init_param.get("scope_selector") or "")
 
