@@ -46,14 +46,21 @@ IntelligenceCrawler 是 IIS（IntelligenceIntegrationSystem）的爬虫子模块
 - Playground **不允许**直接读写 widget 的内部控件
 
 **原则 2：Playground 纯透传**
-- `_build_flat_config_dict()` 只做 `dict.update()` 合并，不做任何语义转换
-- `load_config_from_file()` 只做配置分发，不做手动恢复
+- `_build_flat_config_dict()` 聚合控件投影后，通过 `PlaygroundConfigState` 合并到加载基线；不得逐字段复制、重命名或过滤未知项
+- `load_config_from_file()` 只做配置分发并记录完整基线/UI 投影，不另造运行配置
 - Playground 对 `post_extra_action` 等具体字段零感知
 
 **原则 3：统一扁平配置**
 - 唯一真相源：`CRAWLER_CONFIG` 扁平字典
 - Workers、Generator、CrawlPipeline 都消费同一套键名
 - 消除旧版的"嵌套配置 → 扁平配置 → 运行时参数"多层转换
+
+**原则 4：Playground 与 Pipeline 行为等价（最高优先级契约）**
+- 同一份 `CRAWLER_CONFIG` 在 Playground 预览/测试和 `CrawlPipeline` 中必须使用同一字段、同一取值与同一过滤语义；禁止在 UI Worker 中另造默认值或二次派生运行参数。
+- 配置文件 → Playground → 生成文件 → Pipeline 必须无损往返。UI 没有控件的字段、嵌套扩展参数和 callable hook 必须原样保留，不能被 `None`、控件默认值或空树状态覆盖。
+- 只有用户明确修改的 UI 字段可以改变；切换组件类型时，才允许清理该组件不再兼容的隐藏参数。
+- `period_filter`、`channel_filter`、`article_filter` 等影响结果集合的字段必须同时作用于 Playground 和 Pipeline。预览可禁止 `content_handler` 等外部副作用，但不得因此改变抓取、过滤和提取结果。
+- 每次新增配置字段或组件参数，必须增加“加载后不操作”和“只修改一个字段”的往返测试；不能只验证生成代码能运行。
 
 ---
 
@@ -133,9 +140,9 @@ CRAWLER_CONFIG = {
     # --- Runtime computed (兼容 CrawlPipeline) ---
     "period_filter": (datetime, datetime),            # 或 (None, None)
 
-    # --- Placeholders (预留) ---
-    "article_filter": None,
-    "content_handler": None,
+    # --- Runtime hooks（可为 None 或模块级 def 函数） ---
+    "article_filter": None,       # Playground 列表/单篇预览与 Pipeline 共用
+    "content_handler": None,      # Playground 预览不触发外部副作用
     "exception_handler": None,
 }
 ```
@@ -193,9 +200,13 @@ step 字段：
 
 | 方法 | 职责 |
 |------|------|
-| `_build_flat_config_dict()` | 从自治控件聚合扁平配置；实时解析 URL 输入为 `entry_points`；计算 `period_filter` |
-| `load_config_from_file()` | 加载 `.py` 配置 → 解析 `CRAWLER_CONFIG` → 分发给各 `set_config()` |
+| `_build_flat_config_dict()` | 从自治控件聚合投影；只合并实际修改；必要时计算 `period_filter` |
+| `load_config_from_file()` | 加载 `.py` 配置 → 保存无损基线/投影 → 分发给各 `set_config()` |
 | `update_generated_code()` | 调用 `_build_flat_config_dict()` → `CrawlerCodeGenerator.generate_code_from_config()` |
+
+`PlaygroundConfigState` 保存加载时的完整基线和 UI 投影。`_build_flat_config_dict()`
+只把投影中实际变化的字段递归合并回基线；这不是额外配置格式，而是保证扁平配置
+在“不完整 UI”中的无损往返机制。
 
 ### 4.3 Workers（全部消费扁平配置）
 
@@ -214,6 +225,7 @@ step 字段：
 - 使用 `pprint.pformat(config, width=120, sort_dicts=False)` 生成代码
 - **零模板字符串**，零手动字段拼接
 - 输出可直接 `exec()` 得到有效的 `CRAWLER_CONFIG`
+- 模块级、无闭包的 `def` 和可解析的简单 lambda 会连同源码一并生成；闭包和不可还原 callable 必须明确报错，不得静默丢弃
 
 ---
 
@@ -234,7 +246,7 @@ step 字段：
     ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ Playground._build_flat_config_dict()                        │
-│ • 合并各控件输出（纯 dict.update）                             │
+│ • 以已加载完整配置为基线，仅合并 UI 中实际变化的字段              │
 │ • 实时解析 url_input → entry_points                          │
 │ • tree 勾选 → channel_filter                                │
 │ • date_filter_* → period_filter（兼容 CrawlPipeline）        │
@@ -253,7 +265,7 @@ step 字段：
         │
         ▼
     Playground.load_config_from_file()
-        │  set_config() 分发到各控件
+        │  set_config() 分发到各控件 + 保存完整配置/UI 投影
         ▼
     各控件恢复 UI 状态
 ```
@@ -315,8 +327,10 @@ class NewWorker(QRunnable):
 
 ### 6.4 配置兼容性
 
-- **旧配置加载**：`load_config_from_file()` 目前**不再**包含 `period_filter` 兼容 shim（v4.0 已移除）。旧配置若含 `period_filter` 而无线 `date_filter_*`，需手动转换。
+- **旧配置加载**：仅含 `period_filter`、没有 `date_filter_*` 的配置保持原值运行；只有用户修改日期控件后才按 UI 天数重算。
 - **Worker 兼容性**：所有 Worker 已统一消费扁平配置，不再支持旧版嵌套配置传入。
+- **未知字段**：Playground 不认识的顶层或嵌套字段必须透传保留。禁止为“格式整齐”过滤未知字段。
+- **运行 hook**：`article_filter` 在 Playground 与 Pipeline 同样生效；`content_handler` / `exception_handler` 在预览中不执行，以避免调试动作产生提交、写盘等外部副作用，但保存时必须保留。
 
 ---
 
@@ -346,7 +360,9 @@ drive_pipeline_batch(pipeline, CRAWLER_CONFIG)
 | Worker 报 "unsupported action" | `post_extra_action` 中的 action 不在 `PlaywrightActionEngine` 支持的 8 种内 | 检查 `ActionEditorDialog` 是否限制了选项 |
 | Generator 输出格式错乱 | `pprint.pformat` 参数问题 | 确认 `sort_dicts=False` 和 `width=120` |
 | load_config 后 URL 输入框为空 | `entry_points` 是 dict 但 `str()` 输出格式不被解析 | 检查 `parse_input_to_channel_dict` 是否支持 Python dict literal |
+| 加载后刷新代码导致过滤函数消失 | UI 投影覆盖了不可编辑 hook | 检查 `PlaygroundConfigState` 基线合并及 callable 生成测试，禁止恢复为硬编码 `None` |
+| Playground 结果与正式任务不一致 | Worker 绕过了 `period_filter` / `channel_filter` / `article_filter` | 以 `CrawlPipeline` 消费语义为准修复 Worker，并补等价性测试 |
 
 ---
 
-> **最后更新**：2026-05-13 — 根据 v4.0 扁平化改造整理。
+> **最后更新**：2026-10-23 — 强化 Playground ⇄ 配置文件 ⇄ Pipeline 无损往返及行为等价契约。

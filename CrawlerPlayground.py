@@ -22,10 +22,12 @@ from typing import List, Dict, Any, Optional
 try:
     from MultiLineComboBox import MultiLinePopupComboBox
     from CrawlerCodeGenerator import CrawlerCodeGenerator
+    from PlaygroundConfigState import PlaygroundConfigState
 except Exception as e:
     print(str(e))
     from IntelligenceCrawler.MultiLineComboBox import MultiLinePopupComboBox
     from IntelligenceCrawler.CrawlerCodeGenerator import CrawlerCodeGenerator
+    from IntelligenceCrawler.PlaygroundConfigState import PlaygroundConfigState
 
 
 # --- Core Component Imports ---
@@ -1139,7 +1141,6 @@ class ChannelDiscoveryWorker(QRunnable):
             discoverer_name = self.config.get('discoverer_name')
             discoverer_args = self.config.get('discoverer_init_param', {}).copy()
             discoverer_args['fetcher'] = fetcher
-            discoverer_args['verbose'] = True
 
             discoverer = discoverer_factory(discoverer_name, discoverer_args)
 
@@ -1201,10 +1202,28 @@ class ArticleListWorker(QRunnable):
             # --- 3. Execution ---
             runtime_kwargs = self.config.get('d_fetcher_kwargs', {})
 
+            channel_filter = self.config.get('channel_filter') or {}
+            allowed_keys = channel_filter.get('channel_list_filter') or []
+            if allowed_keys:
+                from IntelligenceCrawler.CrawlPipeline import common_channel_filter
+                if not common_channel_filter(self.channel_url, allowed_keys):
+                    self.signals.progress.emit(
+                        f"Skipping channel (filtered): {self.channel_url}"
+                    )
+                    self.signals.result.emit({
+                        'channel_url': self.channel_url,
+                        'articles': [],
+                    })
+                    return
+
             article_list = discoverer.get_articles_for_channel(
                 self.channel_url,
                 fetcher_kwargs=runtime_kwargs
             )
+            article_list = list(dict.fromkeys(article_list))
+            article_filter = self.config.get('article_filter')
+            if article_filter:
+                article_list = [url for url in article_list if article_filter(url)]
             self.signals.result.emit({
                 'channel_url': self.channel_url,
                 'articles': article_list
@@ -1258,7 +1277,6 @@ class ExtractionWorker(QRunnable):
             extractor_name = self.config.get('extractor_name')
             extractor_init = self.config.get('extractor_init_param', {}).copy()
             extractor_kwargs = self.config.get('extractor_kwargs', {}).copy()
-            extractor_init['verbose'] = True
 
             extractor = extractor_factory(extractor_name, extractor_init)
 
@@ -1418,6 +1436,8 @@ class CrawlerPlaygroundApp(QMainWindow):
 
         self.channel_item_map: Dict[str, QTreeWidgetItem] = {}
         self.log_history_view: Optional[QTextEdit] = None
+        self._config_state = PlaygroundConfigState()
+        self._loading_config = False
 
         # --- NEW: Settings for URL History ---
         self.URL_HISTORY_KEY = "discovery_url_history"
@@ -1889,14 +1909,9 @@ class CrawlerPlaygroundApp(QMainWindow):
         # 4. 生成扁平配置（Workers 和代码生成器的统一输入）
         flat_config = self._build_flat_config_dict()
 
-        # 5. 准备日期过滤器
-        start_date: Optional[datetime.datetime] = None
-        end_date: Optional[datetime.datetime] = None
-
-        if flat_config.get('date_filter_enabled'):
-            days = flat_config.get('date_filter_days', 7)
-            end_date = datetime.datetime.now()
-            start_date = end_date - datetime.timedelta(days=days)
+        # 5. Pipeline 直接消费 period_filter；Playground 必须使用同一个值，
+        # 不能再次从 UI 字段派生另一套运行语义。
+        start_date, end_date = flat_config.get('period_filter', (None, None))
 
         # 6. 启动 Worker
         worker = ChannelDiscoveryWorker(
@@ -1945,6 +1960,11 @@ class CrawlerPlaygroundApp(QMainWindow):
             return
 
         flat_config = self._build_flat_config_dict()
+        article_filter = flat_config.get('article_filter')
+        if article_filter and not article_filter(url):
+            self.status_bar.showMessage("Skipped by the configured article_filter.", 5000)
+            self.append_log_history(f"[Filter] Skipped article: {url}")
+            return
 
         worker = ExtractionWorker(
             config=flat_config,
@@ -2060,7 +2080,14 @@ class CrawlerPlaygroundApp(QMainWindow):
             channel_url = self.channel_queue.popleft()
             item = QTreeWidgetItem([channel_url])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(0, Qt.Unchecked)
+            loaded_channel_filter = self._config_state.loaded_value("channel_filter") or {}
+            allowed_keys = loaded_channel_filter.get("channel_list_filter") or []
+            if allowed_keys:
+                from IntelligenceCrawler.CrawlPipeline import common_channel_filter
+                is_checked = common_channel_filter(channel_url, allowed_keys)
+                item.setCheckState(0, Qt.Checked if is_checked else Qt.Unchecked)
+            else:
+                item.setCheckState(0, Qt.Unchecked)
             item.setData(0, Qt.UserRole, {
                 'type': 'channel', 'url': channel_url, 'loaded': False
             })
@@ -2318,6 +2345,8 @@ class CrawlerPlaygroundApp(QMainWindow):
         Gathers all UI settings into a **flat** config dict, then generates
         the corresponding Python code script.
         """
+        if self._loading_config:
+            return
         try:
             # Step 1: Build flat config (single source of truth for serialization)
             config_dict = self._build_flat_config_dict()
@@ -2400,14 +2429,10 @@ class CrawlerPlaygroundApp(QMainWindow):
             "channel_filter_keys": final_keys
         }
 
-    def _build_flat_config_dict(self) -> dict:
-        """
-        Assembles the flat CRAWLER_CONFIG from autonomous child widgets.
-        This is the single source of truth for serialization and round-trip.
-        """
+    def _collect_ui_config_projection(self) -> dict:
+        """收集 UI 能表达的字段，不覆盖配置中的运行时/扩展字段。"""
         config = {}
 
-        # Entry points — 实时解析 URL 输入，消除缓存时序依赖
         raw_url_text = self.url_input.currentText().strip()
         if raw_url_text:
             try:
@@ -2422,7 +2447,6 @@ class CrawlerPlaygroundApp(QMainWindow):
         else:
             config['entry_points'] = {}
 
-        # Autonomous panels / widgets (already output flat keys)
         if self.discoverer_panel:
             config.update(self.discoverer_panel.get_config())
         if self.discovery_fetcher_widget:
@@ -2432,26 +2456,39 @@ class CrawlerPlaygroundApp(QMainWindow):
         if self.article_fetcher_widget:
             config.update(self.article_fetcher_widget.get_config())
 
-        # Channel filter
         ch_filter = self._build_channel_filter_config()
         if ch_filter.get('channel_filter_keys'):
             config['channel_filter'] = {'channel_list_filter': ch_filter['channel_filter_keys']}
         else:
             config['channel_filter'] = None
 
-        # Date filter → period_filter (runtime computed)
-        if config.get('date_filter_enabled'):
-            days = config.get('date_filter_days', 7)
-            end = datetime.datetime.now()
-            start = end - datetime.timedelta(days=days)
-            config['period_filter'] = (start, end)
-        else:
-            config['period_filter'] = (None, None)
-
-        # Runtime placeholders
+        # UI 没有这些 hook 的编辑器。占位值只用于新建配置；加载配置时状态层会
+        # 保留原 callable，而不会让 None 覆盖它们。
         config['article_filter'] = None
         config['content_handler'] = None
         config['exception_handler'] = None
+        return config
+
+    def _build_flat_config_dict(self) -> dict:
+        """
+        Assembles the flat CRAWLER_CONFIG from autonomous child widgets.
+        This is the single source of truth for serialization and round-trip.
+        """
+        ui_config = self._collect_ui_config_projection()
+        config = self._config_state.merge(ui_config)
+
+        # 只在新建配置或用户确实修改日期控件时重算。否则必须保留文件中的
+        # period_filter，避免一次无关的界面操作改变 Pipeline 行为。
+        if self._config_state.projection_changed(
+            ui_config, 'date_filter_enabled', 'date_filter_days'
+        ):
+            if ui_config.get('date_filter_enabled'):
+                days = ui_config.get('date_filter_days', 7)
+                end = datetime.datetime.now()
+                start = end - datetime.timedelta(days=days)
+                config['period_filter'] = (start, end)
+            else:
+                config['period_filter'] = (None, None)
 
         return config
 
@@ -2579,6 +2616,7 @@ class CrawlerPlaygroundApp(QMainWindow):
             return
 
         try:
+            self._loading_config = True
             import importlib.util
             spec = importlib.util.spec_from_file_location("loaded_config", file_path)
             module = importlib.util.module_from_spec(spec)
@@ -2589,11 +2627,20 @@ class CrawlerPlaygroundApp(QMainWindow):
 
             config = module.CRAWLER_CONFIG
 
+            if not isinstance(config, dict):
+                raise ValueError("CRAWLER_CONFIG must be a dictionary.")
+
+            # 旧的发现结果不属于新配置，尤其不能反向污染 channel_filter。
+            self.tree_widget.clear()
+            self.channel_item_map.clear()
+
             # --- Entry Points ---
             entry_points = config.get('entry_points', {})
             if entry_points:
                 url_text = " ".join(entry_points) if isinstance(entry_points, list) else str(entry_points)
                 self.url_input.setCurrentText(url_text)
+            else:
+                self.url_input.clearEditText()
 
             # --- Pure dispatch to autonomous widgets ---
             if self.discoverer_panel:
@@ -2605,10 +2652,13 @@ class CrawlerPlaygroundApp(QMainWindow):
             if self.article_fetcher_widget:
                 self.article_fetcher_widget.set_config(config)
 
+            self._config_state.capture(config, self._collect_ui_config_projection())
             self.status_bar.showMessage(f"Configuration loaded from {file_path}", 5000)
+            self._loading_config = False
             self.update_generated_code()
 
         except Exception as e:
+            self._loading_config = False
             self.status_bar.showMessage(f"Failed to load config: {e}")
             print(traceback.format_exc())
             QMessageBox.warning(self, "Load Error", f"Could not load configuration:\n{str(e)}")
