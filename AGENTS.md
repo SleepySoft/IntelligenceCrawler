@@ -23,6 +23,10 @@ IntelligenceCrawler 是 IIS（IntelligenceIntegrationSystem）的爬虫子模块
 | `CrawlPipeline.py` | 工作流编排，消费 `CRAWLER_CONFIG` 执行完整抓取流程 |
 | `CrawlerPlayground.py` | **PyQt5 GUI**，用于可视化调试组件组合并生成配置 |
 | `CrawlerCodeGenerator.py` | 将扁平配置序列化为 `CrawlerConfig.py` |
+| `PlaygroundConfigState.py` | 已加载配置基线、UI 增量合并与语义差异 |
+| `URLFilter.py` | Playground/Pipeline 共用的声明式 URL 过滤与回归样本校验 |
+| `CrawlTrace.py` | 抓取漏斗、拒绝原因和有限样本统计 |
+| `ProjectCatalog.py` | 不执行模块的项目爬虫配置/任务静态索引 |
 | `PlaywrightActionEngine_v2.py` | Playwright 页面交互引擎（8 种 action） |
 | `ActionEditorDialog.py` | 独立的 action 序列编辑器对话框 |
 
@@ -139,6 +143,18 @@ CRAWLER_CONFIG = {
 
     # --- Runtime computed (兼容 CrawlPipeline) ---
     "period_filter": (datetime, datetime),            # 或 (None, None)
+
+    # --- Declarative URL filter（Playground/Pipeline 共用） ---
+    "url_filter": {
+        "allowed_hosts": ["example.com"],
+        "include_subdomains": False,
+        "path_includes": ["/world/"],
+        "path_excludes": ["/sports/"],
+        "query_policy": "reject",
+    },
+    "url_filter_samples": [
+        {"url": "https://example.com/world/a", "allowed": True},
+    ],
 
     # --- Runtime hooks（可为 None 或模块级 def 函数） ---
     "article_filter": None,       # Playground 列表/单篇预览与 Pipeline 共用
@@ -331,6 +347,8 @@ class NewWorker(QRunnable):
 - **Worker 兼容性**：所有 Worker 已统一消费扁平配置，不再支持旧版嵌套配置传入。
 - **未知字段**：Playground 不认识的顶层或嵌套字段必须透传保留。禁止为“格式整齐”过滤未知字段。
 - **运行 hook**：`article_filter` 在 Playground 与 Pipeline 同样生效；`content_handler` / `exception_handler` 在预览中不执行，以避免调试动作产生提交、写盘等外部副作用，但保存时必须保留。
+- **过滤优先级**：`url_filter` 先执行，`article_filter` 后执行，二者为 AND；禁止在任务包装或 UI Worker 中复制第三套过滤逻辑。
+- **完整方案与测试矩阵**：见 `docs/playground_pipeline_parity_plan.md`。
 
 ---
 

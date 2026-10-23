@@ -68,3 +68,17 @@ def test_generated_module_level_filter_remains_executable():
     article_filter = namespace["CRAWLER_CONFIG"]["article_filter"]
     assert article_filter("https://example.test/news/a")
     assert not article_filter("https://example.test/sports/a")
+
+
+def test_config_changes_report_only_effective_edits():
+    state = PlaygroundConfigState()
+    state.capture(_baseline(), _projection())
+    assert state.changes(_projection()) == []
+
+    edited = _projection()
+    edited["d_fetcher_init_param"]["timeout_s"] = 25
+    changes = state.changes(edited)
+
+    assert [(change.path, change.before, change.after) for change in changes] == [
+        ("d_fetcher_init_param.timeout_s", 10, 25),
+    ]

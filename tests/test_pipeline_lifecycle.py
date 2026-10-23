@@ -130,3 +130,34 @@ def test_playwright_runtime_is_lazy_and_restarts_for_next_pipeline():
         fetcher.close()
 
     assert not fetcher.worker_thread.is_alive()
+
+
+def test_trial_article_limit_is_applied_inside_pipeline_driver():
+    events = []
+    fetcher = RecordingFetcher(events)
+    pipeline = CrawlPipeline(
+        name="trial",
+        d_fetcher=fetcher,
+        discoverer=None,
+        e_fetcher=fetcher,
+        extractor=None,
+        log_callback=lambda *_: None,
+    )
+
+    def discover_channels(**_kwargs):
+        pipeline.channels = ["channel"]
+
+    def discover_articles(**_kwargs):
+        pipeline.articles = [(f"article-{index}", "group") for index in range(4)]
+
+    def extract_articles(**_kwargs):
+        events.append([url for url, _group in pipeline.articles])
+
+    pipeline.discover_channels = discover_channels
+    pipeline.discover_articles = discover_articles
+    pipeline.extract_articles = extract_articles
+
+    drive_pipeline_batch(pipeline, {"entry_points": []}, max_articles=2)
+
+    assert events == ["begin", ["article-0", "article-1"], "end"]
+    assert pipeline.trace.snapshot()["counters"]["articles_limited_out"] == 2

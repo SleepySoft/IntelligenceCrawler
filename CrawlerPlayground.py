@@ -15,6 +15,8 @@ import datetime
 import traceback
 import posixpath
 import tldextract
+from pathlib import Path
+from copy import deepcopy
 from collections import deque
 from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional
@@ -23,11 +25,21 @@ try:
     from MultiLineComboBox import MultiLinePopupComboBox
     from CrawlerCodeGenerator import CrawlerCodeGenerator
     from PlaygroundConfigState import PlaygroundConfigState
+    from ProjectCatalog import scan_crawler_catalog
+    from URLFilter import (
+        evaluate_article_url, filter_article_urls, normalize_url_filter,
+        validate_url_filter_samples,
+    )
 except Exception as e:
     print(str(e))
     from IntelligenceCrawler.MultiLineComboBox import MultiLinePopupComboBox
     from IntelligenceCrawler.CrawlerCodeGenerator import CrawlerCodeGenerator
     from IntelligenceCrawler.PlaygroundConfigState import PlaygroundConfigState
+    from IntelligenceCrawler.ProjectCatalog import scan_crawler_catalog
+    from IntelligenceCrawler.URLFilter import (
+        evaluate_article_url, filter_article_urls, normalize_url_filter,
+        validate_url_filter_samples,
+    )
 
 
 # --- Core Component Imports ---
@@ -121,7 +133,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QStatusBar, QTabWidget, QLabel, QFrame, QComboBox,
     QDateEdit, QCheckBox, QToolBar, QSizePolicy, QSpinBox,
     QMenu, QAction, QFileDialog, QFormLayout, QGridLayout, QDialogButtonBox, QDialog, QListView, QAbstractScrollArea,
-    QMessageBox
+    QMessageBox, QListWidget, QListWidgetItem
 )
 from PyQt5.QtCore import (
     Qt, QRunnable, QThreadPool, QObject, pyqtSignal, QTimer, QSettings
@@ -995,6 +1007,133 @@ class ExtractorConfigPanel(QWidget):
             self.css_selector_input.clear()
 
 
+class URLFilterConfigWidget(QWidget):
+    """声明式 URL 过滤器的自治控件。"""
+
+    config_changed = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._config: Optional[Dict[str, Any]] = None
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.button = QPushButton("URL Filter...")
+        self.button.clicked.connect(self._edit)
+        layout.addWidget(self.button)
+        self._refresh_label()
+
+    def get_config(self) -> Dict[str, Any]:
+        return {"url_filter": deepcopy(self._config)}
+
+    def set_config(self, config: Dict[str, Any]) -> None:
+        self._config = normalize_url_filter(config.get("url_filter"))
+        self._refresh_label()
+
+    def _refresh_label(self) -> None:
+        if not self._config:
+            self.button.setText("URL Filter: off")
+            return
+        count = sum(len(self._config.get(key) or []) for key in (
+            "allowed_hosts", "path_includes", "path_excludes",
+        ))
+        if self._config.get("query_policy") == "reject":
+            count += 1
+        self.button.setText(f"URL Filter: {count} rule(s)")
+
+    @staticmethod
+    def _lines(editor: QTextEdit) -> List[str]:
+        return [line.strip() for line in editor.toPlainText().splitlines() if line.strip()]
+
+    def _edit(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Declarative URL Filter")
+        layout = QFormLayout(dialog)
+        hosts = QTextEdit("\n".join((self._config or {}).get("allowed_hosts", [])))
+        includes = QTextEdit("\n".join((self._config or {}).get("path_includes", [])))
+        excludes = QTextEdit("\n".join((self._config or {}).get("path_excludes", [])))
+        for editor in (hosts, includes, excludes):
+            editor.setMaximumHeight(90)
+        subdomains = QCheckBox("Allow subdomains of listed hosts")
+        subdomains.setChecked(bool((self._config or {}).get("include_subdomains")))
+        reject_query = QCheckBox("Reject URLs containing a query string")
+        reject_query.setChecked((self._config or {}).get("query_policy") == "reject")
+        layout.addRow("Allowed hosts (one/line)", hosts)
+        layout.addRow("Required path fragments", includes)
+        layout.addRow("Excluded path fragments", excludes)
+        layout.addRow("", subdomains)
+        layout.addRow("", reject_query)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        self._config = normalize_url_filter({
+            "allowed_hosts": self._lines(hosts),
+            "path_includes": self._lines(includes),
+            "path_excludes": self._lines(excludes),
+            "include_subdomains": subdomains.isChecked(),
+            "query_policy": "reject" if reject_query.isChecked() else "allow",
+        })
+        self._refresh_label()
+        self.config_changed.emit()
+
+
+class ProjectConfigDialog(QDialog):
+    """项目内爬虫配置的只读目录与搜索入口。"""
+
+    def __init__(self, entries, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.entries = list(entries)
+        self.selected_path: Optional[Path] = None
+        self.setWindowTitle("Project Crawler Configs")
+        self.resize(900, 600)
+        layout = QVBoxLayout(self)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search source, group, discoverer or extractor...")
+        self.list = QListWidget()
+        layout.addWidget(self.search)
+        layout.addWidget(self.list, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Open | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept_selected)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.search.textChanged.connect(self._refresh)
+        self.list.itemDoubleClicked.connect(lambda _item: self._accept_selected())
+        self._refresh()
+
+    def _refresh(self) -> None:
+        query = self.search.text().strip().lower()
+        self.list.clear()
+        for entry in self.entries:
+            status = "disabled" if entry.disabled else ("task" if entry.task_path else "config only")
+            filter_kinds = []
+            if entry.has_declarative_filter:
+                filter_kinds.append("declarative")
+            if entry.has_custom_filter:
+                filter_kinds.append("custom")
+            filter_name = "+".join(filter_kinds) if filter_kinds else "no URL filter"
+            label = (
+                f"[{entry.group}] {entry.name}  |  {entry.discoverer} → {entry.extractor}  "
+                f"| {entry.entry_count} entry | {filter_name} "
+                f"| {entry.regression_sample_count} samples | {status}"
+            )
+            if query and query not in label.lower():
+                continue
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, str(entry.config_path))
+            self.list.addItem(item)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def _accept_selected(self) -> None:
+        item = self.list.currentItem()
+        if not item:
+            return
+        self.selected_path = Path(item.data(Qt.UserRole))
+        self.accept()
+
+
 class SignatureInspectorDialog(QDialog):
     """
     A dialog to display signature groups and select the best one.
@@ -1221,12 +1360,22 @@ class ArticleListWorker(QRunnable):
                 fetcher_kwargs=runtime_kwargs
             )
             article_list = list(dict.fromkeys(article_list))
-            article_filter = self.config.get('article_filter')
-            if article_filter:
-                article_list = [url for url in article_list if article_filter(url)]
+            article_list, rejected = filter_article_urls(
+                article_list,
+                self.config.get('url_filter'),
+                self.config.get('article_filter'),
+            )
+            rejection_counts: Dict[str, int] = {}
+            for _url, reason in rejected:
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
             self.signals.result.emit({
                 'channel_url': self.channel_url,
-                'articles': article_list
+                'articles': article_list,
+                'diagnostics': {
+                    'accepted': len(article_list),
+                    'rejected': rejection_counts,
+                    'samples': rejected[:5],
+                },
             })
         except Exception as e:
             ex_type, ex_value, tb_str = sys.exc_info()
@@ -1407,6 +1556,48 @@ class SignatureAnalysisWorker(QRunnable):
             self.signals.finished.emit()
 
 
+class FullTrialWorker(QRunnable):
+    """使用正式 CrawlPipeline 做限量试跑，但禁用外部 handler 副作用。"""
+
+    def __init__(self, config: Dict[str, Any], max_articles: int):
+        super().__init__()
+        self.config = deepcopy(config)
+        self.max_articles = max(1, int(max_articles))
+        self.signals = WorkerSignals()
+
+    def run(self):
+        pipeline = None
+        try:
+            from IntelligenceCrawler.CrawlPipeline import build_pipeline, drive_pipeline_batch
+            from IntelligenceCrawler.CrawlTrace import CrawlTrace
+
+            self.config["content_handler"] = None
+            self.config["exception_handler"] = None
+            trace = CrawlTrace(sample_limit=5)
+            pipeline = build_pipeline(
+                "playground-trial",
+                self.config,
+                self.signals.progress.emit,
+                crawler_governor=None,
+                trace=trace,
+            )
+            drive_pipeline_batch(
+                pipeline,
+                self.config,
+                max_articles=self.max_articles,
+            )
+            self.signals.result.emit({
+                "trace": trace.snapshot(),
+                "content_count": len(pipeline.contents),
+            })
+        except Exception as e:
+            self.signals.error.emit((str(type(e)), str(e), traceback.format_exc()))
+        finally:
+            if pipeline is not None:
+                pipeline.shutdown()
+            self.signals.finished.emit()
+
+
 # =============================================================================
 #
 # SECTION 3: PyQt5 Main Application (GUI Refactored)
@@ -1430,6 +1621,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.article_fetcher_widget: Optional[FetcherConfigWidget] = None
         self.discoverer_panel: Optional[DiscovererConfigPanel] = None
         self.extractor_panel: Optional[ExtractorConfigPanel] = None
+        self.url_filter_widget: Optional[URLFilterConfigWidget] = None
 
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(QThreadPool.globalInstance().maxThreadCount() // 2 + 1)
@@ -1438,6 +1630,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.log_history_view: Optional[QTextEdit] = None
         self._config_state = PlaygroundConfigState()
         self._loading_config = False
+        self._pending_channel_filter_keys: Optional[List[str]] = None
 
         # --- NEW: Settings for URL History ---
         self.URL_HISTORY_KEY = "discovery_url_history"
@@ -1554,6 +1747,17 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.analyze_button = QPushButton("Discover Channels")
         self.analyze_button.setStyleSheet("padding: 5px 10px;")
         top_bar_row2_layout.addWidget(self.analyze_button)
+
+        self.trial_limit_spin = QSpinBox()
+        self.trial_limit_spin.setRange(1, 50)
+        self.trial_limit_spin.setValue(5)
+        self.trial_limit_spin.setPrefix("Max ")
+        self.trial_run_button = QPushButton("Full Trial Run")
+        self.trial_run_button.setToolTip(
+            "Run the production CrawlPipeline with a hard article cap and no content/exception handlers."
+        )
+        top_bar_row2_layout.addWidget(self.trial_limit_spin)
+        top_bar_row2_layout.addWidget(self.trial_run_button)
         # --- [END NEW] ---
 
         main_layout.addLayout(top_bar_row2_layout)  # Add Row 2
@@ -1587,6 +1791,12 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.channel_source_viewer.setLineWrapMode(QTextEdit.NoWrap)
         self.tab_widget.addTab(self.channel_source_viewer, "Channel Source")  # Renamed
 
+        self.diagnostics_view = QTextEdit()
+        self.diagnostics_view.setReadOnly(True)
+        self.diagnostics_view.setFont(QFont("Courier", 10))
+        self.diagnostics_view.setPlaceholderText("Discovery/filter/extraction funnel will appear here.")
+        self.tab_widget.addTab(self.diagnostics_view, "Diagnostics")
+
         self.main_splitter.addWidget(self.tab_widget)
         self.main_splitter.setSizes([400, 1000])
         vertical_splitter.addWidget(self.main_splitter)
@@ -1616,6 +1826,16 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.load_code_button.setToolTip("Load a saved CrawlerConfig.py and restore UI settings.")
         self.load_code_button.clicked.connect(self.load_config_from_file)
         code_layout_button_line.addWidget(self.load_code_button, 1)  # Add with stretch 1
+
+        self.project_configs_button = QPushButton("Project Configs...")
+        self.project_configs_button.setToolTip("Browse crawler configs under CrawlTasks without executing them.")
+        self.project_configs_button.clicked.connect(self.open_project_catalog)
+        code_layout_button_line.addWidget(self.project_configs_button, 1)
+
+        self.config_diff_button = QPushButton("Changes...")
+        self.config_diff_button.setToolTip("Show semantic changes relative to the loaded config.")
+        self.config_diff_button.clicked.connect(self.show_config_changes)
+        code_layout_button_line.addWidget(self.config_diff_button, 1)
 
         self.save_code_button = QPushButton(QIcon.fromTheme("document-save"), "Save Code to File...")
         self.save_code_button.setToolTip("Save the generated code above to a Python file (e.g., CrawlerConfig.py)")
@@ -1663,6 +1883,11 @@ class CrawlerPlaygroundApp(QMainWindow):
         load_action.setStatusTip('Load a saved configuration file')
         load_action.triggered.connect(self.load_config_from_file)
         file_menu.addAction(load_action)
+
+        project_action = QAction('&Project Crawler Configs...', self)
+        project_action.setShortcut('Ctrl+Shift+O')
+        project_action.triggered.connect(self.open_project_catalog)
+        file_menu.addAction(project_action)
 
         # 4. 添加 Save Action
         save_action = QAction(QIcon.fromTheme("document-save"), '&Save Configuration...', self)
@@ -1735,6 +1960,9 @@ class CrawlerPlaygroundApp(QMainWindow):
         self.extractor_panel = ExtractorConfigPanel(self)
         extractor_toolbar.addWidget(self.extractor_panel)
 
+        self.url_filter_widget = URLFilterConfigWidget(self)
+        extractor_toolbar.addWidget(self.url_filter_widget)
+
         self.extractor_analyze_button = QPushButton("Analyze")
         extractor_toolbar.addWidget(self.extractor_analyze_button)
 
@@ -1778,6 +2006,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         """Centralize all signal/slot connections."""
         # Top Bar
         self.analyze_button.clicked.connect(self.start_channel_discovery)
+        self.trial_run_button.clicked.connect(self.start_full_trial_run)
         if self.discoverer_panel:
             self.discoverer_panel.inspect_signature_button.clicked.connect(self.start_signature_inspection)
 
@@ -1800,6 +2029,8 @@ class CrawlerPlaygroundApp(QMainWindow):
             self.discovery_fetcher_widget.fetcher_combo.currentTextChanged.connect(self.update_generated_code)
         if self.article_fetcher_widget:
             self.article_fetcher_widget.fetcher_combo.currentTextChanged.connect(self.update_generated_code)
+        if self.url_filter_widget:
+            self.url_filter_widget.config_changed.connect(self.update_generated_code)
         self.tree_widget.itemChanged.connect(self.update_generated_code_from_tree)
 
         self.save_code_button.clicked.connect(self._save_generated_code)
@@ -1810,6 +2041,8 @@ class CrawlerPlaygroundApp(QMainWindow):
         # Top bar
         self.url_input.setEnabled(not is_loading)
         self.analyze_button.setEnabled(not is_loading)
+        self.trial_run_button.setEnabled(not is_loading)
+        self.trial_limit_spin.setEnabled(not is_loading)
         if self.discoverer_panel:
             self.discoverer_panel.setEnabled(not is_loading)
 
@@ -1898,22 +2131,22 @@ class CrawlerPlaygroundApp(QMainWindow):
         for ch, url in channel_dict.items():
             self.append_log_history(f"  - {ch} -> {url}")
 
+        # 在清空旧树之前构建配置，否则用户刚勾选的 channel_filter 会丢失。
+        flat_config = self._build_flat_config_dict()
+        active_channel_filter = flat_config.get("channel_filter") or {}
+        self._pending_channel_filter_keys = list(
+            active_channel_filter.get("channel_list_filter") or []
+        )
+
         # 3. 清理 UI 和保存历史
         self.clear_all_controls()
         self._save_url_history(raw_text)
 
-        # =========================================================
-        # 在生成配置之前，必须先更新“最后使用的入口点”缓存
-        # 这样 _build_flat_config_dict() 才能读到最新的值。
-        # =========================================================
-        # 4. 生成扁平配置（Workers 和代码生成器的统一输入）
-        flat_config = self._build_flat_config_dict()
-
-        # 5. Pipeline 直接消费 period_filter；Playground 必须使用同一个值，
+        # 4. Pipeline 直接消费 period_filter；Playground 必须使用同一个值，
         # 不能再次从 UI 字段派生另一套运行语义。
         start_date, end_date = flat_config.get('period_filter', (None, None))
 
-        # 6. 启动 Worker
+        # 5. 启动 Worker
         worker = ChannelDiscoveryWorker(
             config=flat_config,
             entry_point=channel_dict,
@@ -1928,6 +2161,40 @@ class CrawlerPlaygroundApp(QMainWindow):
         worker.signals.progress.connect(self.append_log_history)
 
         self.thread_pool.start(worker)
+
+    def start_full_trial_run(self):
+        """通过正式 Pipeline 做小样本端到端试跑。"""
+        config = self._build_flat_config_dict()
+        if not config.get("entry_points"):
+            self.status_bar.showMessage("Error: Please enter at least one entry point.")
+            return
+        self.set_loading_state(True, "Running bounded full-pipeline trial...")
+        self.diagnostics_view.setPlainText("Trial run started...")
+        worker = FullTrialWorker(config, self.trial_limit_spin.value())
+        worker.signals.progress.connect(self.append_log_history)
+        worker.signals.progress.connect(self.status_bar.showMessage)
+        worker.signals.result.connect(self.on_full_trial_result)
+        worker.signals.error.connect(self.on_worker_error)
+        worker.signals.finished.connect(self.on_subtask_finished)
+        self.thread_pool.start(worker)
+
+    def on_full_trial_result(self, result: Dict[str, Any]):
+        trace = result.get("trace") or {}
+        lines = [f"trial.content_count: {result.get('content_count', 0)}"]
+        lines.extend(
+            f"{key}: {value}"
+            for key, value in (trace.get("counters") or {}).items()
+        )
+        lines.extend(
+            f"rejected.{key}: {value}"
+            for key, value in (trace.get("rejections") or {}).items()
+        )
+        samples = trace.get("samples") or {}
+        for reason, urls in samples.items():
+            for url in urls:
+                lines.append(f"sample.{reason}: {url}")
+        self.diagnostics_view.setPlainText("\n".join(lines))
+        self.tab_widget.setCurrentWidget(self.diagnostics_view)
 
     def start_article_loading(self, channel_item: QTreeWidgetItem, channel_url: str):
         """Starts the Stage 2 (Lazy Loading) worker for a specific channel."""
@@ -1960,10 +2227,18 @@ class CrawlerPlaygroundApp(QMainWindow):
             return
 
         flat_config = self._build_flat_config_dict()
-        article_filter = flat_config.get('article_filter')
-        if article_filter and not article_filter(url):
-            self.status_bar.showMessage("Skipped by the configured article_filter.", 5000)
-            self.append_log_history(f"[Filter] Skipped article: {url}")
+        decision = evaluate_article_url(
+            url,
+            flat_config.get('url_filter'),
+            flat_config.get('article_filter'),
+        )
+        if not decision.allowed:
+            self.status_bar.showMessage(
+                f"Skipped by article filter: {decision.reason}.", 5000
+            )
+            self.append_log_history(
+                f"[Filter:{decision.reason}] Skipped article: {url}"
+            )
             return
 
         worker = ExtractionWorker(
@@ -2081,7 +2356,11 @@ class CrawlerPlaygroundApp(QMainWindow):
             item = QTreeWidgetItem([channel_url])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             loaded_channel_filter = self._config_state.loaded_value("channel_filter") or {}
-            allowed_keys = loaded_channel_filter.get("channel_list_filter") or []
+            allowed_keys = (
+                self._pending_channel_filter_keys
+                if self._pending_channel_filter_keys is not None
+                else loaded_channel_filter.get("channel_list_filter") or []
+            )
             if allowed_keys:
                 from IntelligenceCrawler.CrawlPipeline import common_channel_filter
                 is_checked = common_channel_filter(channel_url, allowed_keys)
@@ -2101,6 +2380,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         else:
             self.tree_widget.setDisabled(False)
             self.status_bar.showMessage(f"Found {len(self.channel_item_map)} channels. Click to load articles.")
+            self._pending_channel_filter_keys = None
             self.update_generated_code()  # Update code now that tree is populated
 
     def on_channel_discovery_finished(self):
@@ -2111,6 +2391,7 @@ class CrawlerPlaygroundApp(QMainWindow):
         """Slot for ArticleListWorker 'result' signal."""
         channel_url = result['channel_url']
         article_list = result['articles']
+        diagnostics = result.get('diagnostics') or {}
         parent_item = self.channel_item_map.get(channel_url)
         if not parent_item: return
         data = parent_item.data(0, Qt.UserRole)
@@ -2126,6 +2407,20 @@ class CrawlerPlaygroundApp(QMainWindow):
                 parent_item.addChild(child_item)
         parent_item.setExpanded(True)
         self.status_bar.showMessage(f"Loaded {len(article_list)} articles for {channel_url}", 5000)
+        if diagnostics:
+            lines = [
+                f"channel: {channel_url}",
+                f"article_filter.accepted: {diagnostics.get('accepted', 0)}",
+            ]
+            lines.extend(
+                f"article_filter.{reason}: {count}"
+                for reason, count in sorted((diagnostics.get('rejected') or {}).items())
+            )
+            samples = diagnostics.get('samples') or []
+            if samples:
+                lines.append("samples:")
+                lines.extend(f"  - {reason}: {url}" for url, reason in samples)
+            self.diagnostics_view.setPlainText("\n".join(lines))
 
     def on_channel_source_result(self, content_string: str):
         """Slot for ChannelSourceWorker 'result' signal."""
@@ -2404,6 +2699,12 @@ class CrawlerPlaygroundApp(QMainWindow):
             except Exception:
                 return url
 
+        if (
+            self.tree_widget.topLevelItemCount() == 0
+            and self._pending_channel_filter_keys is not None
+        ):
+            return {"channel_filter_keys": list(self._pending_channel_filter_keys)}
+
         # 1. Iterate the tree, get "keys" for all checked channels
         checked_keys = []
         for i in range(self.tree_widget.topLevelItemCount()):
@@ -2455,6 +2756,8 @@ class CrawlerPlaygroundApp(QMainWindow):
             config.update(self.extractor_panel.get_config())
         if self.article_fetcher_widget:
             config.update(self.article_fetcher_widget.get_config())
+        if self.url_filter_widget:
+            config.update(self.url_filter_widget.get_config())
 
         ch_filter = self._build_channel_filter_config()
         if ch_filter.get('channel_filter_keys'):
@@ -2602,7 +2905,56 @@ class CrawlerPlaygroundApp(QMainWindow):
         }
         return mapping.get(ui_name, ui_name)
 
-        # 在 CrawlerPlaygroundApp 类中添加
+    def _project_root(self) -> Path:
+        candidates = (Path.cwd(), Path(__file__).resolve().parent.parent)
+        for candidate in candidates:
+            if (candidate / "CrawlTasks").is_dir():
+                return candidate
+        return Path.cwd()
+
+    def open_project_catalog(self) -> None:
+        root = self._project_root()
+        entries = scan_crawler_catalog(
+            root / "CrawlTasks",
+            root / "_config" / "collector.json",
+        )
+        if not entries:
+            QMessageBox.information(self, "Project Configs", "No crawler configs were found.")
+            return
+        dialog = ProjectConfigDialog(entries, self)
+        if dialog.exec_() == QDialog.Accepted and dialog.selected_path:
+            self.load_config_path(dialog.selected_path)
+
+    def show_config_changes(self) -> None:
+        ui_config = self._collect_ui_config_projection()
+        changes = self._config_state.changes(ui_config)
+        if not self._config_state.has_loaded_config:
+            QMessageBox.information(
+                self, "Config Changes", "This is a new config; there is no loaded baseline."
+            )
+            return
+        if not changes:
+            QMessageBox.information(self, "Config Changes", "No semantic changes.")
+            return
+        lines = []
+        for change in changes:
+            before = repr(change.before)
+            after = repr(change.after)
+            lines.append(f"{change.path}\n  - {before[:300]}\n  + {after[:300]}")
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Config Changes ({len(changes)})")
+        dialog.resize(900, 600)
+        layout = QVBoxLayout(dialog)
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setFont(QFont("Courier", 10))
+        view.setPlainText("\n\n".join(lines))
+        layout.addWidget(view)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec_()
 
     def load_config_from_file(self):
         """
@@ -2614,6 +2966,12 @@ class CrawlerPlaygroundApp(QMainWindow):
         )
         if not file_path:
             return
+
+        self.load_config_path(Path(file_path))
+
+    def load_config_path(self, file_path: Path | str) -> None:
+        """加载指定配置；文件对话框和项目目录共用该入口。"""
+        file_path = str(Path(file_path).resolve())
 
         try:
             self._loading_config = True
@@ -2633,6 +2991,10 @@ class CrawlerPlaygroundApp(QMainWindow):
             # 旧的发现结果不属于新配置，尤其不能反向污染 channel_filter。
             self.tree_widget.clear()
             self.channel_item_map.clear()
+            loaded_channel_filter = config.get("channel_filter") or {}
+            self._pending_channel_filter_keys = list(
+                loaded_channel_filter.get("channel_list_filter") or []
+            )
 
             # --- Entry Points ---
             entry_points = config.get('entry_points', {})
@@ -2651,8 +3013,25 @@ class CrawlerPlaygroundApp(QMainWindow):
                 self.extractor_panel.set_config(config)
             if self.article_fetcher_widget:
                 self.article_fetcher_widget.set_config(config)
+            if self.url_filter_widget:
+                self.url_filter_widget.set_config(config)
 
             self._config_state.capture(config, self._collect_ui_config_projection())
+            sample_failures = validate_url_filter_samples(config)
+            sample_count = len(config.get("url_filter_samples") or [])
+            if sample_count:
+                lines = [
+                    f"url_filter_samples: {sample_count}",
+                    f"passed: {sample_count - len(sample_failures)}",
+                    f"failed: {len(sample_failures)}",
+                ]
+                lines.extend(
+                    f"FAIL #{failure['index']} expected={failure['expected']} "
+                    f"actual={failure['actual']} reason={failure['reason']} "
+                    f"url={failure['url']}"
+                    for failure in sample_failures
+                )
+                self.diagnostics_view.setPlainText("\n".join(lines))
             self.status_bar.showMessage(f"Configuration loaded from {file_path}", 5000)
             self._loading_config = False
             self.update_generated_code()

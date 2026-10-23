@@ -17,6 +17,8 @@ from IntelligenceCrawler.CrawlerGovernanceCore import GovernanceManager, CrawlSe
 from IntelligenceCrawler.Discoverer import IDiscoverer, discoverer_factory
 from IntelligenceCrawler.Extractor import IExtractor, ExtractionResult, extractor_factory
 from IntelligenceCrawler.Fetcher import Fetcher, fetcher_factory
+from IntelligenceCrawler.CrawlTrace import CrawlTrace
+from IntelligenceCrawler.URLFilter import evaluate_article_url
 
 
 # --- Configuration ---
@@ -143,7 +145,8 @@ class CrawlPipeline:
                  e_fetcher: Fetcher,
                  extractor: IExtractor,
                  log_callback: Callable[..., None] = print,
-                 crawler_governor: Optional[GovernanceManager] = None):
+                 crawler_governor: Optional[GovernanceManager] = None,
+                 trace: Optional[CrawlTrace] = None):
         """
         Initializes the pipeline with all required components.
 
@@ -161,6 +164,7 @@ class CrawlPipeline:
         self.extractor = extractor
         self.log = log_callback
         self.crawler_governor = crawler_governor
+        self.trace = trace or CrawlTrace()
 
             # --- State Properties ---
         self.channels: List[str] = []
@@ -173,6 +177,7 @@ class CrawlPipeline:
         self.channels = []
         self.articles = []
         self.contents = []
+        self.trace.reset()
 
     def _raise_if_stopped(self, stop_event: Optional[threading.Event]) -> None:
         if stop_event is not None and stop_event.is_set():
@@ -259,6 +264,8 @@ class CrawlPipeline:
         if isinstance(entry_point, str):
             entry_point = [entry_point]
 
+        self.trace.add("entry_points", len(entry_point))
+
         fetcher_kwargs = fetcher_kwargs or {}
 
         for channel_url in entry_point:
@@ -311,6 +318,7 @@ class CrawlPipeline:
 
             if exception is None:
                 channels.extend(channels_found)
+                self.trace.add("channels_discovered", len(channels_found))
                 self.log(f"Found {len(channels_found)} channels from {channel_url}")
             else:
                 full_traceback = format_exception_with_traceback(exception)
@@ -318,6 +326,8 @@ class CrawlPipeline:
 
         # De-duplicate while preserving order
         self.channels = list(dict.fromkeys(channels))
+        self.trace.add("channels_unique", len(self.channels))
+        self.trace.add("channels_duplicate", len(channels) - len(self.channels))
         self.log(f"Found {len(self.channels)} unique channels in total.")
         return self.channels
 
@@ -368,8 +378,10 @@ class CrawlPipeline:
             self._raise_if_stopped(stop_event)
             if channel_filter and not channel_filter(channel_url):
                 self.log(f"Skipping channel (filtered): {channel_url}")
+                self.trace.reject("channel_filter", "not_selected", channel_url)
                 continue
             filtered_channels.append(channel_url)
+        self.trace.add("channels_accepted", len(filtered_channels))
 
         for job in self.discover_articles_jobs(filtered_channels, fetcher_kwargs):
             self._raise_if_stopped(stop_event)
@@ -385,12 +397,15 @@ class CrawlPipeline:
                 articles_in_channel, exception = job.run()
                 self._raise_if_stopped(stop_event)
                 if exception is None:
+                    self.trace.add("articles_discovered", len(articles_in_channel))
                     count_new = 0
                     for article_url in articles_in_channel:
                         if article_url not in seen_articles:
                             seen_articles.add(article_url)
                             discovered_results.append((article_url, channel_group))
                             count_new += 1
+                        else:
+                            self.trace.add("articles_duplicate")
                     if task: task.success()
                     self.log(f"Found {count_new} new articles in channel {channel_url}.")
                 else:
@@ -411,6 +426,7 @@ class CrawlPipeline:
                         )
 
         self.articles = discovered_results
+        self.trace.add("articles_unique", len(self.articles))
         self.log(f"Discovered {len(self.articles)} unique articles.")
         return self.articles
 
@@ -447,6 +463,7 @@ class CrawlPipeline:
 
     def extract_articles(
         self,
+        url_filter: Optional[Dict] = None,
         article_filter: Optional[Callable[[str], bool]] = None,
         content_handler: Optional[Callable[[str, str, "ExtractionResult"], bool]] = None,
         exception_handler: Optional[Callable[[str, Exception], None]] = None,
@@ -476,10 +493,15 @@ class CrawlPipeline:
             extract_article_urls: List[str] = []
             for article_url in article_urls:
                 self._raise_if_stopped(stop_event)
-                if article_filter and not article_filter(article_url):
-                    self.log(f"Skipping article (filtered): {article_url}")
+                decision = evaluate_article_url(article_url, url_filter, article_filter)
+                if not decision.allowed:
+                    self.log(
+                        f"Skipping article (filtered:{decision.reason}): {article_url}"
+                    )
+                    self.trace.reject("article_filter", decision.reason, article_url)
                     continue
                 extract_article_urls.append(article_url)
+            self.trace.add("articles_accepted", len(extract_article_urls))
 
             if self.crawler_governor:
                 self.crawler_governor.start_round(channel_group, len(extract_article_urls))
@@ -502,19 +524,23 @@ class CrawlPipeline:
                         task.ignore(state_msg='Already fetched - Ignore.')
                         continue
 
+                    self.trace.add("extraction_attempted")
                     result, exception = job.run()
                     self._raise_if_stopped(stop_event)
 
                     if exception is None:
                         if result:
                             contents.append((article_url, channel_group, result))
+                            self.trace.add("extraction_succeeded")
                             if content_handler:
                                 content_handler(article_url, channel_group, result)
                             if task: task.success()
                         else:
                             # No content is not an error; it is a skip.
+                            self.trace.reject("extraction", "no_content", article_url)
                             if task: task.skip()
                     else:
+                        self.trace.reject("extraction", "failed", article_url)
                         if isinstance(exception, CrawlSession.Flow): raise exception        # Handled by context
 
                         expected = summarize_expected_crawl_exception(exception)
@@ -625,7 +651,8 @@ def build_pipeline(
         name: str,
         config: dict,
         log_callback: Callable[..., None],
-        crawler_governor: GovernanceManager
+        crawler_governor: GovernanceManager,
+        trace: Optional[CrawlTrace] = None,
 ):
     d_fetcher_name = config.get('d_fetcher_name', 'N/A')
     d_fetcher_init_param = config.get('d_fetcher_init_param', {})
@@ -650,7 +677,8 @@ def build_pipeline(
         e_fetcher=e_fetcher,
         extractor=extractor,
         log_callback=log_callback,
-        crawler_governor=crawler_governor
+        crawler_governor=crawler_governor,
+        trace=trace,
     )
     return pipeline
 
@@ -658,15 +686,17 @@ def build_pipeline(
 def drive_pipeline_batch(
         pipeline: CrawlPipeline,
         config: dict,
-        stop_event: Optional[threading.Event] = None):
+        stop_event: Optional[threading.Event] = None,
+        max_articles: Optional[int] = None):
     with pipeline.lifecycle():
-        _drive_pipeline_batch_active(pipeline, config, stop_event)
+        _drive_pipeline_batch_active(pipeline, config, stop_event, max_articles=max_articles)
 
 
 def _drive_pipeline_batch_active(
         pipeline: CrawlPipeline,
         config: dict,
-        stop_event: Optional[threading.Event] = None):
+        stop_event: Optional[threading.Event] = None,
+        max_articles: Optional[int] = None):
     """Run one batch while the caller owns the pipeline lifecycle."""
     entry_points = config.get('entry_points', {})
     start_date, end_date = config.get('period_filter', (None, None))
@@ -706,8 +736,19 @@ def _drive_pipeline_batch_active(
         stop_event=stop_event)
     pipeline._raise_if_stopped(stop_event)
 
+    if max_articles is not None:
+        limit = max(0, int(max_articles))
+        limited_out = max(0, len(pipeline.articles) - limit)
+        if limited_out:
+            pipeline.log(
+                f"Trial limit: processing {limit} of {len(pipeline.articles)} discovered articles."
+            )
+            pipeline.trace.add("articles_limited_out", limited_out)
+            pipeline.articles = pipeline.articles[:limit]
+
     # =============== 3. Extract Articles ===============
 
+    url_filter = config.get('url_filter', None)
     article_filter = config.get('article_filter', None)
     content_handler = config.get('content_handler', None)
     exception_handler = config.get('exception_handler', None)
@@ -716,6 +757,7 @@ def _drive_pipeline_batch_active(
     extractor_kwargs = config.get('extractor_kwargs', { })
 
     pipeline.extract_articles(
+        url_filter=url_filter,
         article_filter=article_filter,
         content_handler=content_handler,
         exception_handler=exception_handler,
@@ -729,10 +771,11 @@ def run_pipeline(
         name: str = 'default',
         config: dict = None,
         log_callback: Callable[..., None] = print,
-        crawler_governor: Optional[GovernanceManager] = None):
+    crawler_governor: Optional[GovernanceManager] = None,
+    trace: Optional[CrawlTrace] = None):
     if not config:
         raise ValueError("Config is required for pipeline.")
-    pipeline = build_pipeline(name, config, log_callback, crawler_governor)
+    pipeline = build_pipeline(name, config, log_callback, crawler_governor, trace=trace)
     try:
         drive_pipeline_batch(pipeline, config)
     finally:

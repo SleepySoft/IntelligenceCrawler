@@ -7,10 +7,38 @@ UI 只能表达 ``CRAWLER_CONFIG`` 的一部分。加载现有配置后，不能
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 
 _MISSING = object()
+
+
+@dataclass(frozen=True)
+class ConfigChange:
+    path: str
+    before: Any
+    after: Any
+
+
+def _collect_changes(before: Any, after: Any, path: str = "") -> List[ConfigChange]:
+    if before == after:
+        return []
+    if isinstance(before, dict) and isinstance(after, dict):
+        changes: List[ConfigChange] = []
+        for key in sorted(before.keys() | after.keys(), key=str):
+            child_path = f"{path}.{key}" if path else str(key)
+            changes.extend(_collect_changes(
+                before.get(key, _MISSING),
+                after.get(key, _MISSING),
+                child_path,
+            ))
+        return changes
+    return [ConfigChange(
+        path=path or "<root>",
+        before="<missing>" if before is _MISSING else before,
+        after="<missing>" if after is _MISSING else after,
+    )]
 
 
 def _merge_changed_value(base: Any, before: Any, after: Any) -> Any:
@@ -124,3 +152,8 @@ class PlaygroundConfigState:
                 )
 
         return result
+
+    def changes(self, current_projection: Dict[str, Any]) -> List[ConfigChange]:
+        if self._baseline is None:
+            return []
+        return _collect_changes(self._baseline, self.merge(current_projection))
